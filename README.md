@@ -4,7 +4,15 @@
 
 ## Download 
 
-**[Click to Download](https://github.com/WhitecrowAurora/lora-rescripts/releases/)**
+<p align="center">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/releases/">
+    <img src="https://img.shields.io/badge/Download-Latest%20Release-2ea44f?style=for-the-badge&logo=github&logoColor=white" alt="Download Latest Release">
+  </a>
+</p>
+
+<p align="center">
+  <strong><a href="https://github.com/WhitecrowAurora/lora-rescripts/releases/">Open Releases Download Page</a></strong>
+</p>
 
 # SD-reScripts
 

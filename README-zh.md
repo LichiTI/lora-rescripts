@@ -4,7 +4,15 @@
 
 ## 下载
 
-**[点击下载](https://github.com/WhitecrowAurora/lora-rescripts/releases/)**
+<p align="center">
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/releases/">
+    <img src="https://img.shields.io/badge/%E7%82%B9%E5%87%BB%E4%B8%8B%E8%BD%BD-%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC-2ea44f?style=for-the-badge&logo=github&logoColor=white" alt="点击下载最新版本">
+  </a>
+</p>
+
+<p align="center">
+  <strong><a href="https://github.com/WhitecrowAurora/lora-rescripts/releases/">进入 Releases 下载页</a></strong>
+</p>
 
 # SD-reScripts
 
