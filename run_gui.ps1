@@ -181,7 +181,7 @@ $mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("accelera
 if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
     if ($runtimeName -eq "blackwell") {
         Write-Host -ForegroundColor Yellow "Blackwell experimental dependencies are not installed yet. Running install_blackwell.ps1..."
-        & (Join-Path $repoRoot "install_blackwell.ps1")
+        & (Join-Path $repoRoot "install_blackwell.ps1") -TorchChannel "czmahi-20250502"
     }
     else {
         Write-Host -ForegroundColor Yellow "Dependencies are not installed yet. Running install.ps1..."

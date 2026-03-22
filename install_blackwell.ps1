@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("stable", "nightly")]
-    [string]$TorchChannel = "stable",
+    [ValidateSet("stable", "nightly", "panchovix-20250321", "czmahi-20250502")]
+    [string]$TorchChannel = "czmahi-20250502",
     [string]$XformersWheel = "",
     [switch]$SkipXformers,
     [switch]$AllowOfficialXformersFallback
@@ -54,7 +54,8 @@ function Invoke-OptionalStep {
 
 function Resolve-XformersWheel {
     param (
-        [string]$RequestedWheel
+        [string]$RequestedWheel,
+        [string]$Profile
     )
 
     if ($RequestedWheel -and (Test-Path $RequestedWheel)) {
@@ -77,6 +78,10 @@ function Resolve-XformersWheel {
         Write-Host -ForegroundColor Yellow "Downloading Blackwell xformers wheel..."
         Invoke-WebRequest -Uri $RequestedWheel -OutFile $downloadPath
         return $downloadPath
+    }
+
+    if (-not $RequestedWheel -and $Profile -eq "czmahi-20250502") {
+        return Resolve-XformersWheel -RequestedWheel "https://huggingface.co/czmahi/xformers-windows-torch2.8-cu128-py312/resolve/main/latest-torch2.8-python3.12-xformers-comfyui-windows/xformers-0.0.31%2B8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl" -Profile ""
     }
 
     $searchRoots = @(
@@ -127,7 +132,23 @@ if (-not (Test-PipReady -PythonExe $blackwellPython)) {
 Set-Location $repoRoot
 
 $torchInstallArgs = @()
-if ($TorchChannel -eq "nightly") {
+if ($TorchChannel -eq "panchovix-20250321") {
+    $torchInstallArgs = @(
+        "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-warn-script-location",
+        "torch==2.8.0.dev20250320+cu128",
+        "torchvision==0.22.0.dev20250321+cu128",
+        "--index-url", "https://download.pytorch.org/whl/nightly/cu128"
+    )
+}
+elseif ($TorchChannel -eq "czmahi-20250502") {
+    $torchInstallArgs = @(
+        "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-warn-script-location",
+        "https://download.pytorch.org/whl/nightly/cu128/torch-2.8.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl",
+        "https://download.pytorch.org/whl/nightly/cu128/torchvision-0.22.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl",
+        "https://download.pytorch.org/whl/nightly/cu128/torchaudio-2.6.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl"
+    )
+}
+elseif ($TorchChannel -eq "nightly") {
     $torchInstallArgs = @(
         "-m", "pip", "install", "--upgrade", "--no-warn-script-location", "--pre",
         "torch", "torchvision",
@@ -155,7 +176,7 @@ Invoke-Step "Installing project dependencies into python_blackwell..." {
 }
 
 if (-not $SkipXformers) {
-    $resolvedWheel = Resolve-XformersWheel -RequestedWheel $XformersWheel
+    $resolvedWheel = Resolve-XformersWheel -RequestedWheel $XformersWheel -Profile $TorchChannel
     if ($resolvedWheel) {
         Invoke-Step "Installing Blackwell xformers wheel from local file..." {
             & $blackwellPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
