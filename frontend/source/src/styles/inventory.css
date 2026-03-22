@@ -1,0 +1,123 @@
+.coverage-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.coverage-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.coverage-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.coverage-list.loading {
+  display: block;
+  color: var(--muted);
+}
+
+.coverage-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, #cbe6df 72%, white 28%);
+  color: #1f5a52;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.coverage-pill-muted {
+  background: rgba(31, 29, 26, 0.07);
+  color: var(--muted);
+}
+
+.schema-browser {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.9rem;
+}
+
+.schema-browser.loading {
+  display: block;
+  color: var(--muted);
+}
+
+.schema-card {
+  padding: 1rem;
+  border: 1px solid rgba(31, 29, 26, 0.1);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.schema-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.schema-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.schema-hash {
+  display: inline-flex;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(31, 29, 26, 0.06);
+  color: var(--muted);
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.76rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  padding: 0.9rem 0.7rem;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+tbody td {
+  padding: 0.95rem 0.7rem;
+  border-bottom: 1px solid rgba(31, 29, 26, 0.08);
+  vertical-align: top;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.method {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3.6rem;
+  padding: 0.26rem 0.56rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.method-get {
+  background: color-mix(in srgb, #cbe6df 72%, white 28%);
+  color: #1f5a52;
+}
+
+.method-post {
+  background: color-mix(in srgb, var(--accent-soft) 75%, white 25%);
+  color: #8d2c13;
+}

@@ -1,67 +1,164 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
-script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-create_venv=true
+set -euo pipefail
 
-while [ -n "$1" ]; do
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+disable_venv=0
+allow_external_python="${MIKAZUKI_ALLOW_SYSTEM_PYTHON:-0}"
+
+while (($#)); do
     case "$1" in
         --disable-venv)
-            create_venv=false
-            shift
-            ;;
-        *)
-            shift
+            disable_venv=1
             ;;
     esac
+    shift
 done
 
-if $create_venv; then
-    echo "Creating python venv..."
-    python3 -m venv venv
-    source "$script_dir/venv/bin/activate"
-    echo "active venv"
-fi
+export HF_HOME="${HF_HOME:-huggingface}"
+export PYTHONUTF8=1
+export PIP_DISABLE_PIP_VERSION_CHECK=1
 
-echo "Installing torch & xformers..."
+portable_python="$script_dir/python/bin/python"
+venv_python="$script_dir/venv/bin/python"
+portable_marker="$script_dir/python/.deps_installed"
+venv_marker="$script_dir/venv/.deps_installed"
 
-cuda_version=$(nvidia-smi | grep -oiP 'CUDA Version: \K[\d\.]+')
+python_exe=""
+deps_marker=""
 
-if [ -z "$cuda_version" ]; then
-    cuda_version=$(nvcc --version | grep -oiP 'release \K[\d\.]+')
-fi
-cuda_major_version=$(echo "$cuda_version" | awk -F'.' '{print $1}')
-cuda_minor_version=$(echo "$cuda_version" | awk -F'.' '{print $2}')
+find_system_python() {
+    if [[ -n "${PYTHON:-}" ]]; then
+        if [[ -x "${PYTHON}" ]]; then
+            printf '%s\n' "${PYTHON}"
+            return 0
+        fi
+        if command -v "${PYTHON}" >/dev/null 2>&1; then
+            command -v "${PYTHON}"
+            return 0
+        fi
+    fi
 
-echo "CUDA Version: $cuda_version"
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
 
+    if command -v python >/dev/null 2>&1; then
+        command -v python
+        return 0
+    fi
 
-if (( cuda_major_version >= 12 )); then
-    echo "install torch 2.7.0+cu128"
-    pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-    pip install --no-deps xformers==0.0.30 --extra-index-url https://download.pytorch.org/whl/cu128
-elif (( cuda_major_version == 11 && cuda_minor_version >= 8 )); then
-    echo "install torch 2.4.0+cu118"
-    pip install torch==2.4.0+cu118 torchvision==0.19.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
-    pip install --no-deps xformers==0.0.27.post2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
-elif (( cuda_major_version == 11 && cuda_minor_version >= 6 )); then
-    echo "install torch 1.12.1+cu116"
-    pip install torch==1.12.1+cu116 torchvision==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
-    # for RTX3090+cu113/cu116 xformers, we need to install this version from source. You can also try xformers==0.0.18
-    pip install --upgrade git+https://github.com/facebookresearch/xformers.git@0bad001ddd56c080524d37c84ff58d9cd030ebfd
-    pip install triton==2.0.0.dev20221202
-elif (( cuda_major_version == 11 && cuda_minor_version >= 2 )); then
-    echo "install torch 1.12.1+cu113"
-    pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 --extra-index-url https://download.pytorch.org/whl/cu116
-    pip install --upgrade git+https://github.com/facebookresearch/xformers.git@0bad001ddd56c080524d37c84ff58d9cd030ebfd
-    pip install triton==2.0.0.dev20221202
-else
-    echo "Unsupported cuda version:$cuda_version"
+    echo "No usable system Python was found. Install python3 or set \$PYTHON first." >&2
     exit 1
+}
+
+test_pip_ready() {
+    local python_bin="$1"
+    "$python_bin" -m pip --version >/dev/null 2>&1
+}
+
+invoke_step() {
+    local message="$1"
+    shift
+    echo "$message"
+    "$@"
+}
+
+invoke_optional_step() {
+    local message="$1"
+    local warning_message="$2"
+    shift 2
+    echo "$message"
+    if ! "$@"; then
+        echo "$warning_message"
+    fi
+}
+
+select_python() {
+    if [[ -x "$portable_python" ]]; then
+        echo "Using portable Python..."
+        if ! test_pip_ready "$portable_python"; then
+            cat <<'EOF'
+Portable Python is incomplete: pip is not available.
+
+This project now assumes the bundled python folder is already a ready-to-run environment for packaging and distribution.
+Normal installation will not auto-bootstrap embedded Python anymore.
+
+Recommended fix:
+1. Replace the bundled python folder with a prepared portable Python environment.
+2. If you are repairing a raw embeddable Python manually, run setup_embeddable_python.bat yourself.
+EOF
+            exit 1
+        fi
+        python_exe="$portable_python"
+        deps_marker="$portable_marker"
+        return 0
+    fi
+
+    if [[ -x "$venv_python" ]]; then
+        echo "Using existing project virtual environment..."
+        if ! test_pip_ready "$venv_python"; then
+            echo "Project virtual environment is incomplete: pip is not available. Repair or recreate ./venv first." >&2
+            exit 1
+        fi
+        python_exe="$venv_python"
+        deps_marker="$venv_marker"
+        return 0
+    fi
+
+    if [[ "$allow_external_python" != "1" ]]; then
+        cat >&2 <<EOF
+No project-local Python environment was found.
+
+This installer is locked to project-local Python by default to avoid leaking packages into the host machine.
+
+Expected one of:
+- $portable_python
+- $venv_python
+
+Recommended fix:
+1. Bundle a ready-to-run portable Python in ./python
+2. Or set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 once to bootstrap a project-local ./venv for development
+EOF
+        exit 1
+    fi
+
+    if [[ "$disable_venv" -eq 1 ]]; then
+        echo "install.bash no longer installs into the system Python by default. Remove --disable-venv and rerun with MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to bootstrap a project-local ./venv." >&2
+        exit 1
+    fi
+
+    local system_python
+    system_python="$(find_system_python)"
+    echo "No project-local Python found. MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 is set, creating a project-local venv from system Python..."
+    "$system_python" -m venv "$script_dir/venv"
+    python_exe="$venv_python"
+    deps_marker="$venv_marker"
+}
+
+select_python
+
+cd "$script_dir"
+
+invoke_step "Upgrading pip tooling..." \
+    "$python_exe" -m pip install --upgrade pip "setuptools<81" wheel
+
+invoke_step "Installing PyTorch and torchvision (CUDA 12.8 channel)..." \
+    "$python_exe" -m pip install --upgrade --prefer-binary \
+    torch==2.10.0+cu128 torchvision==0.25.0+cu128 \
+    --extra-index-url https://download.pytorch.org/whl/cu128
+
+invoke_optional_step \
+    "Installing xformers (optional)..." \
+    "Optional xformers installation failed. The GUI will still work and training can fall back to SDPA." \
+    "$python_exe" -m pip install --upgrade --prefer-binary xformers
+
+invoke_step "Installing project dependencies..." \
+    "$python_exe" -m pip install --upgrade --prefer-binary -r requirements.txt
+
+if [[ -n "$deps_marker" ]]; then
+    : > "$deps_marker"
 fi
-
-echo "Installing deps..."
-
-cd "$script_dir" || exit
-pip install --upgrade -r requirements.txt
 
 echo "Install completed"

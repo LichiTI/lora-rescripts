@@ -85,7 +85,19 @@ elseif (Test-Path $venvPython) {
     $markerPath = Join-Path $repoRoot "venv\.tageditor_installed"
 }
 else {
-    throw "No project Python found. Please set up the main environment first."
+    throw @"
+No project-local Python found for tag editor installation.
+
+Expected one of:
+- $tagEditorPortablePython
+- $tagEditorVenvPython
+- $portablePython
+- $venvPython
+
+Recommended fix:
+1. Prepare python_tageditor for the bundled tag editor runtime
+2. Or run install.ps1 first so the project can bootstrap .\venv intentionally
+"@
 }
 
 if (-not (Test-Path $tagEditorRequirements)) {

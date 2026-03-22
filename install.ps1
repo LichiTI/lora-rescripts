@@ -7,7 +7,9 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $portablePython = Join-Path $repoRoot "python\python.exe"
 $venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
-$depsMarker = Join-Path $repoRoot "python\.deps_installed"
+$portableMarker = Join-Path $repoRoot "python\.deps_installed"
+$venvMarker = Join-Path $repoRoot "venv\.deps_installed"
+$allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 
 function Test-PipReady {
     param (
@@ -75,18 +77,39 @@ Recommended fix:
 "@
     }
     $pythonExe = $portablePython
+    $markerPath = $portableMarker
 }
 elseif (Test-Path $venvPython) {
-    Write-Host -ForegroundColor Green "Using existing virtual environment..."
+    Write-Host -ForegroundColor Green "Using existing project virtual environment..."
+    if (-not (Test-PipReady -PythonExe $venvPython)) {
+        throw "Project virtual environment is incomplete: pip is not available. Repair or recreate .\venv first."
+    }
     $pythonExe = $venvPython
+    $markerPath = $venvMarker
 }
-else {
-    Write-Host -ForegroundColor Green "Creating venv for system Python..."
+elseif ($allowExternalPython) {
+    Write-Host -ForegroundColor Yellow "No project-local Python found. MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 is set, creating a project-local venv from system Python..."
     python -m venv (Join-Path $repoRoot "venv")
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create venv."
     }
     $pythonExe = $venvPython
+    $markerPath = $venvMarker
+}
+else {
+    throw @"
+No project-local Python environment was found.
+
+This installer is locked to project-local Python by default to avoid leaking packages into the host machine.
+
+Expected one of:
+- $portablePython
+- $venvPython
+
+Recommended fix:
+1. Bundle a ready-to-run portable Python in .\python
+2. Or set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 once to bootstrap a project-local .\venv for development
+"@
 }
 
 Set-Location $repoRoot
@@ -96,7 +119,7 @@ Invoke-Step "Upgrading pip tooling..." {
 }
 
 Invoke-Step "Installing PyTorch and torchvision (CUDA 12.8 channel)..." {
-    & $pythonExe -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    & $pythonExe -m pip install --upgrade --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
 }
 
 Invoke-OptionalStep "Installing xformers (optional)..." {
@@ -107,8 +130,8 @@ Invoke-Step "Installing project dependencies..." {
     & $pythonExe -m pip install --upgrade --prefer-binary -r requirements.txt
 }
 
-if (Test-Path $portablePython) {
-    Set-Content -Path $depsMarker -Value "" -Encoding ASCII
+if ($markerPath) {
+    Set-Content -Path $markerPath -Value "" -Encoding ASCII
 }
 
 Write-Host -ForegroundColor Green "Install completed"

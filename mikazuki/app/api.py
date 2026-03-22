@@ -491,3 +491,27 @@ async def get_presets() -> APIResponse:
 async def get_saved_params() -> APIResponse:
     saved_params = app_config["saved_params"]
     return APIResponseSuccess(data=saved_params)
+
+
+@router.get("/config/summary")
+async def get_config_summary() -> APIResponse:
+    return APIResponseSuccess(data={
+        "last_path": app_config["last_path"] or "",
+        "saved_param_keys": sorted((app_config["saved_params"] or {}).keys()),
+        "saved_param_count": len(app_config["saved_params"] or {}),
+        "config_path": str(app_config.path),
+    })
+
+
+@router.get("/scripts")
+async def get_available_scripts() -> APIResponse:
+    return APIResponseSuccess(data={
+        "scripts": [
+            {
+                "name": script_name,
+                "positional_args": script_positional_args.get(script_name, []),
+                "category": script_name.split("/", 1)[0] if "/" in script_name else "misc",
+            }
+            for script_name in avaliable_scripts
+        ]
+    })

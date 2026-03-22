@@ -144,6 +144,29 @@ def convert_sdxl_text_encoder_2_checkpoint(checkpoint, max_length):
     return new_sd, logit_scale
 
 
+def _normalize_wrapped_module_keys(state_dict, label):
+    normalized = {}
+    removed_keys = []
+
+    for key, value in state_dict.items():
+        if ".wrapped." in key:
+            unwrapped_key = key.replace(".wrapped.", ".")
+            if unwrapped_key not in state_dict:
+                normalized[unwrapped_key] = value
+            else:
+                removed_keys.append(key)
+            continue
+
+        normalized[key] = value
+
+    if removed_keys:
+        logger.info(
+            f"{label}: ignored wrapped compatibility keys: {', '.join(removed_keys)}"
+        )
+
+    return normalized
+
+
 # load state_dict without allocating new tensors
 def _load_state_dict_on_device(model, state_dict, device, dtype=None):
     # dtype will use fp32 as default
@@ -274,10 +297,12 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dty
     if "text_model.embeddings.position_ids" in te1_sd:
         te1_sd.pop("text_model.embeddings.position_ids")
 
+    te1_sd = _normalize_wrapped_module_keys(te1_sd, "text encoder 1")
     info1 = _load_state_dict_on_device(text_model1, te1_sd, device=map_location)  # remain fp32
     logger.info(f"text encoder 1: {info1}")
 
     converted_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(te2_sd, max_length=77)
+    converted_sd = _normalize_wrapped_module_keys(converted_sd, "text encoder 2")
     info2 = _load_state_dict_on_device(text_model2, converted_sd, device=map_location)  # remain fp32
     logger.info(f"text encoder 2: {info2}")
 

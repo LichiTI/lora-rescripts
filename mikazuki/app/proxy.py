@@ -134,8 +134,8 @@ def get_unavailable_message(url_type: str) -> str:
         )
     if status == "missing_dependencies":
         return (
-            "Tag Editor dependencies are not installed. Run install_tageditor.ps1 first. If main Python is 3.13, prepare a separate python_tageditor (Python 3.12) environment.\n"
-            "标签编辑器依赖尚未安装。请先运行 install_tageditor.ps1。如果主环境是 Python 3.13，请准备单独的 python_tageditor（Python 3.12）环境。"
+            "Tag Editor dependencies are not installed. Run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first. If main Python is 3.13, prepare a separate python_tageditor or venv-tageditor (Python 3.12) environment.\n"
+            "标签编辑器依赖尚未安装。请先运行 install_tageditor.ps1（Windows）或 install_tageditor.sh（Linux）。如果主环境是 Python 3.13，请准备单独的 python_tageditor 或 venv-tageditor（Python 3.12）环境。"
         )
     if status == "starting":
         return (

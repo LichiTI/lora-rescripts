@@ -337,3 +337,32 @@ def fix_config_types(config: dict):
     for k in keep_float_params:
         if k in config:
             config[k] = float(config[k])
+
+    validation_float_defaults = {
+        "validation_split": 0.0,
+    }
+    for key, default_value in validation_float_defaults.items():
+        if key not in config:
+            continue
+
+        value = config[key]
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            config[key] = default_value
+        else:
+            config[key] = float(value)
+
+    optional_validation_int_params = [
+        "validation_seed",
+        "validate_every_n_steps",
+        "validate_every_n_epochs",
+        "max_validation_steps",
+    ]
+    for key in optional_validation_int_params:
+        if key not in config:
+            continue
+
+        value = config[key]
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            del config[key]
+        else:
+            config[key] = int(value)

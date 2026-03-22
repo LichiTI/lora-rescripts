@@ -107,43 +107,36 @@ run `run_gui.ps1`, then program will open [http://127.0.0.1:28000](http://127.0.
 
 #### Installation
 
-Run `install.bash` will create a venv and install necessary deps. 
+Run `install.bash`.
+
+- if `python/bin/python` already exists, the installer will use it first
+- otherwise it will use `venv/bin/python` if present
+- otherwise it will create `venv` automatically unless you explicitly pass `--disable-venv`
+- it now installs the same base PyTorch / dependency stack as the current Windows installer
 
 #### Train
 
-run `bash run_gui.sh`, then program will open [http://127.0.0.1:28000](http://127.0.0.1:28000) automanticlly
+Run `bash run_gui.sh`, then program will open [http://127.0.0.1:28000](http://127.0.0.1:28000) automatically.
 
-## Legacy training through run script manually
+- `run_gui.sh` now auto-detects `python/bin/python`, `venv/bin/python`, or system python
+- if base dependencies are missing, it will run `install.bash` for you
+- if tag editor dependencies are missing and the current Python is compatible, it will run `install_tageditor.sh`
+- for mainland China mirror settings, use `bash run_gui_cn.sh`
 
-### Windows
+## Legacy Manual Scripts
 
-#### Installation
+These old script-first entry points are no longer the recommended workflow for normal users.
+Most of them have already been moved out of the repo root during cleanup and are kept only as reference material.
 
-Run `install.ps1` will automatically create a venv for you and install necessary deps.
+The recommended path is:
+- install with `install.ps1` / `install-cn.ps1` / `install.bash`
+- launch with `run_gui.ps1` / `run_gui.sh` / `run_gui_cn.sh` / `run.bat`
 
-#### Train
-
-Edit `train.ps1`, and run it.
-
-### Linux
-
-#### Installation
-
-Run `install.bash` will create a venv and install necessary deps.
-
-#### Train
-
-Training script `train.sh` **will not** activate venv for you. You should activate venv first.
-
-```sh
-source venv/bin/activate
-```
-
-Edit `train.sh`, and run it.
+If you specifically need old notebooks or manual script references, check the `.delete` quarantine folder first.
 
 #### TensorBoard
 
-Run `tensorboard.ps1` will start TensorBoard at http://localhost:6006/
+TensorBoard is already integrated into the GUI startup path.
 
 ## Program arguments
 

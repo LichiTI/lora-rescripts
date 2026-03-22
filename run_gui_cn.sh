@@ -1,12 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-source "./venv/bin/activate"
+set -euo pipefail
 
-export HF_HOME=huggingface
-export HF_ENDPOINT=https://hf-mirror.com
-export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+export HF_HOME="${HF_HOME:-huggingface}"
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 export PYTHONUTF8=1
 
-python gui.py "$@"
-
-
+exec bash "$script_dir/run_gui.sh" "$@"

@@ -106,11 +106,21 @@ git clone --recurse-submodules https://github.com/WhitecrowAurora/lora-rescripts
 
 #### 安装
 
-运行 `install.bash` 将创建虚拟环境并安装必要的依赖。
+运行 `install.bash`。
+
+- 如果已经存在 `python/bin/python`，安装脚本会优先使用它
+- 否则如果存在 `venv/bin/python`，会优先使用现有虚拟环境
+- 如果两者都没有，则默认自动创建 `venv`，除非你明确传入 `--disable-venv`
+- 现在它会与当前 Windows 安装器尽量保持同一套基础 PyTorch / 依赖策略
 
 #### 训练
 
-运行 `bash run_gui.sh`，程序将自动打开 [http://127.0.0.1:28000](http://127.0.0.1:28000)
+运行 `bash run_gui.sh`，程序将自动打开 [http://127.0.0.1:28000](http://127.0.0.1:28000)。
+
+- `run_gui.sh` 现在会自动检测 `python/bin/python`、`venv/bin/python` 或系统 Python
+- 如果基础依赖缺失，它会自动调用 `install.bash`
+- 如果标签编辑器依赖缺失且当前 Python 版本兼容，它会自动调用 `install_tageditor.sh`
+- 中国大陆镜像环境可使用 `bash run_gui_cn.sh`
 
 ### Docker
 
@@ -168,39 +178,20 @@ services:
  
 关于容器使用 GPU 相关依赖安装问题，请自行搜索查阅资料解决。
 
-## 通过手动运行脚本的传统训练方式
+## 传统手动脚本入口
 
-### Windows
+这些旧的脚本式工作流，已经不再适合作为普通用户的主流程。
+其中大部分也已经在整理过程中从根目录移走，仅保留为参考资料。
 
-#### 安装
+推荐方式是：
+- 使用 `install.ps1` / `install-cn.ps1` / `install.bash` 安装
+- 使用 `run_gui.ps1` / `run_gui.sh` / `run_gui_cn.sh` / `run.bat` 启动
 
-运行 `install.ps1` 将自动为您创建虚拟环境并安装必要的依赖。
-
-#### 训练
-
-编辑 `train.ps1`，然后运行它。
-
-### Linux
-
-#### 安装
-
-运行 `install.bash` 将创建虚拟环境并安装必要的依赖。
-
-#### 训练
-
-训练
-
-脚本 `train.sh` **不会** 为您激活虚拟环境。您应该先激活虚拟环境。
-
-```sh
-source venv/bin/activate
-```
-
-编辑 `train.sh`，然后运行它。
+如果你确实需要查看旧 notebook 或旧脚本入口，请先到 `.delete` 隔离目录里找。
 
 #### TensorBoard
 
-运行 `tensorboard.ps1` 将在 http://localhost:6006/ 启动 TensorBoard
+TensorBoard 已经集成到 GUI 启动流程中。
 
 ## 程序参数
 

@@ -5,9 +5,11 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $portablePython = Join-Path $repoRoot "python\python.exe"
 $venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
-$depsMarker = Join-Path $repoRoot "python\.deps_installed"
+$portableDepsMarker = Join-Path $repoRoot "python\.deps_installed"
+$venvDepsMarker = Join-Path $repoRoot "venv\.deps_installed"
 $portableTagEditorPython = Join-Path $repoRoot "python_tageditor\python.exe"
 $venvTagEditorPython = Join-Path $repoRoot "venv-tageditor\Scripts\python.exe"
+$allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 
 function Test-PipReady {
     param (
@@ -83,30 +85,84 @@ function Get-PythonMinorVersion {
     return $version.Trim()
 }
 
-if (Test-Path $portablePython) {
-    Write-Host -ForegroundColor Green "Using portable Python..."
-    if (-not (Test-PipReady -PythonExe $portablePython)) {
-        throw "Portable Python is incomplete: pip is not available. Repair or replace the bundled python folder first."
-    }
-
-    $mainModulesReady = Test-ModulesReady -PythonExe $portablePython -Modules @("accelerate", "torch", "fastapi", "toml")
-    if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
-        Write-Host -ForegroundColor Yellow "Dependencies are not installed yet. Running install.ps1..."
-        & (Join-Path $repoRoot "install.ps1")
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not (Test-ModulesReady -PythonExe $portablePython -Modules @("accelerate", "torch", "fastapi", "toml"))) {
-            throw "Dependency installation failed."
+function Get-MainPythonSelection {
+    if (Test-Path $portablePython) {
+        Write-Host -ForegroundColor Green "Using portable Python..."
+        if (-not (Test-PipReady -PythonExe $portablePython)) {
+            throw "Portable Python is incomplete: pip is not available. Repair or replace the bundled python folder first."
+        }
+        return @{
+            PythonExe = $portablePython
+            DepsMarker = $portableDepsMarker
         }
     }
 
-    $pythonExe = $portablePython
+    if (Test-Path $venvPython) {
+        Write-Host -ForegroundColor Green "Using project virtual environment..."
+        if (-not (Test-PipReady -PythonExe $venvPython)) {
+            throw "Project virtual environment is incomplete: pip is not available. Repair or recreate .\venv first."
+        }
+        return @{
+            PythonExe = $venvPython
+            DepsMarker = $venvDepsMarker
+        }
+    }
+
+    if ($allowExternalPython) {
+        Write-Host -ForegroundColor Yellow "No project-local Python found. MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 is set, bootstrapping a project-local venv via install.ps1..."
+        & (Join-Path $repoRoot "install.ps1")
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to bootstrap a project-local Python environment."
+        }
+
+        if (Test-Path $portablePython) {
+            return @{
+                PythonExe = $portablePython
+                DepsMarker = $portableDepsMarker
+            }
+        }
+
+        if (Test-Path $venvPython) {
+            return @{
+                PythonExe = $venvPython
+                DepsMarker = $venvDepsMarker
+            }
+        }
+
+        throw "install.ps1 finished, but no project-local Python environment was created."
+    }
+
+    throw @"
+No project-local Python environment was found.
+
+This build is locked to project-local Python by default to avoid leaking installs into the host machine.
+
+Expected one of:
+- $portablePython
+- $venvPython
+
+Recommended fix:
+1. Bundle a ready-to-run portable Python in .\python
+2. Or create a project-local venv in .\venv for development
+
+Developer override:
+- Set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 and rerun to bootstrap a project-local venv intentionally.
+"@
 }
-elseif (Test-Path $venvPython) {
-    Write-Host -ForegroundColor Green "Using virtual environment..."
-    $pythonExe = $venvPython
-}
-else {
-    Write-Host -ForegroundColor Blue "No project Python found, using system python..."
-    $pythonExe = "python"
+
+$mainPython = Get-MainPythonSelection
+$pythonExe = $mainPython.PythonExe
+$depsMarker = $mainPython.DepsMarker
+$mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("accelerate", "torch", "fastapi", "toml")
+if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
+    Write-Host -ForegroundColor Yellow "Dependencies are not installed yet. Running install.ps1..."
+    & (Join-Path $repoRoot "install.ps1")
+    $mainPython = Get-MainPythonSelection
+    $pythonExe = $mainPython.PythonExe
+    $depsMarker = $mainPython.DepsMarker
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not (Test-ModulesReady -PythonExe $pythonExe -Modules @("accelerate", "torch", "fastapi", "toml"))) {
+        throw "Dependency installation failed."
+    }
 }
 
 if (-not ($args -contains "--disable-tageditor")) {
@@ -145,7 +201,8 @@ if (-not ($args -contains "--disable-tageditor")) {
         }
         $tagEditorModulesReady = Test-ModulesReady -PythonExe $tagEditorPython -Modules @("gradio", "transformers", "timm", "print_color")
         $tagEditorVersionsReady = Test-PackageConstraints -PythonExe $tagEditorPython -Constraints $tagEditorPackageConstraints
-        if (-not (Test-Path $tagEditorMarker) -or -not $tagEditorModulesReady -or -not $tagEditorVersionsReady) {
+        $tagEditorMarkerReady = (-not $tagEditorMarker) -or (Test-Path $tagEditorMarker)
+        if (-not $tagEditorMarkerReady -or -not $tagEditorModulesReady -or -not $tagEditorVersionsReady) {
             if (-not (Test-PipReady -PythonExe $tagEditorPython)) {
                 throw "Tag editor Python is incomplete: pip is not available."
             }
@@ -154,7 +211,8 @@ if (-not ($args -contains "--disable-tageditor")) {
             & (Join-Path $repoRoot "install_tageditor.ps1")
             $tagEditorModulesReady = Test-ModulesReady -PythonExe $tagEditorPython -Modules @("gradio", "transformers", "timm", "print_color")
             $tagEditorVersionsReady = Test-PackageConstraints -PythonExe $tagEditorPython -Constraints $tagEditorPackageConstraints
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tagEditorMarker) -or -not $tagEditorModulesReady -or -not $tagEditorVersionsReady) {
+            $tagEditorMarkerReady = (-not $tagEditorMarker) -or (Test-Path $tagEditorMarker)
+            if ($LASTEXITCODE -ne 0 -or -not $tagEditorMarkerReady -or -not $tagEditorModulesReady -or -not $tagEditorVersionsReady) {
                 throw "Tag editor dependency installation failed."
             }
         }

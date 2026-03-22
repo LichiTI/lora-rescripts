@@ -1,0 +1,38 @@
+@media (max-width: 920px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .hero {
+    grid-template-columns: 1fr;
+  }
+
+  .app-sidebar {
+    position: static;
+  }
+
+  .section-head {
+    flex-direction: column;
+    align-items: start;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    width: min(100vw - 1rem, 100%);
+    padding-top: 0.8rem;
+  }
+
+  .page-hero,
+  .panel {
+    border-radius: 1.15rem;
+  }
+
+  .api-panel {
+    overflow-x: auto;
+  }
+
+  table {
+    min-width: 760px;
+  }
+}

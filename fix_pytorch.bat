@@ -97,15 +97,23 @@ if "%CUDA_CHOICE%"=="" set "CUDA_CHOICE=1"
 if "%CUDA_CHOICE%"=="1" (
     set "INDEX_URL=https://download.pytorch.org/whl/cu128"
     set "CHANNEL_NAME=CUDA 12.8"
+    set "TORCH_SPEC=torch==2.10.0+cu128"
+    set "TORCHVISION_SPEC=torchvision==0.25.0+cu128"
 ) else if "%CUDA_CHOICE%"=="2" (
     set "INDEX_URL=https://download.pytorch.org/whl/cu126"
     set "CHANNEL_NAME=CUDA 12.6"
+    set "TORCH_SPEC=torch"
+    set "TORCHVISION_SPEC=torchvision"
 ) else if "%CUDA_CHOICE%"=="3" (
     set "INDEX_URL=https://download.pytorch.org/whl/cu124"
     set "CHANNEL_NAME=CUDA 12.4"
+    set "TORCH_SPEC=torch"
+    set "TORCHVISION_SPEC=torchvision"
 ) else if "%CUDA_CHOICE%"=="4" (
     set "INDEX_URL=https://download.pytorch.org/whl/cpu"
     set "CHANNEL_NAME=CPU"
+    set "TORCH_SPEC=torch"
+    set "TORCHVISION_SPEC=torchvision"
 ) else (
     echo [ERROR] Invalid option.
     echo.
@@ -180,7 +188,7 @@ for /d %%D in ("%SITE_PACKAGES%\torch-*.dist-info" "%SITE_PACKAGES%\torchvision-
 )
 
 echo Installing torch and torchvision from %CHANNEL_NAME% for %ENV_NAME%...
-"%PYTHON_EXE%" -m pip install --upgrade --force-reinstall --no-cache-dir torch torchvision --index-url %INDEX_URL%
+"%PYTHON_EXE%" -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary %TORCH_SPEC% %TORCHVISION_SPEC% --extra-index-url %INDEX_URL%
 if errorlevel 1 (
     echo.
     echo [ERROR] Failed to install torch/torchvision for %ENV_NAME%.

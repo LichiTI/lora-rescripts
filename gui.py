@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -15,6 +16,7 @@ from mikazuki.log import log
 
 APP_NAME = "SD-reScripts"
 APP_VERSION = "v1.0.1"
+ALLOW_SYSTEM_PYTHON_ENV = "MIKAZUKI_ALLOW_SYSTEM_PYTHON"
 
 parser = argparse.ArgumentParser(description="GUI for stable diffusion training")
 parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -48,6 +50,42 @@ def get_system_locale():
     return system_locale
 
 
+def path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def using_project_local_main_python() -> bool:
+    repo_root = base_dir_path().resolve()
+    executable = Path(sys.executable).resolve()
+    allowed_roots = [
+        (repo_root / "python").resolve(),
+        (repo_root / "venv").resolve(),
+    ]
+    return any(path_is_within(executable, root) for root in allowed_roots)
+
+
+def ensure_project_local_main_python():
+    if os.environ.get(ALLOW_SYSTEM_PYTHON_ENV, "") == "1":
+        log.warning(
+            "%s=1 is set. Allowing a non-project Python runtime for development.",
+            ALLOW_SYSTEM_PYTHON_ENV,
+        )
+        return
+
+    if using_project_local_main_python():
+        return
+
+    raise RuntimeError(
+        "This build is locked to project-local Python by default. "
+        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python or ./venv. "
+        "For development only, set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to override this guard intentionally."
+    )
+
+
 @catch_exception
 def run_tensorboard():
     if importlib.util.find_spec("pkg_resources") is None:
@@ -63,7 +101,12 @@ def run_tensorboard():
 def run_tag_editor():
     tag_editor_root = base_dir_path() / "mikazuki/dataset-tag-editor"
     tag_editor_launch = base_dir_path() / "mikazuki/dataset-tag-editor/scripts/launch.py"
-    tag_editor_python = base_dir_path() / "python_tageditor/python.exe"
+    dedicated_tag_editor_pythons = [
+        base_dir_path() / "python_tageditor/python.exe",
+        base_dir_path() / "python_tageditor/bin/python",
+        base_dir_path() / "venv-tageditor/Scripts/python.exe",
+        base_dir_path() / "venv-tageditor/bin/python",
+    ]
     if not tag_editor_launch.exists():
         log.warning("tag editor launcher is missing, skip starting tag editor.")
         os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "missing_launcher"
@@ -71,15 +114,16 @@ def run_tag_editor():
         return
 
     python_exe = sys.executable
-    if tag_editor_python.exists():
-        python_exe = str(tag_editor_python)
+    dedicated_python = next((path for path in dedicated_tag_editor_pythons if path.exists()), None)
+    if dedicated_python is not None:
+        python_exe = str(dedicated_python)
         os.environ["MIKAZUKI_TAGEDITOR_RUNTIME"] = "dedicated"
     else:
         required_modules = ["gradio", "transformers", "timm", "print_color"]
         missing_modules = [name for name in required_modules if importlib.util.find_spec(name) is None]
         if missing_modules:
             log.warning(
-                "tag editor dependencies are missing (%s), run install_tageditor.ps1 first.",
+                "tag editor dependencies are missing (%s), run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first.",
                 ", ".join(missing_modules),
             )
             os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "missing_dependencies"
@@ -103,6 +147,7 @@ def run_tag_editor():
 
 
 def launch():
+    ensure_project_local_main_python()
     log.info(f"Starting {APP_NAME} Mikazuki GUI...")
     log.info(f"Base directory: {base_dir_path()}, Working directory: {os.getcwd()}")
     log.info(f"{platform.system()} Python {platform.python_version()} {sys.executable}")
