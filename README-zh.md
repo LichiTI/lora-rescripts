@@ -215,5 +215,4 @@ TensorBoard 已经集成到 GUI 启动流程中。
 
 ## 鸣谢
 
-特别感谢<p><a href="https://github.com/DrRelax599">DrRelax599</a>
-</p> 在开发过程中参与测试，并帮助改进稳定性。
+特别感谢<p><a href="https://github.com/DrRelax599">DrRelax599</a></p> 在开发过程中参与测试，并帮助改进稳定性。

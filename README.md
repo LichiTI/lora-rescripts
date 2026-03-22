@@ -160,5 +160,4 @@ TensorBoard is already integrated into the GUI startup path.
 
 ## Acknowledgements / 
 
-Special thanks to <p><a href="https://github.com/DrRelax599">DrRelax599</a>
-</p> for testing the project and helping improve stability during development.
+Special thanks to <p><a href="https://github.com/DrRelax599">DrRelax599</a></p> for testing the project and helping improve stability during development.
