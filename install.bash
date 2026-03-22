@@ -152,7 +152,7 @@ invoke_step "Installing PyTorch and torchvision (CUDA 12.8 channel)..." \
 invoke_optional_step \
     "Installing xformers (optional)..." \
     "Optional xformers installation failed. The GUI will still work and training can fall back to SDPA." \
-    "$python_exe" -m pip install --upgrade --prefer-binary xformers
+    "$python_exe" -m pip install --upgrade --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
 
 invoke_step "Installing project dependencies..." \
     "$python_exe" -m pip install --upgrade --prefer-binary -r requirements.txt

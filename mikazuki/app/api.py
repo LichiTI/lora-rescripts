@@ -445,6 +445,7 @@ async def list_avaliable_cards() -> APIResponse:
     return APIResponseSuccess(data={
         "cards": printable_devices,
         "xformers": {
+            "version": xformers_info.get("version"),
             "installed": xformers_info["installed"],
             "supported": xformers_info["supported"],
             "reason": xformers_info["reason"],

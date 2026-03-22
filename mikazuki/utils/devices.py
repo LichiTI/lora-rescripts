@@ -7,6 +7,8 @@ xformers_status = {
     "checked": False,
     "installed": False,
     "supported": False,
+    "verified": False,
+    "version": None,
     "reason": "Not checked yet.",
     "per_gpu": {},
 }
@@ -19,6 +21,55 @@ def _short_exc_message(exc) -> str:
     return message.splitlines()[0]
 
 
+def _is_inconclusive_xformers_probe_error(reason: str) -> bool:
+    lowered = reason.lower()
+    return (
+        "no operator found" in lowered
+        or "memory_efficient_attention_forward" in lowered
+        or "operator wasn't built" in lowered
+    )
+
+
+def _probe_xformers_runtime(torch_module, device):
+    import xformers.ops as xops
+
+    last_reason = ""
+    tested_dtypes = []
+
+    for dtype in (torch_module.float16, torch_module.bfloat16):
+        tested_dtypes.append(str(dtype).replace("torch.", ""))
+        try:
+            q = torch_module.randn((1, 32, 8, 64), device=device, dtype=dtype)
+            k = torch_module.randn((1, 32, 8, 64), device=device, dtype=dtype)
+            v = torch_module.randn((1, 32, 8, 64), device=device, dtype=dtype)
+            xops.memory_efficient_attention(q, k, v, attn_bias=None)
+            torch_module.cuda.synchronize(device)
+            return {
+                "supported": True,
+                "verified": True,
+                "reason": f"ok ({str(dtype).replace('torch.', '')})",
+            }
+        except Exception as exc:
+            last_reason = _short_exc_message(exc)
+
+    capability = torch_module.cuda.get_device_capability(device)
+    if capability[0] >= 12 and _is_inconclusive_xformers_probe_error(last_reason):
+        return {
+            "supported": True,
+            "verified": False,
+            "reason": (
+                "runtime probe was inconclusive on this newer GPU architecture "
+                f"(tested: {', '.join(tested_dtypes)}; last error: {last_reason})"
+            ),
+        }
+
+    return {
+        "supported": False,
+        "verified": False,
+        "reason": last_reason or f"runtime probe failed for {', '.join(tested_dtypes)}",
+    }
+
+
 def refresh_xformers_status(torch_module=None):
     if torch_module is None:
         import torch as torch_module
@@ -26,6 +77,8 @@ def refresh_xformers_status(torch_module=None):
     xformers_status["checked"] = True
     xformers_status["installed"] = False
     xformers_status["supported"] = False
+    xformers_status["verified"] = False
+    xformers_status["version"] = None
     xformers_status["reason"] = "Not checked yet."
     xformers_status["per_gpu"] = {}
 
@@ -34,43 +87,51 @@ def refresh_xformers_status(torch_module=None):
         return xformers_status
 
     try:
+        import xformers
         import xformers.ops as xops  # noqa: F401
     except Exception as exc:
         xformers_status["reason"] = f"xformers import failed: {_short_exc_message(exc)}"
         return xformers_status
 
     xformers_status["installed"] = True
+    xformers_status["version"] = getattr(xformers, "__version__", "unknown")
 
     overall_supported = True
+    overall_verified = True
     first_reason = ""
 
     for gpu_index in range(torch_module.cuda.device_count()):
         device_name = torch_module.cuda.get_device_name(gpu_index)
         try:
             device = torch_module.device(f"cuda:{gpu_index}")
-            # Use a tiny fp16 attention call to verify the installed xformers build
-            # can actually execute on this GPU, not just import successfully.
-            q = torch_module.randn((1, 32, 8, 64), device=device, dtype=torch_module.float16)
-            k = torch_module.randn((1, 32, 8, 64), device=device, dtype=torch_module.float16)
-            v = torch_module.randn((1, 32, 8, 64), device=device, dtype=torch_module.float16)
-
-            import xformers.ops as xops
-
-            xops.memory_efficient_attention(q, k, v, attn_bias=None)
-            torch_module.cuda.synchronize(device)
-            xformers_status["per_gpu"][gpu_index] = {
+            probe_result = _probe_xformers_runtime(torch_module, device)
+            gpu_status = {
                 "name": device_name,
-                "supported": True,
-                "reason": "ok",
+                "supported": probe_result["supported"],
+                "verified": probe_result["verified"],
+                "reason": probe_result["reason"],
             }
+            xformers_status["per_gpu"][gpu_index] = gpu_status
+
+            if not gpu_status["supported"]:
+                overall_supported = False
+                overall_verified = False
+                if not first_reason:
+                    first_reason = f"GPU {gpu_index} ({device_name}): {gpu_status['reason']}"
+            elif not gpu_status["verified"]:
+                overall_verified = False
+                if not first_reason:
+                    first_reason = f"GPU {gpu_index} ({device_name}): {gpu_status['reason']}"
         except Exception as exc:
             reason = _short_exc_message(exc)
             xformers_status["per_gpu"][gpu_index] = {
                 "name": device_name,
                 "supported": False,
+                "verified": False,
                 "reason": reason,
             }
             overall_supported = False
+            overall_verified = False
             if not first_reason:
                 first_reason = f"GPU {gpu_index} ({device_name}): {reason}"
         finally:
@@ -78,7 +139,13 @@ def refresh_xformers_status(torch_module=None):
                 torch_module.cuda.empty_cache()
 
     xformers_status["supported"] = overall_supported
-    xformers_status["reason"] = "ok" if overall_supported else first_reason
+    xformers_status["verified"] = overall_verified
+    if overall_supported and overall_verified:
+        xformers_status["reason"] = "ok"
+    elif overall_supported:
+        xformers_status["reason"] = first_reason or "xformers is available but runtime probe was inconclusive."
+    else:
+        xformers_status["reason"] = first_reason
     return xformers_status
 
 
@@ -90,6 +157,8 @@ def get_xformers_status(gpu_ids=None):
             xformers_status["checked"] = True
             xformers_status["installed"] = False
             xformers_status["supported"] = False
+            xformers_status["verified"] = False
+            xformers_status["version"] = None
             xformers_status["reason"] = f"xformers probe failed: {_short_exc_message(exc)}"
             xformers_status["per_gpu"] = {}
 
@@ -113,22 +182,31 @@ def get_xformers_status(gpu_ids=None):
         xformers_status["per_gpu"].get(gpu_id, {
             "name": f"GPU {gpu_id}",
             "supported": False,
+            "verified": False,
             "reason": "GPU status not found.",
         })
         for gpu_id in selected_gpu_ids
     ]
 
     selected_supported = all(info["supported"] for info in selected_info)
+    selected_verified = all(info.get("verified", False) for info in selected_info)
     reason = "ok" if selected_supported else next(
         f"GPU {gpu_id} ({info['name']}): {info['reason']}"
         for gpu_id, info in zip(selected_gpu_ids, selected_info)
         if not info["supported"]
     )
+    if selected_supported and not selected_verified:
+        reason = next(
+            f"GPU {gpu_id} ({info['name']}): {info['reason']}"
+            for gpu_id, info in zip(selected_gpu_ids, selected_info)
+            if not info.get("verified", False)
+        )
 
     return {
         **xformers_status,
         "selected_gpu_ids": selected_gpu_ids,
         "selected_supported": selected_supported,
+        "selected_verified": selected_verified,
         "reason": reason,
     }
 
@@ -180,6 +258,8 @@ def check_torch_gpu():
                 f"当前环境不可用 xformers：{status['reason']}。若训练配置启用了 xformers，Mikazuki 会尽量自动降级到 sdpa。"
             )
         elif not status["supported"]:
+            if status.get("version"):
+                log.warning(f"xformers version detected: {status['version']}")
             for gpu_index, gpu_status in status["per_gpu"].items():
                 if gpu_status["supported"]:
                     continue
@@ -195,7 +275,26 @@ def check_torch_gpu():
             log.warning(
                 "对于不支持 xformers 的训练配置，启动训练时会自动改用 sdpa（若当前训练器支持）。"
             )
+        elif not status.get("verified", False):
+            if status.get("version"):
+                log.warning(f"xformers version detected: {status['version']}")
+            for gpu_index, gpu_status in status["per_gpu"].items():
+                if not gpu_status["supported"] or gpu_status.get("verified", False):
+                    continue
+                log.warning(
+                    f"xformers runtime probe is inconclusive on GPU {gpu_index} ({gpu_status['name']}): {gpu_status['reason']}"
+                )
+                log.warning(
+                    f"检测到 GPU {gpu_index}（{gpu_status['name']}）上的 xformers 运行探测结果未确认：{gpu_status['reason']}"
+                )
+            log.warning(
+                "Keeping xformers enabled for these GPUs. If a specific training run still fails, switch that config to SDPA manually."
+            )
+            log.warning(
+                "此类 GPU 仍会保留 xformers 可用状态；若某个训练器实际运行仍报错，请再手动切换到 sdpa。"
+            )
         else:
-            log.info("xformers runtime probe passed on all detected GPUs.")
+            version_suffix = f" (xformers {status['version']})" if status.get("version") else ""
+            log.info(f"xformers runtime probe passed on all detected GPUs.{version_suffix}")
     except Exception as e:
         log.error(f'Could not load torch: {e}')
