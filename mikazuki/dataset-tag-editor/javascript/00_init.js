@@ -14,6 +14,21 @@ function restart_reload(){
 }
 
 var uiUpdateCallbacks = [];
+var themeSyncObserver = null;
+var mediaThemeQuery = null;
+var THEME_SYNC_VARIABLES = [
+    "--c-bg",
+    "--c-bg-soft",
+    "--c-bg-mute",
+    "--c-border",
+    "--c-border-dark",
+    "--c-text-1",
+    "--c-text-2",
+    "--c-text-3",
+    "--c-brand",
+    "--c-brand-dark",
+    "--el-color-primary"
+];
 
 function onUiUpdate(callback) {
     uiUpdateCallbacks.push(callback);
@@ -29,11 +44,109 @@ function executeCallbacks(queue, arg) {
     }
 }
 
+function getThemeSourceRoot() {
+    try {
+        if (window.parent && window.parent !== window && window.parent.document) {
+            return window.parent.document.documentElement;
+        }
+    } catch (e) {
+        console.debug("parent theme root unavailable", e);
+    }
+
+    return null;
+}
+
+function getStoredThemeMode() {
+    const userMode = localStorage.getItem("vuepress-color-scheme");
+    const systemDarkMode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    return userMode === "dark" || (userMode !== "light" && systemDarkMode) ? "dark" : "light";
+}
+
+function copyThemeVariables(source, target) {
+    if (!source || !target) {
+        return;
+    }
+
+    const style = getComputedStyle(source);
+    for (const name of THEME_SYNC_VARIABLES) {
+        const value = style.getPropertyValue(name);
+        if (value && value.trim()) {
+            target.style.setProperty(name, value.trim());
+        }
+    }
+}
+
+function applyThemeMode(mode) {
+    const isDark = mode === "dark";
+    const elems = document.getElementsByTagName("gradio-app");
+
+    document.documentElement.classList.toggle("dark", isDark);
+    document.body.classList.toggle("dark", isDark);
+    document.documentElement.dataset.theme = mode;
+    document.body.dataset.theme = mode;
+    document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+
+    for (const elem of elems) {
+        elem.classList.toggle("dark", isDark);
+        elem.dataset.theme = mode;
+
+        if (elem.shadowRoot && elem.shadowRoot.host) {
+            elem.shadowRoot.host.classList.toggle("dark", isDark);
+            elem.shadowRoot.host.dataset.theme = mode;
+        }
+    }
+}
+
+function syncThemeFromParent() {
+    const sourceRoot = getThemeSourceRoot();
+
+    if (sourceRoot) {
+        copyThemeVariables(sourceRoot, document.documentElement);
+        applyThemeMode(sourceRoot.classList.contains("dark") ? "dark" : "light");
+        return;
+    }
+
+    applyThemeMode(getStoredThemeMode());
+}
+
+function observeThemeChanges() {
+    syncThemeFromParent();
+
+    const sourceRoot = getThemeSourceRoot();
+    if (sourceRoot && !themeSyncObserver) {
+        themeSyncObserver = new MutationObserver(function () {
+            syncThemeFromParent();
+        });
+        themeSyncObserver.observe(sourceRoot, {
+            attributes: true,
+            attributeFilter: ["class", "style"]
+        });
+    }
+
+    if (window.matchMedia && !mediaThemeQuery) {
+        mediaThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+        if (mediaThemeQuery.addEventListener) {
+            mediaThemeQuery.addEventListener("change", syncThemeFromParent);
+        } else if (mediaThemeQuery.addListener) {
+            mediaThemeQuery.addListener(syncThemeFromParent);
+        }
+    }
+}
+
 document.addEventListener("DOMContentLoaded", function() {
+    observeThemeChanges();
+
     var mutationObserver = new MutationObserver(function(m) {
+        syncThemeFromParent();
         executeCallbacks(uiUpdateCallbacks, m);
     });
     mutationObserver.observe(gradioApp(), {childList: true, subtree: true});
+});
+
+window.addEventListener("storage", function (event) {
+    if (event.key === "vuepress-color-scheme") {
+        syncThemeFromParent();
+    }
 });
 
 // localization = {} -- the dict with translations is created by the backend

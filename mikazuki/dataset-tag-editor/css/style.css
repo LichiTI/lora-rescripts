@@ -1,15 +1,70 @@
 
 /* general gradio fixes */
 
-:root, .dark{
+:root {
     --checkbox-label-gap: 0.25em 0.1em;
     --section-header-text-size: 12pt;
+    --dte-primary: var(--c-brand, #409eff);
+    --dte-primary-soft: rgba(64, 158, 255, 0.12);
+    --dte-page-bg: var(--c-bg-soft, #eef2f6);
+    --dte-page-bg-alt: var(--c-bg, #e7edf5);
+    --dte-card-bg: var(--c-bg-mute, #ffffff);
+    --dte-card-bg-soft: #f7fbff;
+    --dte-card-border: rgba(71, 101, 130, 0.16);
+    --dte-card-shadow: 0 12px 32px rgba(33, 53, 71, 0.07);
+    --dte-text: var(--c-text-1, #213547);
+    --dte-text-soft: var(--c-text-2, #5e6b79);
+    --dte-input-bg: rgba(255, 255, 255, 0.92);
+    --dte-input-border: rgba(71, 101, 130, 0.18);
+    --dte-hover: rgba(64, 158, 255, 0.08);
+    --body-background-fill: var(--dte-page-bg);
+    --body-background-fill-subdued: var(--dte-page-bg-alt);
+    --background-fill-primary: var(--dte-card-bg);
+    --background-fill-secondary: var(--dte-card-bg-soft);
     --block-background-fill: transparent;
-    --dte-primary: #409eff;
-    --dte-primary-soft: #edf4ff;
-    --dte-page-bg: #f1f1f1;
-    --dte-card-bg: #ffffff;
-    --dte-text: #213547;
+    --block-label-text-color: var(--dte-text);
+    --block-title-text-color: var(--dte-text);
+    --input-background-fill: var(--dte-input-bg);
+    --input-border-color: var(--dte-input-border);
+    --input-border-color-focus: var(--dte-primary);
+    --input-placeholder-color: var(--dte-text-soft);
+    --checkbox-label-text-color: var(--dte-text);
+    --button-secondary-background-fill: var(--dte-card-bg-soft);
+    --button-secondary-background-fill-hover: var(--dte-hover);
+    --button-secondary-border-color: var(--dte-card-border);
+    --button-secondary-text-color: var(--dte-text);
+    --button-secondary-text-color-hover: var(--dte-text);
+}
+
+:root.dark,
+body.dark,
+.dark {
+    --dte-primary: var(--c-brand, #6aa8ff);
+    --dte-primary-soft: rgba(106, 168, 255, 0.18);
+    --dte-page-bg: var(--c-bg-soft, #171d26);
+    --dte-page-bg-alt: var(--c-bg, #121820);
+    --dte-card-bg: var(--c-bg-mute, #1d2632);
+    --dte-card-bg-soft: #233041;
+    --dte-card-border: rgba(152, 175, 205, 0.18);
+    --dte-card-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    --dte-text: var(--c-text-1, #edf3ff);
+    --dte-text-soft: var(--c-text-2, #a9b6c8);
+    --dte-input-bg: rgba(15, 22, 31, 0.9);
+    --dte-input-border: rgba(152, 175, 205, 0.2);
+    --dte-hover: rgba(106, 168, 255, 0.16);
+}
+
+html,
+body {
+    margin: 0;
+    background: var(--dte-page-bg) !important;
+    color: var(--dte-text) !important;
+    color-scheme: light;
+}
+
+html.dark,
+body.dark {
+    color-scheme: dark;
 }
 
 .block.padded:not(.gradio-accordion) {
@@ -18,8 +73,27 @@
 
 div.gradio-container{
     max-width: unset !important;
-    background: var(--dte-page-bg) !important;
+    background: transparent !important;
     color: var(--dte-text) !important;
+    padding: 1rem !important;
+}
+
+gradio-app,
+body > gradio-app {
+    background: transparent !important;
+    color: var(--dte-text) !important;
+}
+
+.gradio-container .tabs,
+.gradio-container .tabitem,
+.gradio-container .gradio-group,
+.gradio-container .gr-box,
+.gradio-container .gr-panel,
+.gradio-container [role="tabpanel"] {
+    background: var(--dte-card-bg) !important;
+    border: 1px solid var(--dte-card-border) !important;
+    box-shadow: var(--dte-card-shadow);
+    border-radius: 16px !important;
 }
 
 .hidden{
@@ -32,9 +106,11 @@ div.gradio-container{
 }
 
 div.form{
-    border-width: 0;
-    box-shadow: none;
-    background: transparent;
+    border: 1px solid var(--dte-card-border);
+    box-shadow: var(--dte-card-shadow);
+    background: var(--dte-card-bg);
+    border-radius: 16px;
+    padding: 0.9em !important;
     overflow: visible;
     gap: 0.5em;
 }
@@ -80,15 +156,19 @@ div.compact{
 }
 
 .gradio-dropdown ul.options li.item.selected {
-    background-color: var(--neutral-100);
+    background-color: var(--dte-primary-soft);
 }
 
 .dark .gradio-dropdown ul.options li.item.selected {
-    background-color: var(--neutral-900);
+    background-color: var(--dte-primary-soft);
 }
 
 .gradio-dropdown div.wrap.wrap.wrap.wrap{
-    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    background: var(--dte-input-bg) !important;
+    border: 1px solid var(--dte-input-border) !important;
+    color: var(--dte-text) !important;
+    border-radius: 12px !important;
 }
 
 .gradio-dropdown:not(.multiselect) .wrap-inner.wrap-inner.wrap-inner{
@@ -124,7 +204,50 @@ div.gradio-html.min{
 }
 
 .block.gradio-gallery{
-    background: var(--input-background-fill);
+    background: var(--dte-card-bg-soft) !important;
+    border: 1px solid var(--dte-card-border) !important;
+    border-radius: 16px !important;
+}
+
+.gradio-container input:not([type="checkbox"]):not([type="radio"]),
+.gradio-container textarea,
+.gradio-container select,
+.gradio-container .gradio-slider input[type="number"],
+.gradio-container .gradio-colorpicker input {
+    background: var(--dte-input-bg) !important;
+    border: 1px solid var(--dte-input-border) !important;
+    color: var(--dte-text) !important;
+    border-radius: 12px !important;
+}
+
+.gradio-container input::placeholder,
+.gradio-container textarea::placeholder {
+    color: var(--dte-text-soft) !important;
+}
+
+.gradio-container label,
+.gradio-container legend,
+.gradio-container .gradio-checkbox label,
+.gradio-container .gradio-radio label,
+.gradio-container .gradio-checkboxgroup label,
+.gradio-container .gradio-slider label,
+.gradio-container .gradio-textbox label,
+.gradio-container .gradio-dropdown label,
+.gradio-container .gradio-number label {
+    color: var(--dte-text) !important;
+}
+
+.gradio-container .tab-nav {
+    background: var(--dte-card-bg) !important;
+    border: 1px solid var(--dte-card-border) !important;
+    border-radius: 14px !important;
+    padding: 0.35rem !important;
+    box-shadow: var(--dte-card-shadow);
+}
+
+.gradio-container .tab-nav button {
+    color: var(--dte-text-soft) !important;
+    border-radius: 10px !important;
 }
 
 button.primary,
@@ -142,11 +265,13 @@ button.primary:hover,
 
 .tab-nav button.selected,
 button.selected {
+    background: var(--dte-primary-soft) !important;
     color: var(--dte-primary) !important;
+    box-shadow: inset 0 0 0 1px rgba(64, 158, 255, 0.2);
 }
 
 .gradio-container .prose a, .gradio-container .prose a:visited{
-    color: unset;
+    color: var(--dte-primary);
     text-decoration: none;
 }
 
@@ -230,4 +355,5 @@ button.custom-button{
     text-align: center;
     font-size: 85%;
     opacity: 0.85;
+    color: var(--dte-text-soft);
 }
