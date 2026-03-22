@@ -130,13 +130,13 @@ fi
 cd "$script_dir"
 
 invoke_step "Upgrading pip tooling for tag editor..." \
-    "$python_exe" -m pip install --upgrade pip "setuptools<81" wheel
+    "$python_exe" -m pip install --upgrade --no-warn-script-location pip "setuptools<81" wheel
 
 invoke_step "Installing tag editor dependencies..." \
-    "$python_exe" -m pip install --upgrade --prefer-binary -r "$tageditor_requirements"
+    "$python_exe" -m pip install --upgrade --no-warn-script-location --prefer-binary -r "$tageditor_requirements"
 
 invoke_step "Aligning tag editor package constraints..." \
-    "$python_exe" -m pip install --upgrade --prefer-binary \
+    "$python_exe" -m pip install --upgrade --no-warn-script-location --prefer-binary \
     gradio==4.28.3 gradio-client==0.16.0 \
     "fastapi<0.113" "starlette<0.39" "pydantic<2.11" "huggingface-hub<1"
 

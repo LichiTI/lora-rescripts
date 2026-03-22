@@ -139,11 +139,11 @@ $tagEditorPackageConstraints = @{
 }
 
 Invoke-Step "Upgrading pip tooling for tag editor..." {
-    & $pythonExe -m pip install --upgrade pip "setuptools<81" wheel
+    & $pythonExe -m pip install --upgrade --no-warn-script-location pip "setuptools<81" wheel
 }
 
 Invoke-Step "Installing tag editor dependencies..." {
-    & $pythonExe -m pip install --upgrade --upgrade-strategy eager --prefer-binary -r $tagEditorRequirements
+    & $pythonExe -m pip install --upgrade --no-warn-script-location --upgrade-strategy eager --prefer-binary -r $tagEditorRequirements
 }
 
 if (-not (Test-PackageConstraints -PythonExe $pythonExe -Constraints $tagEditorPackageConstraints)) {

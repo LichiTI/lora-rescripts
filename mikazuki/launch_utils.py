@@ -229,6 +229,9 @@ def setup_onnxruntime(
 
 
 def run_pip(command, desc=None, live=False):
+    normalized = command.lstrip()
+    if normalized.startswith("install ") and "--no-warn-script-location" not in normalized:
+        command = normalized.replace("install ", "install --no-warn-script-location ", 1)
     return run(f'"{python_bin}" -m pip {command}', desc=f"Installing {desc}", errdesc=f"Couldn't install {desc}", live=live)
 
 

@@ -115,19 +115,19 @@ Recommended fix:
 Set-Location $repoRoot
 
 Invoke-Step "Upgrading pip tooling..." {
-    & $pythonExe -m pip install --upgrade pip "setuptools<81" wheel
+    & $pythonExe -m pip install --upgrade --no-warn-script-location pip "setuptools<81" wheel
 }
 
 Invoke-Step "Installing PyTorch and torchvision (CUDA 12.8 channel)..." {
-    & $pythonExe -m pip install --upgrade --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+    & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary torch==2.10.0+cu128 torchvision==0.25.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
 }
 
 Invoke-OptionalStep "Installing xformers (optional)..." {
-    & $pythonExe -m pip install --upgrade --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
+    & $pythonExe -m pip install --upgrade --no-warn-script-location --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
 } "Optional xformers installation failed. The GUI will still work and training can fall back to SDPA."
 
 Invoke-Step "Installing project dependencies..." {
-    & $pythonExe -m pip install --upgrade --prefer-binary -r requirements.txt
+    & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
 }
 
 if ($markerPath) {

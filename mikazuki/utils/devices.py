@@ -35,22 +35,30 @@ def _probe_xformers_runtime(torch_module, device):
 
     last_reason = ""
     tested_dtypes = []
+    tested_shapes = []
+    probe_shapes = [
+        (1, 32, 8, 64),
+        (1, 256, 8, 64),
+        (1, 1024, 8, 64),
+    ]
 
     for dtype in (torch_module.float16, torch_module.bfloat16):
         tested_dtypes.append(str(dtype).replace("torch.", ""))
-        try:
-            q = torch_module.randn((1, 32, 8, 64), device=device, dtype=dtype)
-            k = torch_module.randn((1, 32, 8, 64), device=device, dtype=dtype)
-            v = torch_module.randn((1, 32, 8, 64), device=device, dtype=dtype)
-            xops.memory_efficient_attention(q, k, v, attn_bias=None)
-            torch_module.cuda.synchronize(device)
-            return {
-                "supported": True,
-                "verified": True,
-                "reason": f"ok ({str(dtype).replace('torch.', '')})",
-            }
-        except Exception as exc:
-            last_reason = _short_exc_message(exc)
+        for shape in probe_shapes:
+            tested_shapes.append(f"{str(dtype).replace('torch.', '')}:{shape}")
+            try:
+                q = torch_module.randn(shape, device=device, dtype=dtype)
+                k = torch_module.randn(shape, device=device, dtype=dtype)
+                v = torch_module.randn(shape, device=device, dtype=dtype)
+                xops.memory_efficient_attention(q, k, v, attn_bias=None)
+                torch_module.cuda.synchronize(device)
+                return {
+                    "supported": True,
+                    "verified": True,
+                    "reason": f"ok ({str(dtype).replace('torch.', '')}, shape={shape})",
+                }
+            except Exception as exc:
+                last_reason = _short_exc_message(exc)
 
     capability = torch_module.cuda.get_device_capability(device)
     if capability[0] >= 12 and _is_inconclusive_xformers_probe_error(last_reason):
@@ -59,14 +67,14 @@ def _probe_xformers_runtime(torch_module, device):
             "verified": False,
             "reason": (
                 "runtime probe was inconclusive on this newer GPU architecture "
-                f"(tested: {', '.join(tested_dtypes)}; last error: {last_reason})"
+                f"(tested: {', '.join(tested_shapes)}; last error: {last_reason})"
             ),
         }
 
     return {
         "supported": False,
         "verified": False,
-        "reason": last_reason or f"runtime probe failed for {', '.join(tested_dtypes)}",
+        "reason": last_reason or f"runtime probe failed for {', '.join(tested_shapes)}",
     }
 
 

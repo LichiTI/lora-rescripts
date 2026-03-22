@@ -188,7 +188,7 @@ for /d %%D in ("%SITE_PACKAGES%\torch-*.dist-info" "%SITE_PACKAGES%\torchvision-
 )
 
 echo Installing torch and torchvision from %CHANNEL_NAME% for %ENV_NAME%...
-"%PYTHON_EXE%" -m pip install --upgrade --force-reinstall --no-cache-dir --prefer-binary %TORCH_SPEC% %TORCHVISION_SPEC% --extra-index-url %INDEX_URL%
+"%PYTHON_EXE%" -m pip install --upgrade --force-reinstall --no-cache-dir --no-warn-script-location --prefer-binary %TORCH_SPEC% %TORCHVISION_SPEC% --extra-index-url %INDEX_URL%
 if errorlevel 1 (
     echo.
     echo [ERROR] Failed to install torch/torchvision for %ENV_NAME%.
@@ -199,7 +199,7 @@ if errorlevel 1 (
 
 if /i "%INSTALL_XFORMERS%"=="Y" (
     echo Installing xformers for %ENV_NAME%...
-    "%PYTHON_EXE%" -m pip install --upgrade --no-cache-dir xformers
+    "%PYTHON_EXE%" -m pip install --upgrade --no-cache-dir --no-warn-script-location --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
     if errorlevel 1 (
         echo [WARN] xformers installation failed in %ENV_NAME%. This environment can still fall back if supported by the app.
     )

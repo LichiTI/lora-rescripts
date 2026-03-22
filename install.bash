@@ -142,20 +142,20 @@ select_python
 cd "$script_dir"
 
 invoke_step "Upgrading pip tooling..." \
-    "$python_exe" -m pip install --upgrade pip "setuptools<81" wheel
+    "$python_exe" -m pip install --upgrade --no-warn-script-location pip "setuptools<81" wheel
 
 invoke_step "Installing PyTorch and torchvision (CUDA 12.8 channel)..." \
-    "$python_exe" -m pip install --upgrade --prefer-binary \
+    "$python_exe" -m pip install --upgrade --no-warn-script-location --prefer-binary \
     torch==2.10.0+cu128 torchvision==0.25.0+cu128 \
     --extra-index-url https://download.pytorch.org/whl/cu128
 
 invoke_optional_step \
     "Installing xformers (optional)..." \
     "Optional xformers installation failed. The GUI will still work and training can fall back to SDPA." \
-    "$python_exe" -m pip install --upgrade --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
+    "$python_exe" -m pip install --upgrade --no-warn-script-location --only-binary xformers --index-url https://download.pytorch.org/whl/cu128 "xformers>=0.0.34"
 
 invoke_step "Installing project dependencies..." \
-    "$python_exe" -m pip install --upgrade --prefer-binary -r requirements.txt
+    "$python_exe" -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
 
 if [[ -n "$deps_marker" ]]; then
     : > "$deps_marker"

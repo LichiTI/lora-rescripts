@@ -3,6 +3,8 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$blackwellPython = Join-Path $repoRoot "python_blackwell\python.exe"
+$blackwellDepsMarker = Join-Path $repoRoot "python_blackwell\.deps_installed"
 $portablePython = Join-Path $repoRoot "python\python.exe"
 $venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
 $portableDepsMarker = Join-Path $repoRoot "python\.deps_installed"
@@ -10,6 +12,7 @@ $venvDepsMarker = Join-Path $repoRoot "venv\.deps_installed"
 $portableTagEditorPython = Join-Path $repoRoot "python_tageditor\python.exe"
 $venvTagEditorPython = Join-Path $repoRoot "venv-tageditor\Scripts\python.exe"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
+$preferBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "blackwell"
 
 function Test-PipReady {
     param (
@@ -86,6 +89,22 @@ function Get-PythonMinorVersion {
 }
 
 function Get-MainPythonSelection {
+    if ($preferBlackwellRuntime -and (Test-Path $blackwellPython)) {
+        Write-Host -ForegroundColor Green "Using Blackwell experimental Python..."
+        if (-not (Test-PipReady -PythonExe $blackwellPython)) {
+            Write-Host -ForegroundColor Yellow "python_blackwell is not initialized yet. Running setup_embeddable_python.bat..."
+            & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_blackwell
+            if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $blackwellPython)) {
+                throw "Blackwell experimental Python is incomplete: pip is not available."
+            }
+        }
+        return @{
+            PythonExe = $blackwellPython
+            DepsMarker = $blackwellDepsMarker
+            Runtime = "blackwell"
+        }
+    }
+
     if (Test-Path $portablePython) {
         Write-Host -ForegroundColor Green "Using portable Python..."
         if (-not (Test-PipReady -PythonExe $portablePython)) {
@@ -94,6 +113,7 @@ function Get-MainPythonSelection {
         return @{
             PythonExe = $portablePython
             DepsMarker = $portableDepsMarker
+            Runtime = "portable"
         }
     }
 
@@ -105,6 +125,7 @@ function Get-MainPythonSelection {
         return @{
             PythonExe = $venvPython
             DepsMarker = $venvDepsMarker
+            Runtime = "venv"
         }
     }
 
@@ -119,6 +140,7 @@ function Get-MainPythonSelection {
             return @{
                 PythonExe = $portablePython
                 DepsMarker = $portableDepsMarker
+                Runtime = "portable"
             }
         }
 
@@ -126,6 +148,7 @@ function Get-MainPythonSelection {
             return @{
                 PythonExe = $venvPython
                 DepsMarker = $venvDepsMarker
+                Runtime = "venv"
             }
         }
 
@@ -153,15 +176,34 @@ Developer override:
 $mainPython = Get-MainPythonSelection
 $pythonExe = $mainPython.PythonExe
 $depsMarker = $mainPython.DepsMarker
+$runtimeName = $mainPython.Runtime
 $mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("accelerate", "torch", "fastapi", "toml")
 if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
-    Write-Host -ForegroundColor Yellow "Dependencies are not installed yet. Running install.ps1..."
-    & (Join-Path $repoRoot "install.ps1")
+    if ($runtimeName -eq "blackwell") {
+        Write-Host -ForegroundColor Yellow "Blackwell experimental dependencies are not installed yet. Running install_blackwell.ps1..."
+        & (Join-Path $repoRoot "install_blackwell.ps1")
+    }
+    else {
+        Write-Host -ForegroundColor Yellow "Dependencies are not installed yet. Running install.ps1..."
+        & (Join-Path $repoRoot "install.ps1")
+    }
     $mainPython = Get-MainPythonSelection
     $pythonExe = $mainPython.PythonExe
     $depsMarker = $mainPython.DepsMarker
+    $runtimeName = $mainPython.Runtime
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not (Test-ModulesReady -PythonExe $pythonExe -Modules @("accelerate", "torch", "fastapi", "toml"))) {
         throw "Dependency installation failed."
+    }
+}
+
+if ($Env:MIKAZUKI_BLACKWELL_STARTUP -eq "1") {
+    $blackwellPatchScript = Join-Path $repoRoot "mikazuki\scripts\patch_xformers_blackwell.py"
+    if (Test-Path $blackwellPatchScript) {
+        Write-Host -ForegroundColor Yellow "Blackwell startup mode enabled. Checking xformers FA3 compatibility..."
+        & $pythonExe $blackwellPatchScript
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host -ForegroundColor Yellow "Blackwell xformers patch step reported a warning. Continuing startup..."
+        }
     }
 }
 
@@ -178,15 +220,33 @@ if (-not ($args -contains "--disable-tageditor")) {
         $tagEditorMarker = Join-Path $repoRoot "venv-tageditor\.tageditor_installed"
     }
     else {
-        $mainPythonVersion = Get-PythonMinorVersion -PythonExe $pythonExe
-        if ($mainPythonVersion -and $mainPythonVersion -ne "3.13") {
-            $tagEditorPython = $pythonExe
+        $fallbackMainPython = $null
+        if ($runtimeName -eq "blackwell") {
+            if (Test-Path $portablePython) {
+                $fallbackMainPython = $portablePython
+                $tagEditorMarker = Join-Path $repoRoot "python\.tageditor_installed"
+            }
+            elseif (Test-Path $venvPython) {
+                $fallbackMainPython = $venvPython
+                $tagEditorMarker = Join-Path $repoRoot "venv\.tageditor_installed"
+            }
+        }
+        else {
+            $fallbackMainPython = $pythonExe
             if (Test-Path $portablePython) {
                 $tagEditorMarker = Join-Path $repoRoot "python\.tageditor_installed"
             }
             elseif (Test-Path $venvPython) {
                 $tagEditorMarker = Join-Path $repoRoot "venv\.tageditor_installed"
             }
+        }
+
+        $mainPythonVersion = $null
+        if ($fallbackMainPython) {
+            $mainPythonVersion = Get-PythonMinorVersion -PythonExe $fallbackMainPython
+        }
+        if ($mainPythonVersion -and $mainPythonVersion -ne "3.13") {
+            $tagEditorPython = $fallbackMainPython
         }
     }
 

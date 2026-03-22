@@ -6,8 +6,10 @@ set "TARGET_DIR=python"
 
 if /i "%~1"=="--auto" set "AUTO_MODE=1"
 if /i "%~1"=="python_tageditor" set "TARGET_DIR=python_tageditor"
+if /i "%~1"=="python_blackwell" set "TARGET_DIR=python_blackwell"
 if /i "%~1"=="python" set "TARGET_DIR=python"
 if /i "%~2"=="python_tageditor" set "TARGET_DIR=python_tageditor"
+if /i "%~2"=="python_blackwell" set "TARGET_DIR=python_blackwell"
 if /i "%~2"=="python" set "TARGET_DIR=python"
 
 echo ========================================
