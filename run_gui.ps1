@@ -96,6 +96,19 @@ function Get-PythonMinorVersion {
 }
 
 function Get-MainPythonSelection {
+    if ($preferBlackwellRuntime -and -not (Test-Path $blackwellPython)) {
+        throw @"
+Blackwell startup was requested, but python_blackwell is missing.
+
+Expected:
+- $blackwellPython
+
+Recommended fix:
+1. Extract a Python 3.12 embeddable package into .\python_blackwell
+2. Run run_For_Only_Blackwell.bat again
+"@
+    }
+
     if ($preferBlackwellRuntime -and (Test-Path $blackwellPython)) {
         Write-Host -ForegroundColor Green "Using Blackwell experimental Python..."
         if (-not (Test-PipReady -PythonExe $blackwellPython)) {
@@ -185,7 +198,11 @@ $pythonExe = $mainPython.PythonExe
 $depsMarker = $mainPython.DepsMarker
 $runtimeName = $mainPython.Runtime
 $mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules
-if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
+$blackwellXformersReady = $true
+if ($runtimeName -eq "blackwell") {
+    $blackwellXformersReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("xformers")
+}
+if (-not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady) {
     if ($runtimeName -eq "blackwell") {
         Write-Host -ForegroundColor Yellow "Blackwell experimental dependencies are not installed yet. Running install_blackwell.ps1..."
         & (Join-Path $repoRoot "install_blackwell.ps1") -TorchChannel "czmahi-20250502"
@@ -198,7 +215,12 @@ if (-not (Test-Path $depsMarker) -or -not $mainModulesReady) {
     $pythonExe = $mainPython.PythonExe
     $depsMarker = $mainPython.DepsMarker
     $runtimeName = $mainPython.Runtime
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not (Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules)) {
+    $mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules
+    $blackwellXformersReady = $true
+    if ($runtimeName -eq "blackwell") {
+        $blackwellXformersReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("xformers")
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady) {
         throw "Dependency installation failed."
     }
 }

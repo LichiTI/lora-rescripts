@@ -11,8 +11,12 @@ assets/config.json
 
 py310
 python
+python_blackwell
 git
 wd14_tagger_model
+blackwell-wheels/
+lora-rescripts (*)/
+lora-rescripts - 副本*/
 
 train/*
 logs/*

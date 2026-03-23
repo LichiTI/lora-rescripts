@@ -79,11 +79,15 @@ function Resolve-XformersWheel {
         [string]$Profile
     )
 
-    if ($RequestedWheel -and (Test-Path $RequestedWheel)) {
-        return (Resolve-Path $RequestedWheel).Path
-    }
+    if ($RequestedWheel) {
+        if (Test-Path $RequestedWheel) {
+            return (Resolve-Path $RequestedWheel).Path
+        }
 
-    if ($RequestedWheel -and ($RequestedWheel -match '^https?://')) {
+        if (-not ($RequestedWheel -match '^https?://')) {
+            throw "Specified XformersWheel path was not found: $RequestedWheel"
+        }
+
         $downloadDir = Join-Path $repoRoot "blackwell-wheels"
         if (-not (Test-Path $downloadDir)) {
             New-Item -ItemType Directory -Path $downloadDir | Out-Null
@@ -101,9 +105,8 @@ function Resolve-XformersWheel {
         return $downloadPath
     }
 
-    if (-not $RequestedWheel -and $Profile -eq "czmahi-20250502") {
-        return Resolve-XformersWheel -RequestedWheel "https://huggingface.co/czmahi/xformers-windows-torch2.8-cu128-py312/resolve/main/latest-torch2.8-python3.12-xformers-comfyui-windows/xformers-0.0.31%2B8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl" -Profile ""
-    }
+    $czmahiDefaultWheelUrl = "https://huggingface.co/czmahi/xformers-windows-torch2.8-cu128-py312/resolve/main/latest-torch2.8-python3.12-xformers-comfyui-windows/xformers-0.0.31%2B8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl"
+    $czmahiDefaultWheelName = "xformers-0.0.31+8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl"
 
     $searchRoots = @(
         $repoRoot,
@@ -111,19 +114,19 @@ function Resolve-XformersWheel {
         (Join-Path $repoRoot "wheels")
     )
 
-    foreach ($root in $searchRoots) {
-        if (-not (Test-Path $root)) {
-            continue
+    if ($Profile -eq "czmahi-20250502") {
+        foreach ($root in $searchRoots) {
+            if (-not (Test-Path $root)) {
+                continue
+            }
+
+            $preferredWheel = Join-Path $root $czmahiDefaultWheelName
+            if (Test-Path $preferredWheel) {
+                return (Resolve-Path $preferredWheel).Path
+            }
         }
 
-        $wheel = Get-ChildItem -Path $root -Filter "xformers-*.whl" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match "cp312" } |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-
-        if ($wheel) {
-            return $wheel.FullName
-        }
+        return Resolve-XformersWheel -RequestedWheel $czmahiDefaultWheelUrl -Profile ""
     }
 
     return $null
@@ -153,6 +156,7 @@ if (-not (Test-PipReady -PythonExe $blackwellPython)) {
 Set-Location $repoRoot
 
 $torchInstallArgs = @()
+$optionalTorchaudioArgs = $null
 if ($TorchChannel -eq "panchovix-20250321") {
     $torchInstallArgs = @(
         "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-warn-script-location",
@@ -164,8 +168,11 @@ if ($TorchChannel -eq "panchovix-20250321") {
 elseif ($TorchChannel -eq "czmahi-20250502") {
     $torchInstallArgs = @(
         "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-warn-script-location",
-        "https://download.pytorch.org/whl/nightly/cu128/torch-2.8.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl",
-        "https://download.pytorch.org/whl/nightly/cu128/torchvision-0.22.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl",
+        "https://download.pytorch.org/whl/nightly/cu128/torch-2.8.0.dev20250501%2Bcu128-cp312-cp312-win_amd64.whl",
+        "https://download.pytorch.org/whl/nightly/cu128/torchvision-0.22.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl"
+    )
+    $optionalTorchaudioArgs = @(
+        "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-warn-script-location", "--no-deps",
         "https://download.pytorch.org/whl/nightly/cu128/torchaudio-2.6.0.dev20250502%2Bcu128-cp312-cp312-win_amd64.whl"
     )
 }
@@ -192,6 +199,12 @@ Invoke-Step "Installing PyTorch and torchvision for Blackwell environment ($Torc
     & $blackwellPython @torchInstallArgs
 }
 
+if ($optionalTorchaudioArgs) {
+    Invoke-OptionalStep "Installing optional torchaudio for Blackwell environment..." {
+        & $blackwellPython @optionalTorchaudioArgs
+    } "Optional torchaudio installation failed. This does not block SD training/inference in this project."
+}
+
 Invoke-Step "Installing project dependencies into python_blackwell..." {
     & $blackwellPython -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
 }
@@ -213,9 +226,18 @@ if (-not $SkipXformers) {
         } "Official xformers installation failed. Blackwell users can still use SDPA or install a community cp312 wheel later."
     }
     else {
-        Write-Host -ForegroundColor Yellow "No Blackwell-specific xformers wheel was provided."
-        Write-Host -ForegroundColor Yellow "Skipping xformers installation to avoid silently falling back to the official wheel."
-        Write-Host -ForegroundColor Yellow "You can still use SDPA, or rerun install_blackwell.ps1 with -XformersWheel <path-or-url>."
+        throw @"
+No Blackwell-specific xformers wheel was provided.
+
+To continue safely, either:
+1. Provide a wheel explicitly: -XformersWheel <path-or-url>
+2. Use -AllowOfficialXformersFallback (not recommended for Blackwell)
+3. Use -SkipXformers intentionally if you want SDPA only
+"@
+    }
+
+    Invoke-Step "Verifying xformers import/runtime bindings..." {
+        & $blackwellPython -c "import xformers, torch; from xformers.ops import memory_efficient_attention; print('xformers:', xformers.__version__)"
     }
 }
 
