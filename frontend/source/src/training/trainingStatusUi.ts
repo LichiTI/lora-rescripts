@@ -8,15 +8,15 @@ import type { TrainingSnapshotRecord } from "./trainingStorage";
 function formatPromptSourceLabel(source: string) {
   switch (source) {
     case "prompt_file":
-      return "Prompt file";
+      return "提示词文件";
     case "generated":
-      return "Generated from current fields";
+      return "由当前字段生成";
     case "random_dataset_prompt_preview":
-      return "Random dataset-derived prompt";
+      return "随机数据集提示词预览";
     case "legacy_sample_prompts_file":
-      return "Legacy sample_prompts file";
+      return "旧版 sample_prompts 文件";
     case "legacy_sample_prompts_inline":
-      return "Legacy sample_prompts text";
+      return "旧版 sample_prompts 文本";
     default:
       return source;
   }
@@ -29,14 +29,14 @@ function formatDependencyStatus(report: TrainingPreflightRecord["dependencies"])
 
   return `
     <div>
-      <strong>Runtime dependencies</strong>
+      <strong>运行时依赖</strong>
       <ul class="status-list">
         ${report.required
           .map((dependency) => {
             const requirement = dependency.required_for.join(", ");
             const status = dependency.importable
-              ? `${dependency.display_name} ready${dependency.version ? ` (${dependency.version})` : ""}`
-              : `${dependency.display_name} unavailable${dependency.reason ? `: ${dependency.reason}` : ""}`;
+              ? `${dependency.display_name} 可用${dependency.version ? ` (${dependency.version})` : ""}`
+              : `${dependency.display_name} 不可用${dependency.reason ? `：${dependency.reason}` : ""}`;
             return `<li>${escapeHtml(`${status} · ${requirement}`)}</li>`;
           })
           .join("")}
@@ -68,7 +68,7 @@ export function renderTrainValidationStatus(prefix: string, checks: TrainingChec
       `${prefix}-validation-status`,
       `
         <div class="submit-status-box submit-status-error">
-          <strong>Payload preparation failed</strong>
+          <strong>请求体准备失败</strong>
           <p>${escapeHtml(preparationError)}</p>
         </div>
       `
@@ -80,7 +80,7 @@ export function renderTrainValidationStatus(prefix: string, checks: TrainingChec
     checks.errors.length > 0
       ? `
           <div>
-            <strong>Errors</strong>
+            <strong>错误</strong>
             <ul class="status-list">
               ${checks.errors.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
             </ul>
@@ -90,7 +90,7 @@ export function renderTrainValidationStatus(prefix: string, checks: TrainingChec
     checks.warnings.length > 0
       ? `
           <div>
-            <strong>Warnings</strong>
+            <strong>警告</strong>
             <ul class="status-list">
               ${checks.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
             </ul>
@@ -106,8 +106,8 @@ export function renderTrainValidationStatus(prefix: string, checks: TrainingChec
       `${prefix}-validation-status`,
       `
         <div class="submit-status-box submit-status-success">
-          <strong>Compatibility checks passed</strong>
-          <p>No obvious parameter conflicts were detected in the current payload.</p>
+          <strong>兼容性检查通过</strong>
+          <p>当前请求体里没有发现明显的参数冲突。</p>
         </div>
       `
     );
@@ -115,10 +115,10 @@ export function renderTrainValidationStatus(prefix: string, checks: TrainingChec
   }
 
   setHtml(
-    `${prefix}-validation-status`,
-    `
-      <div class="submit-status-box ${checks.errors.length > 0 ? "submit-status-error" : "submit-status-warning"}">
-        <strong>${checks.errors.length > 0 ? "Action needed before launch" : "Review before launch"}</strong>
+      `${prefix}-validation-status`,
+      `
+        <div class="submit-status-box ${checks.errors.length > 0 ? "submit-status-error" : "submit-status-warning"}">
+        <strong>${checks.errors.length > 0 ? "启动前需要处理" : "启动前请确认"}</strong>
         ${rows}
       </div>
     `
@@ -148,7 +148,7 @@ export function renderTrainingAutosaveStatus(prefix: string, autosaveRecord?: Tr
       `${prefix}-autosave-status`,
       `
         <div class="coverage-list">
-          <span class="coverage-pill coverage-pill-muted">No local autosave stored yet</span>
+          <span class="coverage-pill coverage-pill-muted">当前还没有本地自动保存</span>
         </div>
       `
     );
@@ -157,14 +157,14 @@ export function renderTrainingAutosaveStatus(prefix: string, autosaveRecord?: Tr
 
   const selectedGpuCount = Array.isArray(autosaveRecord.gpu_ids) ? autosaveRecord.gpu_ids.length : 0;
   setHtml(
-    `${prefix}-autosave-status`,
-    `
+      `${prefix}-autosave-status`,
+      `
       <div class="coverage-list">
-        <span class="coverage-pill">Autosave ready</span>
+        <span class="coverage-pill">自动保存可用</span>
         <span class="coverage-pill coverage-pill-muted">${escapeHtml(autosaveRecord.time)}</span>
-        <span class="coverage-pill coverage-pill-muted">${selectedGpuCount > 0 ? `${selectedGpuCount} GPU${selectedGpuCount === 1 ? "" : "s"}` : "default GPU selection"}</span>
+        <span class="coverage-pill coverage-pill-muted">${selectedGpuCount > 0 ? `已选 ${selectedGpuCount} 张 GPU` : "使用默认 GPU 选择"}</span>
       </div>
-      <p class="training-autosave-note">${escapeHtml(autosaveRecord.name || "Unnamed autosave snapshot")}</p>
+      <p class="training-autosave-note">${escapeHtml(autosaveRecord.name || "未命名自动保存快照")}</p>
     `
   );
 }
@@ -175,7 +175,7 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
       `${prefix}-preflight-report`,
       `
         <div class="submit-status-box submit-status-error">
-          <strong>Preflight request failed</strong>
+          <strong>预检查请求失败</strong>
           <p>${escapeHtml(errorMessage)}</p>
         </div>
       `
@@ -188,8 +188,8 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
       `${prefix}-preflight-report`,
       `
         <div class="submit-status-box">
-          <strong>Training preflight has not run yet</strong>
-          <p>Run preflight to verify dataset, model, resume path, prompt preview, and runtime fallback expectations before launch.</p>
+          <strong>训练预检查尚未运行</strong>
+          <p>可以先运行预检查，确认数据集、模型、续训路径、采样提示词，以及运行时回退预期是否正常。</p>
         </div>
       `
     );
@@ -200,7 +200,7 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     report.errors.length
       ? `
           <div>
-            <strong>Errors</strong>
+            <strong>错误</strong>
             <ul class="status-list">
               ${report.errors.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
             </ul>
@@ -210,7 +210,7 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     report.warnings.length
       ? `
           <div>
-            <strong>Warnings</strong>
+            <strong>警告</strong>
             <ul class="status-list">
               ${report.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
             </ul>
@@ -220,7 +220,7 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     report.notes.length
       ? `
           <div>
-            <strong>Notes</strong>
+            <strong>说明</strong>
             <ul class="status-list">
               ${report.notes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
             </ul>
@@ -231,13 +231,13 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     report.dataset
       ? `
           <div>
-            <strong>Dataset</strong>
+            <strong>训练数据集</strong>
             <ul class="status-list">
               <li>${escapeHtml(report.dataset.path)}</li>
-              <li>${report.dataset.image_count} images · ${report.dataset.effective_image_count} effective images</li>
-              <li>${report.dataset.alpha_capable_image_count} alpha-capable candidates</li>
-              <li>${(report.dataset.caption_coverage * 100).toFixed(1)}% caption coverage</li>
-              <li>${report.dataset.images_without_caption_count} without captions · ${report.dataset.broken_image_count} broken images</li>
+              <li>${report.dataset.image_count} 张图片 · 有效图片 ${report.dataset.effective_image_count} 张</li>
+              <li>可用作 alpha 蒙版候选：${report.dataset.alpha_capable_image_count} 张</li>
+              <li>标签覆盖率 ${(report.dataset.caption_coverage * 100).toFixed(1)}%</li>
+              <li>无标签图片 ${report.dataset.images_without_caption_count} 张 · 损坏图片 ${report.dataset.broken_image_count} 张</li>
             </ul>
           </div>
         `
@@ -245,10 +245,10 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     report.conditioning_dataset
       ? `
           <div>
-            <strong>Conditioning dataset</strong>
+            <strong>条件数据集</strong>
             <ul class="status-list">
               <li>${escapeHtml(report.conditioning_dataset.path)}</li>
-              <li>${report.conditioning_dataset.image_count} images · ${(report.conditioning_dataset.caption_coverage * 100).toFixed(1)}% caption coverage</li>
+              <li>${report.conditioning_dataset.image_count} 张图片 · 标签覆盖率 ${(report.conditioning_dataset.caption_coverage * 100).toFixed(1)}%</li>
             </ul>
           </div>
         `
@@ -256,7 +256,7 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     report.sample_prompt
       ? `
           <div>
-            <strong>Sample prompt preview</strong>
+            <strong>采样提示词预览</strong>
             <p class="training-preflight-meta">${escapeHtml(formatPromptSourceLabel(report.sample_prompt.source))}${report.sample_prompt.detail ? ` · ${escapeHtml(report.sample_prompt.detail)}` : ""}</p>
             <pre class="preset-preview">${escapeHtml(report.sample_prompt.preview)}</pre>
           </div>
@@ -267,11 +267,11 @@ export function renderTrainingPreflightReport(prefix: string, report?: TrainingP
     .join("");
 
   setHtml(
-    `${prefix}-preflight-report`,
-    `
+      `${prefix}-preflight-report`,
+      `
       <div class="submit-status-box ${report.errors.length > 0 ? "submit-status-error" : report.can_start ? "submit-status-success" : "submit-status-warning"}">
-        <strong>${report.can_start ? "Backend preflight passed" : "Backend preflight found launch blockers"}</strong>
-        <p>Training type: ${escapeHtml(report.training_type)}</p>
+        <strong>${report.can_start ? "后端预检查通过" : "后端预检查发现了启动阻塞项"}</strong>
+        <p>训练类型：${escapeHtml(report.training_type)}</p>
         ${sections}
       </div>
     `

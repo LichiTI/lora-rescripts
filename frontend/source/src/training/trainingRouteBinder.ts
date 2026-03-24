@@ -37,8 +37,8 @@ export async function bindTrainingRoute(config: TrainingRouteConfig) {
 
   renderTrainSubmitStatus(
     config.prefix,
-    `${config.modelLabel} bridge ready`,
-    "You can review the generated payload and submit the current config to /api/run.",
+    `${config.modelLabel} 页面已准备就绪`,
+    "现在可以先检查生成后的 payload，再把当前配置提交到 /api/run。",
     "success"
   );
   toggleTrainingPanel(config.prefix, "history", false);

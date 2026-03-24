@@ -35,9 +35,9 @@ function buildPresetExportDocument(config: TrainingRouteConfig, currentState: Sc
     metadata: {
       name: presetName,
       version: "1.0",
-      author: "SD-reScripts local export",
+      author: "SD-reScripts 本地导出",
       train_type: trainType || config.schemaName,
-      description: `Exported from the ${config.modelLabel} source-side training bridge on ${new Date().toLocaleString()}.`,
+      description: `${new Date().toLocaleString()} 从 ${config.modelLabel} 源码训练页导出。`,
     },
     data: prepared.payload,
   };
@@ -50,12 +50,12 @@ export function saveCurrentTrainingRecipe(
   refreshRecipePanel: () => void
 ) {
   const suggestedName = getSnapshotName(config, currentState);
-  const name = window.prompt("Recipe name", suggestedName);
+  const name = window.prompt("配方名称", suggestedName);
   if (!name || !name.trim()) {
     return false;
   }
 
-  const description = window.prompt("Recipe description (optional)", "") ?? "";
+  const description = window.prompt("配方说明（可选）", "") ?? "";
   const entries = loadTrainingRecipes(config.routeId);
   entries.unshift({
     created_at: new Date().toLocaleString(),
@@ -89,10 +89,10 @@ function normalizeImportedRecipeRecord(
     ? (imported.metadata as Record<string, unknown>)
     : {};
 
-  const name = String(metadata.name || imported.name || fallbackName || "Imported recipe").trim();
+  const name = String(metadata.name || imported.name || fallbackName || "导入的配方").trim();
   return {
     created_at: String(imported.created_at || new Date().toLocaleString()),
-    name: name || "Imported recipe",
+    name: name || "导入的配方",
     description: typeof metadata.description === "string" ? metadata.description : typeof imported.description === "string" ? imported.description : undefined,
     train_type: typeof metadata.train_type === "string"
       ? metadata.train_type
@@ -113,7 +113,7 @@ function importRecipesFromText(
 ) {
   const trimmed = content.trim();
   if (!trimmed) {
-    throw new Error("Recipe file is empty.");
+    throw new Error("配方文件是空的。");
   }
 
   const imported = fileName.toLowerCase().endsWith(".json")
@@ -127,7 +127,7 @@ function importRecipesFromText(
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
         return;
       }
-      const normalized = normalizeImportedRecipeRecord(config, entry as Record<string, unknown>, `Imported recipe ${index + 1}`);
+      const normalized = normalizeImportedRecipeRecord(config, entry as Record<string, unknown>, `导入的配方 ${index + 1}`);
       if (normalized) {
         records.push(normalized);
       }
@@ -140,7 +140,7 @@ function importRecipesFromText(
   }
 
   if (records.length === 0) {
-    throw new Error("No valid recipe entries were found in this file.");
+    throw new Error("这个文件里没有找到有效的配方记录。");
   }
 
   return records;
@@ -182,7 +182,7 @@ export function wireTrainingConfigFileControls(
       `${config.prefix}-${formatTimestampForFile()}.toml`,
       stringifyLooseTomlObject(prepared.payload)
     );
-    setTrainingUtilityNote(config.prefix, "Exported current config as TOML.", "success");
+    setTrainingUtilityNote(config.prefix, "当前配置已导出为 TOML。", "success");
   });
 
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-export-preset`)?.addEventListener("click", () => {
@@ -198,7 +198,7 @@ export function wireTrainingConfigFileControls(
       `${fileStem}-preset.toml`,
       stringifyLooseTomlObject(document)
     );
-    setTrainingUtilityNote(config.prefix, "Exported current config as reusable preset TOML.", "success");
+    setTrainingUtilityNote(config.prefix, "当前配置已导出为可复用的预设 TOML。", "success");
   });
 
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-import-config`)?.addEventListener("click", () => {
@@ -222,11 +222,11 @@ export function wireTrainingConfigFileControls(
         applyEditableRecord(importPayload);
         setTrainingUtilityNote(
           config.prefix,
-          parsed.data && typeof parsed.data === "object" ? `Imported preset: ${file.name}.` : `Imported config: ${file.name}.`,
+          parsed.data && typeof parsed.data === "object" ? `已导入预设：${file.name}。` : `已导入配置：${file.name}。`,
           "success"
         );
       } catch (error) {
-        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Failed to import config.", "error");
+        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "导入配置失败。", "error");
       } finally {
         input.value = "";
       }
@@ -251,7 +251,7 @@ export function wireTrainingHistoryFileImportControl(
       try {
         const imported = JSON.parse(String(reader.result ?? ""));
         if (!Array.isArray(imported)) {
-          throw new Error("History file must contain an array.");
+          throw new Error("历史记录文件必须是一个数组。");
         }
 
         const nextEntries = imported
@@ -264,15 +264,15 @@ export function wireTrainingHistoryFileImportControl(
           }));
 
         if (nextEntries.length === 0) {
-          throw new Error("History file did not contain valid entries.");
+          throw new Error("历史记录文件里没有有效条目。");
         }
 
         const merged = trimTrainingHistoryEntries([...loadTrainingHistory(config.routeId), ...nextEntries]);
         saveTrainingHistory(config.routeId, merged);
         openHistoryPanel();
-        setTrainingUtilityNote(config.prefix, `Imported ${nextEntries.length} history entries.`, "success");
+        setTrainingUtilityNote(config.prefix, `已导入 ${nextEntries.length} 条历史记录。`, "success");
       } catch (error) {
-        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Failed to import history.", "error");
+        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "导入历史记录失败。", "error");
       } finally {
         input.value = "";
       }
@@ -301,9 +301,9 @@ export function wireTrainingRecipeFileImportControl(
         saveTrainingRecipes(config.routeId, merged);
         bindRecipePanel();
         openRecipePanel();
-        setTrainingUtilityNote(config.prefix, `Imported ${nextEntries.length} recipe ${nextEntries.length === 1 ? "entry" : "entries"}.`, "success");
+        setTrainingUtilityNote(config.prefix, `已导入 ${nextEntries.length} 条配方记录。`, "success");
       } catch (error) {
-        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Failed to import recipe.", "error");
+        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "导入配方失败。", "error");
       } finally {
         input.value = "";
       }

@@ -6,7 +6,7 @@ function isGraphicCardRecord(card: GraphicCardEntry): card is GraphicCardRecord 
 
 export function formatGpuList(cards: GraphicCardEntry[]) {
   if (cards.length === 0) {
-    return "No cards reported yet.";
+    return "当前没有返回显卡记录。";
   }
 
   return cards
@@ -22,11 +22,11 @@ export function formatGpuList(cards: GraphicCardEntry[]) {
 
 export function formatTaskSummary(tasks: TaskRecord[]) {
   if (tasks.length === 0) {
-    return "No tasks currently tracked.";
+    return "当前没有正在跟踪的任务。";
   }
 
   const active = tasks.filter((task) => task.status && !["FINISHED", "TERMINATED", "FAILED"].includes(String(task.status))).length;
-  return `${tasks.length} tracked, ${active} active`;
+  return `共 ${tasks.length} 个任务，其中 ${active} 个仍在运行中`;
 }
 
 export function formatTagEditor(status: TagEditorStatus) {

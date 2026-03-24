@@ -1,6 +1,6 @@
 .action-button {
-  border: 0;
-  border-radius: 999px;
+  border: 1px solid var(--accent);
+  border-radius: 0.55rem;
   padding: 0.7rem 1rem;
   background: var(--accent);
   color: white;
@@ -9,8 +9,8 @@
 }
 
 .action-button-ghost {
-  border: 1px solid rgba(31, 29, 26, 0.12);
-  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(31, 29, 26, 0.12);
+  background: #fff;
   color: var(--ink);
 }
 

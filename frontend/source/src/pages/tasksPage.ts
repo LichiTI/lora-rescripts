@@ -1,19 +1,17 @@
-import { createPageHero } from "../renderers/render";
 import { runtimeUrl } from "../shared/runtime";
 
 export function renderTasksPage() {
   return `
-    ${createPageHero(
-      "tasks",
-      "Task monitor migration page",
-      "This route is already talking to the real backend task manager, so it is a strong candidate for early source migration."
-    )}
-    <section class="panel task-panel">
+    <section class="panel prose-panel legacy-doc-panel">
+      <h1>任务列表</h1>
+      <p>这里用于查看当前后端任务队列与运行状态。</p>
+    </section>
+    <section class="panel task-panel legacy-service-panel">
       <div class="task-toolbar">
-        <button id="refresh-tasks" class="action-button" type="button">Refresh tasks</button>
-        <a class="text-link task-legacy-link" href="${runtimeUrl("/task.html")}" target="_blank" rel="noreferrer">Open current shipped task page</a>
+        <button id="refresh-tasks" class="action-button" type="button">刷新任务</button>
+        <a class="text-link task-legacy-link" href="${runtimeUrl("/task.html")}" target="_blank" rel="noreferrer">打开当前随包旧版 task 页面</a>
       </div>
-      <div id="task-table-container" class="task-table-container loading">Loading tasks...</div>
+      <div id="task-table-container" class="task-table-container loading">正在读取任务列表...</div>
     </section>
   `;
 }

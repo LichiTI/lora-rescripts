@@ -4,13 +4,12 @@ export function renderSd3TrainPage() {
   return renderTrainingPage({
     prefix: "sd3",
     heroKicker: "sd3 train",
-    heroTitle: "SD3 LoRA source training page",
-    heroLede:
-      "This route extends the same source-side training bridge to SD3 so we can keep the fast-moving schema-driven trainer paths on one shared foundation.",
-    runnerTitle: "SD3 source-side runner",
-    startButtonLabel: "Start SD3 training",
+    heroTitle: "SD3 / SD3.5 LoRA 训练",
+    heroLede: "SD3 路线也接到了同一套训练桥接层上，方便统一处理 schema 表单、配置预览和训练启动流程。",
+    runnerTitle: "SD3 训练",
+    startButtonLabel: "开始 SD3 训练",
     legacyPath: "/lora/sd3.html",
-    legacyLabel: "Open current shipped SD3 page",
-    renderedTitle: "SD3 form bridge",
+    legacyLabel: "打开当前随包 SD3 页面",
+    renderedTitle: "SD3 参数表单",
   });
 }

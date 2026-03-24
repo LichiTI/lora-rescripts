@@ -776,15 +776,15 @@ function buildSelectionNote(entry: TrainingOptionEntry | null, hiddenBySettings:
   const notes: string[] = [];
 
   if (hiddenBySettings) {
-    notes.push("Currently hidden in Settings, but kept because this value is already selected or imported.");
+    notes.push("这个值当前在设置页里被隐藏，但因为它已经被选中或从旧配置导入，所以仍会保留。");
   }
 
   if (entry?.kind === "scheduler" && entry.schedulerTypePath) {
-    notes.push(`Launch bridge writes lr_scheduler_type=${entry.schedulerTypePath}.`);
+    notes.push(`启动桥接时会写入 lr_scheduler_type=${entry.schedulerTypePath}。`);
   }
 
   if (entry?.packageName) {
-    notes.push(`Requires ${entry.packageName} in the active Python environment.`);
+    notes.push(`当前 Python 运行环境需要可导入 ${entry.packageName}。`);
   }
 
   return notes.join(" ");
@@ -793,11 +793,11 @@ function buildSelectionNote(entry: TrainingOptionEntry | null, hiddenBySettings:
 function createGenericChoice(value: string, hiddenBySettings: boolean): TrainingOptionChoice {
   return {
     value,
-    label: hiddenBySettings ? `${value} [hidden/imported]` : value,
-    description: "Imported value kept for compatibility.",
+    label: hiddenBySettings ? `${value} [已隐藏/导入]` : value,
+    description: "为了兼容旧配置而保留的导入值。",
     hiddenBySettings,
     selectionNote: hiddenBySettings
-      ? "This value is not in the current visible catalog, but it is preserved so older configs keep working."
+      ? "这个值不在当前可见目录里，但为了让旧配置继续工作，仍然会被保留下来。"
       : undefined,
   };
 }
@@ -835,7 +835,7 @@ export function buildTrainingOptionChoices(
 
     choices.push({
       value,
-      label: `${entry.label} [${entry.sourceLabel}]${hiddenBySettings ? " [hidden]" : ""}`,
+      label: `${entry.label} [${entry.sourceLabel}]${hiddenBySettings ? " [已隐藏]" : ""}`,
       description: entry.description,
       sourceLabel: entry.sourceLabel,
       hiddenBySettings,

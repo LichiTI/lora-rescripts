@@ -57,7 +57,7 @@ export function wireTrainingRouteControls(options: TrainingRouteControlsOptions)
     const nextState = createDefaultState();
     applySelectedGpuIds(config.prefix, []);
     mountTrainingState(nextState);
-    setTrainingUtilityNote(config.prefix, "Reset to schema defaults.", "warning");
+    setTrainingUtilityNote(config.prefix, "已恢复为 schema 默认值。", "warning");
   });
 
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-save-params`)?.addEventListener("click", () => {
@@ -67,7 +67,7 @@ export function wireTrainingRouteControls(options: TrainingRouteControlsOptions)
     }
 
     saveCurrentSnapshotToHistory(config, currentState, bindHistoryPanel);
-    setTrainingUtilityNote(config.prefix, "Current parameters saved to history.", "success");
+    setTrainingUtilityNote(config.prefix, "当前参数已保存到历史记录。", "success");
   });
 
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-read-params`)?.addEventListener("click", () => {
@@ -75,13 +75,13 @@ export function wireTrainingRouteControls(options: TrainingRouteControlsOptions)
   });
 
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-clear-autosave`)?.addEventListener("click", () => {
-    if (!window.confirm("Clear the local autosave for this training route?")) {
+    if (!window.confirm("要清空这个训练路线的本地自动保存吗？")) {
       return;
     }
 
     clearTrainingAutosave(config.routeId);
     renderTrainingAutosaveStatus(config.prefix, null);
-    setTrainingUtilityNote(config.prefix, "Cleared local autosave for this route.", "warning");
+    setTrainingUtilityNote(config.prefix, "这个训练路线的本地自动保存已清空。", "warning");
   });
 
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-save-recipe`)?.addEventListener("click", () => {
@@ -93,7 +93,7 @@ export function wireTrainingRouteControls(options: TrainingRouteControlsOptions)
     const prepared = buildPreparedTrainingPayload(currentState);
     const saved = saveCurrentTrainingRecipe(config, currentState, prepared, bindRecipePanel);
     if (saved) {
-      setTrainingUtilityNote(config.prefix, "Current config saved to the local recipe library.", "success");
+      setTrainingUtilityNote(config.prefix, "当前配置已保存到本地配方库。", "success");
     }
   });
 

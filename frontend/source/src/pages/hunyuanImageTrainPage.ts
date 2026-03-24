@@ -3,14 +3,13 @@ import { renderTrainingPage } from "./trainingPage";
 export function renderHunyuanImageTrainPage() {
   return renderTrainingPage({
     prefix: "hunyuan-image",
-    heroKicker: "hunyuan image",
-    heroTitle: "Hunyuan Image LoRA source training page",
-    heroLede:
-      "This route exposes the Hunyuan Image LoRA schema so newer image trainer families live on the same source-side bridge instead of staying legacy-only.",
-    runnerTitle: "Hunyuan Image source-side runner",
-    startButtonLabel: "Start Hunyuan Image training",
+    heroKicker: "hunyuan image train",
+    heroTitle: "Hunyuan Image LoRA 训练",
+    heroLede: "Hunyuan Image 训练路线已经接入源码版桥接层，用来统一参数表单、检查和启动行为。",
+    runnerTitle: "Hunyuan Image 训练",
+    startButtonLabel: "开始 Hunyuan Image 训练",
     legacyPath: "/lora/hunyuan.html",
-    legacyLabel: "Open current shipped Hunyuan Image page",
-    renderedTitle: "Hunyuan Image form bridge",
+    legacyLabel: "打开当前随包 Hunyuan Image 页面",
+    renderedTitle: "Hunyuan Image 参数表单",
   });
 }

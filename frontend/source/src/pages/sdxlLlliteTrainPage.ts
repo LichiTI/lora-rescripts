@@ -4,19 +4,12 @@ export function renderSdxlLlliteTrainPage() {
   return renderTrainingPage({
     prefix: "sdxl-lllite",
     heroKicker: "sdxl lllite",
-    heroTitle: "SDXL LLLite source training page",
-    heroLede:
-      "This route keeps the SDXL ControlNet-LLLite path on the shared source-side training bridge so even the more specialized conditioning flow no longer needs its own one-off migration path.",
-    runnerTitle: "SDXL LLLite source-side runner",
-    startButtonLabel: "Start SDXL LLLite training",
+    heroTitle: "SDXL LLLite 训练",
+    heroLede: "SDXL LLLite 训练入口已经并入源码版训练桥接层，方便保持参数生成、检查与启动流程一致。",
+    runnerTitle: "SDXL LLLite 训练",
+    startButtonLabel: "开始 SDXL LLLite 训练",
     legacyPath: "/lora/sdxl-lllite.html",
-    legacyLabel: "Open current shipped SDXL LLLite page",
-    renderedTitle: "SDXL LLLite form bridge",
-    routeNotice: {
-      kicker: "experimental",
-      title: "SDXL clip_skip is experimental on LLLite too",
-      detail:
-        "The SDXL-side text encoding path is shared here, so clip_skip support is available but still experimental. Keep training and inference behavior matched if you use it.",
-    },
+    legacyLabel: "打开当前随包 SDXL LLLite 页面",
+    renderedTitle: "SDXL LLLite 参数表单",
   });
 }

@@ -23,18 +23,18 @@ const WORKSPACE_RUNTIME_PACKAGES = [
 
 function formatRuntimePackages(packages?: Record<string, RuntimePackageRecord>) {
   if (!packages) {
-    return "runtime packages unavailable";
+    return "运行时依赖信息不可用";
   }
 
   const tracked = WORKSPACE_RUNTIME_PACKAGES
     .map((name) => packages[name])
     .filter((record): record is RuntimePackageRecord => Boolean(record));
   if (tracked.length === 0) {
-    return "runtime packages unavailable";
+    return "运行时依赖信息不可用";
   }
 
   return tracked
-    .map((record) => `${record.display_name}:${record.importable ? "ready" : record.installed ? "broken" : "missing"}`)
+    .map((record) => `${record.display_name}:${record.importable ? "可用" : record.installed ? "异常" : "缺失"}`)
     .join(" | ");
 }
 
@@ -52,29 +52,29 @@ export async function bindWorkspaceData() {
 
   if (schemaResult.status === "fulfilled") {
     const schemas = schemaResult.value.data?.schemas ?? [];
-    setText("diag-schemas-title", `${schemas.length} schema hashes loaded`);
-    setText("diag-schemas-detail", schemas.slice(0, 4).map((schema) => schema.name).join(", ") || "No schema names returned.");
+    setText("diag-schemas-title", `已读取 ${schemas.length} 个 schema 哈希`);
+    setText("diag-schemas-detail", schemas.slice(0, 4).map((schema) => schema.name).join(", ") || "没有返回 schema 名称。");
   } else {
-    setText("diag-schemas-title", "Schema hash request failed");
-    setText("diag-schemas-detail", schemaResult.reason instanceof Error ? schemaResult.reason.message : "Unknown error");
+    setText("diag-schemas-title", "schema 哈希读取失败");
+    setText("diag-schemas-detail", schemaResult.reason instanceof Error ? schemaResult.reason.message : "未知错误");
   }
 
   if (presetResult.status === "fulfilled") {
     const presets = presetResult.value.data?.presets ?? [];
-    setText("diag-presets-title", `${presets.length} presets loaded`);
-    setText("diag-presets-detail", "Source migration can reuse preset grouping later.");
+    setText("diag-presets-title", `已读取 ${presets.length} 个预设`);
+    setText("diag-presets-detail", "这些预设后续可以继续复用到源码版训练页。");
   } else {
-    setText("diag-presets-title", "Preset request failed");
-    setText("diag-presets-detail", presetResult.reason instanceof Error ? presetResult.reason.message : "Unknown error");
+    setText("diag-presets-title", "预设读取失败");
+    setText("diag-presets-detail", presetResult.reason instanceof Error ? presetResult.reason.message : "未知错误");
   }
 
   if (taskResult.status === "fulfilled") {
     const tasks = taskResult.value.data?.tasks ?? [];
-    setText("diag-tasks-title", "Task manager reachable");
+    setText("diag-tasks-title", "任务管理器可访问");
     setText("diag-tasks-detail", formatTaskSummary(tasks));
   } else {
-    setText("diag-tasks-title", "Task request failed");
-    setText("diag-tasks-detail", taskResult.reason instanceof Error ? taskResult.reason.message : "Unknown error");
+    setText("diag-tasks-title", "任务状态读取失败");
+    setText("diag-tasks-detail", taskResult.reason instanceof Error ? taskResult.reason.message : "未知错误");
   }
 
   if (gpuResult.status === "fulfilled") {
@@ -82,24 +82,24 @@ export async function bindWorkspaceData() {
     const xformers = gpuResult.value.data?.xformers;
     const runtime = gpuResult.value.data?.runtime;
     const xformersSummary = xformers
-      ? `xformers: ${xformers.installed ? "installed" : "missing"}, ${xformers.supported ? "supported" : "fallback"}`
-      : "xformers info unavailable";
+      ? `xformers: ${xformers.installed ? "已安装" : "缺失"}，${xformers.supported ? "可用" : "回退"}`
+      : "xformers 信息不可用";
     const runtimeSummary = runtime
-      ? `${runtime.environment} Python ${runtime.python_version} | ${formatRuntimePackages(runtime.packages)}`
-      : "runtime dependency status unavailable";
-    setText("diag-gpu-title", `${cards.length} GPU entries reachable`);
+      ? `${runtime.environment} 运行时 · Python ${runtime.python_version} | ${formatRuntimePackages(runtime.packages)}`
+      : "运行时依赖状态不可用";
+    setText("diag-gpu-title", `可访问 ${cards.length} 条 GPU 记录`);
     setText("diag-gpu-detail", `${formatGpuList(cards)} | ${xformersSummary} | ${runtimeSummary}`);
   } else {
-    setText("diag-gpu-title", "GPU request failed");
-    setText("diag-gpu-detail", gpuResult.reason instanceof Error ? gpuResult.reason.message : "Unknown error");
+    setText("diag-gpu-title", "GPU 状态读取失败");
+    setText("diag-gpu-detail", gpuResult.reason instanceof Error ? gpuResult.reason.message : "未知错误");
   }
 
   if (tagEditorResult.status === "fulfilled") {
-    setText("diag-tageditor-title", "Tag editor status reachable");
+    setText("diag-tageditor-title", "标签编辑器状态可访问");
     setText("diag-tageditor-detail", formatTagEditor(tagEditorResult.value));
   } else {
-    setText("diag-tageditor-title", "Tag editor status request failed");
-    setText("diag-tageditor-detail", tagEditorResult.reason instanceof Error ? tagEditorResult.reason.message : "Unknown error");
+    setText("diag-tageditor-title", "标签编辑器状态读取失败");
+    setText("diag-tageditor-detail", tagEditorResult.reason instanceof Error ? tagEditorResult.reason.message : "未知错误");
   }
 
   if (schemaAllResult.status === "fulfilled") {
@@ -108,7 +108,7 @@ export async function bindWorkspaceData() {
     renderSchemaCoverage(schemas);
     renderTrainingRouteCatalog(schemas, presetResult.status === "fulfilled" ? presetResult.value.data?.presets ?? [] : []);
   } else {
-    setHtml("schema-browser", `<p>${schemaAllResult.reason instanceof Error ? schemaAllResult.reason.message : "Schema inventory request failed."}</p>`);
+    setHtml("schema-browser", `<p>${schemaAllResult.reason instanceof Error ? schemaAllResult.reason.message : "schema 清单读取失败。"}</p>`);
     renderTrainingRouteCatalog([], presetResult.status === "fulfilled" ? presetResult.value.data?.presets ?? [] : []);
   }
 }
@@ -127,34 +127,34 @@ function inferTrainingFamily(schemaName: string) {
 }
 
 function inferRouteCapabilities(config: { routeId: string; schemaName: string }, schemaSource: string, family: string) {
-  const capabilities: string[] = ["preflight", "prompt workspace", "history", "recipes"];
+  const capabilities: string[] = ["启动前检查", "提示词工作区", "历史记录", "本地配方"];
 
   if (schemaSource.includes("resume:")) {
-    capabilities.push("resume");
+    capabilities.push("续训");
   }
   if (schemaSource.includes("prompt_file") || schemaSource.includes("positive_prompts")) {
-    capabilities.push("sample prompts");
+    capabilities.push("示例提示词");
   }
   if (schemaSource.includes("validation_split")) {
-    capabilities.push("validation");
+    capabilities.push("验证集");
   }
   if (schemaSource.includes("masked_loss")) {
-    capabilities.push("masked loss");
+    capabilities.push("蒙版损失");
   }
   if (schemaSource.includes("save_state")) {
-    capabilities.push("save state");
+    capabilities.push("保存状态");
   }
   if (schemaSource.includes("conditioning_data_dir")) {
-    capabilities.push("conditioning");
+    capabilities.push("条件图");
   }
   if (family === "Textual Inversion") {
-    capabilities.push("embeddings");
+    capabilities.push("Embedding");
   }
   if (family === "ControlNet") {
     capabilities.push("controlnet");
   }
   if (config.routeId.startsWith("sdxl")) {
-    capabilities.push("experimental clip-skip");
+    capabilities.push("实验性 clip_skip");
   }
 
   return [...new Set(capabilities)];

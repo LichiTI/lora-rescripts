@@ -5,13 +5,13 @@ import { escapeHtml } from "../shared/textUtils";
 
 export function renderSchemaBrowser(schemas: SchemaRecord[]) {
   if (schemas.length === 0) {
-    setHtml("schema-browser", "<p>No schemas returned.</p>");
+    setHtml("schema-browser", "<p>没有返回任何 schema。</p>");
     return;
   }
 
   const items = schemas
     .map((schema) => {
-      const preview = schema.schema.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() || "No preview available.";
+      const preview = schema.schema.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() || "没有可用预览。";
       return `
         <article class="schema-card">
           <div class="schema-head">
@@ -35,10 +35,10 @@ export function renderSchemaCoverage(schemas: SchemaRecord[]) {
 
   setHtml(
     "schema-mapped",
-    mapped.length ? mapped.map((name) => `<span class="coverage-pill">${escapeHtml(name)}</span>`).join("") : "<p>No mapped schema hints yet.</p>"
+    mapped.length ? mapped.map((name) => `<span class="coverage-pill">${escapeHtml(name)}</span>`).join("") : "<p>当前还没有已映射的 schema 提示。</p>"
   );
   setHtml(
     "schema-unmapped",
-    unmapped.length ? unmapped.map((name) => `<span class="coverage-pill coverage-pill-muted">${escapeHtml(name)}</span>`).join("") : "<p>All schemas are represented in the current route hints.</p>"
+    unmapped.length ? unmapped.map((name) => `<span class="coverage-pill coverage-pill-muted">${escapeHtml(name)}</span>`).join("") : "<p>当前路由提示已经覆盖了全部 schema。</p>"
   );
 }

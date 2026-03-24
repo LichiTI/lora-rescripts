@@ -26,7 +26,7 @@ function normalizeGpuCard(card: GraphicCardEntry, index: number) {
 
 export function renderGpuSelector(containerId: string, cards: GraphicCardEntry[]) {
   if (cards.length === 0) {
-    setHtml(containerId, "<p>No GPUs reported. Training will use the backend default environment.</p>");
+    setHtml(containerId, "<p>当前没有返回 GPU 信息，本次训练会使用后端默认环境。</p>");
     return;
   }
 

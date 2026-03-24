@@ -3,7 +3,17 @@
 }
 
 .settings-option-sections {
+  display: grid;
+  gap: 1rem;
   align-items: start;
+}
+
+.settings-example-container {
+  align-items: start;
+}
+
+.settings-left-pane {
+  align-content: start;
 }
 
 .settings-option-toolbar {

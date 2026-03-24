@@ -23,7 +23,7 @@ async function loadTasksPage() {
       });
     });
   } catch (error) {
-    setHtml("task-table-container", `<p>${error instanceof Error ? escapeHtml(error.message) : "Task request failed."}</p>`);
+    setHtml("task-table-container", `<p>${error instanceof Error ? escapeHtml(error.message) : "任务列表读取失败。"}</p>`);
   }
 }
 

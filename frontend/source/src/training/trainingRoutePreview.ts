@@ -28,7 +28,7 @@ export function createTrainingStateChangeHandler(
       renderTrainValidationStatus(
         config.prefix,
         { warnings: [], errors: [] },
-        error instanceof Error ? error.message : "The current state could not be converted into a launch payload."
+        error instanceof Error ? error.message : "当前表单状态暂时无法转换成训练请求体。"
       );
     }
 

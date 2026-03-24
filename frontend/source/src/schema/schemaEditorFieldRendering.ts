@@ -124,7 +124,7 @@ function renderTableEditor(field: SchemaField, value: unknown, disabledAttr: str
                   type="button"
                   ${disabledAttr}
                 >
-                  Remove
+                  删除
                 </button>
               </div>
             `
@@ -138,9 +138,9 @@ function renderTableEditor(field: SchemaField, value: unknown, disabledAttr: str
           type="button"
           ${disabledAttr}
         >
-          Add row
+          添加一行
         </button>
-        <span class="table-editor-note">One argument per row.</span>
+        <span class="table-editor-note">每行一个参数。</span>
       </div>
     </div>
   `;
@@ -158,7 +158,7 @@ function renderSchemaFieldControl(field: SchemaField, value: unknown) {
     return `
       <label class="checkbox-row" for="${domId}">
         <input id="${domId}" data-field-path="${escapedPath}" data-field-kind="boolean" type="checkbox" ${value ? "checked" : ""} ${disabledAttr} />
-        <span>${schema.defaultValue === true ? "default on" : "toggle"}</span>
+        <span>${schema.defaultValue === true ? "默认开启" : "开关"}</span>
       </label>
     `;
   }
@@ -257,11 +257,11 @@ function renderSchemaFieldControl(field: SchemaField, value: unknown) {
             type="button"
             ${disabledAttr}
           >
-            Browse
+            浏览
           </button>
         </div>
         <p class="picker-status" data-picker-status-for="${escapedPath}">
-          Uses the backend native ${pickerType === "folder" ? "folder" : "file"} picker.
+          使用后端原生${pickerType === "folder" ? "文件夹" : "文件"}选择器。
         </p>
       </div>
     `;
@@ -279,8 +279,8 @@ function renderSchemaField(field: SchemaField, value: unknown) {
   const badges = [
     `<span class="mini-badge">${escapeHtml(schema.kind)}</span>`,
     schema.roleName ? `<span class="mini-badge mini-badge-muted">${escapeHtml(schema.roleName)}</span>` : "",
-    schema.requiredFlag ? `<span class="mini-badge mini-badge-accent">required</span>` : "",
-    schema.disabledFlag ? `<span class="mini-badge mini-badge-muted">disabled</span>` : "",
+    schema.requiredFlag ? `<span class="mini-badge mini-badge-accent">必填</span>` : "",
+    schema.disabledFlag ? `<span class="mini-badge mini-badge-muted">禁用</span>` : "",
   ]
     .filter(Boolean)
     .join("");
@@ -302,11 +302,11 @@ function renderSchemaField(field: SchemaField, value: unknown) {
         </div>
         <div class="mini-badge-row">${badges}</div>
       </div>
-      <p class="field-description">${escapeHtml(schema.descriptionText || "No description")}</p>
+      <p class="field-description">${escapeHtml(schema.descriptionText || "暂无说明")}</p>
       ${renderSchemaFieldControl(field, value)}
       <div class="field-meta">
-        <span><strong>Default:</strong> ${escapeHtml(schema.defaultValue ?? "(none)")}</span>
-        ${constraints ? `<span><strong>Constraints:</strong> ${escapeHtml(constraints)}</span>` : ""}
+        <span><strong>默认值：</strong> ${escapeHtml(schema.defaultValue ?? "（空）")}</span>
+        ${constraints ? `<span><strong>约束：</strong> ${escapeHtml(constraints)}</span>` : ""}
       </div>
     </article>
   `;
@@ -323,7 +323,7 @@ export function getRenderedPayload(state: SchemaBridgeState) {
 export function renderSchemaSections(state: SchemaBridgeState, sectionsId: string) {
   const visibleSections = getVisibleSections(state);
   if (visibleSections.length === 0) {
-    setHtml(sectionsId, "<p>No renderable sections extracted from this schema.</p>");
+    setHtml(sectionsId, "<p>当前 schema 没有提取出可渲染的表单分组。</p>");
     return;
   }
 
@@ -337,10 +337,10 @@ export function renderSchemaSections(state: SchemaBridgeState, sectionsId: strin
         <article class="panel schema-section-card">
           <div class="schema-section-head">
             <div>
-              <p class="panel-kicker">${section.conditional ? "conditional section" : "section"}</p>
+              <p class="panel-kicker">${section.conditional ? "条件分组" : "分组"}</p>
               <h3>${escapeHtml(section.title)}</h3>
             </div>
-            <span class="coverage-pill">${section.fields.length} fields</span>
+            <span class="coverage-pill">${section.fields.length} 个字段</span>
           </div>
           ${conditions}
           <div class="field-grid">

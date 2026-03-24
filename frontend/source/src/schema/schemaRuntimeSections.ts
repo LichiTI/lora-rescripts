@@ -35,7 +35,7 @@ function extractSectionsFromNode(node: RuntimeSchemaNode, seed: string, sections
     if (fields.length > 0) {
       sections.push({
         id: seed,
-        title: node.descriptionText || "Unnamed section",
+        title: node.descriptionText || "未命名分组",
         fields,
         conditions: branchConditions(node.fields),
         constants: branchConstants(node.fields),
@@ -51,7 +51,7 @@ function extractSectionsFromNode(node: RuntimeSchemaNode, seed: string, sections
         if (fields.length > 0) {
           sections.push({
             id: `${seed}-u${index}`,
-            title: child.descriptionText || node.descriptionText || `Conditional branch ${index + 1}`,
+            title: child.descriptionText || node.descriptionText || `条件分支 ${index + 1}`,
             fields,
             conditional: true,
             conditions: branchConditions(child.fields),

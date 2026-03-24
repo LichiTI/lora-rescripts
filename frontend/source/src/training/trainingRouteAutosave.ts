@@ -54,5 +54,5 @@ export function restoreTrainingAutosave(options: RestoreTrainingAutosaveOptions)
     return;
   }
 
-  setTrainingUtilityNote(config.prefix, "Restored autosaved parameters for this route.", "success");
+  setTrainingUtilityNote(config.prefix, "已恢复这个训练路线的自动保存参数。", "success");
 }

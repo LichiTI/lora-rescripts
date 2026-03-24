@@ -4,19 +4,18 @@ export function renderSdxlTrainPage() {
   return renderTrainingPage({
     prefix: "sdxl",
     heroKicker: "sdxl train",
-    heroTitle: "First source-side SDXL training page",
-    heroLede:
-      "This is the first page that moves beyond passive inspection: it renders the SDXL schema, tracks a real config model and can submit to the current training backend.",
-    runnerTitle: "SDXL source-side runner",
-    startButtonLabel: "Start SDXL training",
+    heroTitle: "SDXL LoRA 训练",
+    heroLede: "这里会按旧版训练页的使用习惯整理 SDXL LoRA 表单、预检查、参数预览和启动流程。",
+    runnerTitle: "SDXL 训练",
+    startButtonLabel: "开始 SDXL 训练",
     legacyPath: "/lora/sdxl.html",
-    legacyLabel: "Open current shipped SDXL page",
-    renderedTitle: "SDXL form bridge",
+    legacyLabel: "打开当前随包 SDXL 页面",
+    renderedTitle: "SDXL 参数表单",
     routeNotice: {
       kicker: "experimental",
-      title: "SDXL clip_skip is now opt-in experimental support",
+      title: "SDXL clip_skip 当前仍属于实验性支持",
       detail:
-        "This build can pass clip_skip through the SDXL training path, but it should be treated as experimental. If you rely on it, use matching SDXL clip-skip behavior at inference time too.",
+        "当前构建已经可以把 clip_skip 传入 SDXL 训练路径，但仍建议按实验性选项看待。如果训练里启用了它，推理时也尽量保持对应的 SDXL clip_skip 行为。",
     },
   });
 }

@@ -18,7 +18,7 @@ async function performTrainingPreflight(
   try {
     const result = await runTrainingPreflight(payload);
     if (result.status !== "success") {
-      throw new Error(result.message || "Training preflight failed.");
+      throw new Error(result.message || "训练预检查失败。");
     }
     renderTrainingPreflightReport(config.prefix, result.data ?? null);
     return result.data ?? null;
@@ -26,7 +26,7 @@ async function performTrainingPreflight(
     renderTrainingPreflightReport(
       config.prefix,
       null,
-      error instanceof Error ? error.message : "Training preflight failed."
+      error instanceof Error ? error.message : "训练预检查失败。"
     );
     throw error;
   }
@@ -38,25 +38,25 @@ export function wireTrainingStopControl(config: TrainingRouteConfig) {
       const result = await fetchTasks();
       const runningTask = (result.data?.tasks ?? []).find((task) => String(task.status).toUpperCase() === "RUNNING");
       if (!runningTask) {
-        setTrainingUtilityNote(config.prefix, "No running training task was found.", "warning");
+        setTrainingUtilityNote(config.prefix, "当前没有找到正在运行中的训练任务。", "warning");
         return;
       }
 
       const taskId = String(runningTask.id ?? runningTask.task_id ?? "");
       if (!taskId) {
-        setTrainingUtilityNote(config.prefix, "The running task does not expose an id.", "error");
+        setTrainingUtilityNote(config.prefix, "这个运行中的任务没有暴露可用的 id。", "error");
         return;
       }
 
-      if (!window.confirm(`Stop running task ${taskId}?`)) {
+      if (!window.confirm(`要停止正在运行的任务 ${taskId} 吗？`)) {
         return;
       }
 
       await terminateTask(taskId);
-      renderTrainSubmitStatus(config.prefix, "Training stop requested", `Sent terminate request for task ${taskId}.`, "warning");
-      setTrainingUtilityNote(config.prefix, `Terminate requested for task ${taskId}.`, "warning");
+      renderTrainSubmitStatus(config.prefix, "已请求停止训练", `已经向任务 ${taskId} 发送终止请求。`, "warning");
+      setTrainingUtilityNote(config.prefix, `已向任务 ${taskId} 发送终止请求。`, "warning");
     } catch (error) {
-      setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Failed to stop training.", "error");
+      setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "停止训练失败。", "error");
     }
   });
 }
@@ -69,7 +69,7 @@ export function wireTrainingStartControl(
   document.querySelector<HTMLButtonElement>(`#${config.prefix}-run-preflight`)?.addEventListener("click", async () => {
     const currentState = getCurrentState();
     if (!currentState) {
-      renderTrainSubmitStatus(config.prefix, "Editor not ready", `The ${config.modelLabel} schema editor state is not initialized yet.`, "error");
+      renderTrainSubmitStatus(config.prefix, "编辑器尚未就绪", `${config.modelLabel} 的 schema 编辑器状态还没有初始化完成。`, "error");
       return;
     }
 
@@ -77,9 +77,9 @@ export function wireTrainingStartControl(
       const prepared = buildPreparedTrainingPayload(currentState);
       renderTrainValidationStatus(config.prefix, prepared.checks);
       await performTrainingPreflight(config, prepared.payload);
-      setTrainingUtilityNote(config.prefix, "Training preflight completed.", "success");
+      setTrainingUtilityNote(config.prefix, "训练预检查已完成。", "success");
     } catch (error) {
-      setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Training preflight failed.", "error");
+      setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "训练预检查失败。", "error");
     }
   });
 
@@ -87,17 +87,17 @@ export function wireTrainingStartControl(
   startButton?.addEventListener("click", async () => {
     const currentState = getCurrentState();
     if (!currentState) {
-      renderTrainSubmitStatus(config.prefix, "Editor not ready", `The ${config.modelLabel} schema editor state is not initialized yet.`, "error");
+      renderTrainSubmitStatus(config.prefix, "编辑器尚未就绪", `${config.modelLabel} 的 schema 编辑器状态还没有初始化完成。`, "error");
       return;
     }
 
     startButton.setAttribute("disabled", "true");
-    renderTrainSubmitStatus(config.prefix, "Submitting training job...", "Sending the current payload to /api/run.", "idle");
+    renderTrainSubmitStatus(config.prefix, "正在提交训练任务...", "正在把当前请求体发送到 /api/run。", "idle");
     try {
       const prepared = buildPreparedTrainingPayload(currentState);
 
       if (prepared.checks.errors.length > 0) {
-        renderTrainSubmitStatus(config.prefix, "Fix parameter conflicts first", prepared.checks.errors.join(" "), "error");
+        renderTrainSubmitStatus(config.prefix, "请先修正参数冲突", prepared.checks.errors.join(" "), "error");
         renderTrainValidationStatus(config.prefix, prepared.checks);
         return;
       }
@@ -106,7 +106,7 @@ export function wireTrainingStartControl(
       if (preflight && !preflight.can_start) {
         renderTrainSubmitStatus(
           config.prefix,
-          "Resolve preflight errors first",
+          "请先解决预检查错误",
           preflight.errors.join(" "),
           "error"
         );
@@ -119,15 +119,15 @@ export function wireTrainingStartControl(
         const warnings = warningParts.join(" ");
         renderTrainSubmitStatus(
           config.prefix,
-          "Training request accepted",
-          `${result.message || "Training started."}${warnings ? ` ${warnings}` : ""}`,
+          "训练请求已受理",
+          `${result.message || "训练已启动。"}${warnings ? ` ${warnings}` : ""}`,
           warnings ? "warning" : "success"
         );
       } else {
-        renderTrainSubmitStatus(config.prefix, "Training request failed", result.message || "Unknown backend failure.", "error");
+        renderTrainSubmitStatus(config.prefix, "训练请求失败", result.message || "后端返回了未知错误。", "error");
       }
     } catch (error) {
-      renderTrainSubmitStatus(config.prefix, "Training request failed", error instanceof Error ? error.message : "Unknown network error.", "error");
+      renderTrainSubmitStatus(config.prefix, "训练请求失败", error instanceof Error ? error.message : "发生了未知网络错误。", "error");
     } finally {
       startButton.removeAttribute("disabled");
     }

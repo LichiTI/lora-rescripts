@@ -21,8 +21,8 @@ export async function bindSchemaBridgeData(
     const preferred = selectable.find((record) => record.name === "sdxl-lora")?.name ?? selectable[0]?.name;
 
     if (!preferred) {
-      setText("schema-summary", "No selectable schemas were returned.");
-      setHtml("schema-sections", "<p>No schema runtime available.</p>");
+      setText("schema-summary", "后端没有返回可用的 schema。");
+      setHtml("schema-sections", "<p>当前没有可用的 schema 运行结果。</p>");
       return;
     }
 
@@ -33,8 +33,8 @@ export async function bindSchemaBridgeData(
       () => undefined
     );
   } catch (error) {
-    setText("schema-summary", "Schema bridge request failed");
-    setHtml("schema-sections", `<p>${error instanceof Error ? escapeHtml(error.message) : "Unknown error"}</p>`);
+    setText("schema-summary", "schema 桥接请求失败");
+    setHtml("schema-sections", `<p>${error instanceof Error ? escapeHtml(error.message) : "未知错误"}</p>`);
     setPreText("schema-preview", "{}");
   }
 }

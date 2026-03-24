@@ -4,19 +4,18 @@ export function renderSdxlControlNetTrainPage() {
   return renderTrainingPage({
     prefix: "sdxl-controlnet",
     heroKicker: "sdxl controlnet",
-    heroTitle: "SDXL ControlNet source training page",
-    heroLede:
-      "This route keeps the SDXL ControlNet training path on the same source-side schema bridge, normalized payload builder and launch pipeline as the main LoRA routes.",
-    runnerTitle: "SDXL ControlNet source-side runner",
-    startButtonLabel: "Start SDXL ControlNet training",
+    heroTitle: "SDXL ControlNet 训练",
+    heroLede: "SDXL ControlNet 表单已经接入源码版训练桥接层，用来统一参数处理、兼容性检查和启动逻辑。",
+    runnerTitle: "SDXL ControlNet 训练",
+    startButtonLabel: "开始 SDXL ControlNet 训练",
     legacyPath: "/lora/sdxl-controlnet.html",
-    legacyLabel: "Open current shipped SDXL ControlNet page",
-    renderedTitle: "SDXL ControlNet form bridge",
+    legacyLabel: "打开当前随包 SDXL ControlNet 页面",
+    renderedTitle: "SDXL ControlNet 参数表单",
     routeNotice: {
       kicker: "experimental",
-      title: "SDXL clip_skip remains experimental here as well",
+      title: "SDXL ControlNet 路线里的 clip_skip 也仍属实验性支持",
       detail:
-        "ControlNet still shares the SDXL text-encoding path. If you enable clip_skip on this route, keep your inference stack aligned with the same SDXL clip-skip behavior.",
+        "ControlNet 仍然共享 SDXL 文本编码路径。如果你在这条路线里启用了 clip_skip，推理侧也尽量保持相同的 SDXL clip_skip 行为。",
     },
   });
 }

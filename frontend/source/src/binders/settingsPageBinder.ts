@@ -28,6 +28,69 @@ const TRACKED_OPTION_PACKAGES = [
   "transformers",
 ];
 
+function formatOptionSourceLabel(sourceLabel: string) {
+  switch (sourceLabel) {
+    case "bridge built-in":
+      return "桥接内置";
+    case "torch.optim":
+      return "torch.optim";
+    case "torch lr_scheduler":
+      return "torch 调度器";
+    case "bitsandbytes":
+      return "bitsandbytes";
+    case "schedulefree":
+      return "schedulefree";
+    case "transformers":
+      return "transformers";
+    case "diffusers":
+      return "diffusers";
+    case "pytorch-optimizer":
+      return "pytorch-optimizer";
+    case "prodigyplus":
+      return "prodigyplus";
+    default:
+      return sourceLabel;
+  }
+}
+
+function formatTrainingOptionDescription(kind: TrainingOptionKind, entry: TrainingOptionEntry) {
+  const itemLabel = kind === "optimizer" ? "优化器" : "调度器";
+
+  if (entry.source === "bridge") {
+    return `项目桥接层已接入的${itemLabel}条目，可直接沿用现有训练流程。`;
+  }
+
+  if (entry.source === "bitsandbytes") {
+    return `来自 bitsandbytes 的 ${itemLabel} 条目，通常用于更省显存的训练场景。`;
+  }
+
+  if (entry.source === "schedulefree") {
+    return `来自 schedulefree 的 ${itemLabel} 条目，适合想减少额外学习率调度依赖时使用。`;
+  }
+
+  if (entry.source === "transformers") {
+    return `来自 transformers 的 ${itemLabel} 条目，启用前需要当前运行环境可导入对应依赖。`;
+  }
+
+  if (entry.source === "diffusers") {
+    return `diffusers 内置的 ${itemLabel} 条目，也是当前项目默认最优先暴露的一组。`;
+  }
+
+  if (entry.source === "torch") {
+    return `PyTorch 自带的 ${itemLabel} 条目，适合希望继续使用标准训练组件的场景。`;
+  }
+
+  if (entry.source === "pytorch-optimizer") {
+    return `来自 pytorch-optimizer 扩展库的 ${itemLabel} 条目，属于额外可选能力。`;
+  }
+
+  if (entry.source === "prodigyplus") {
+    return "来自 ProdigyPlus 扩展的优化器条目，通常用于更激进的训练配方。";
+  }
+
+  return entry.description || `${entry.label} ${itemLabel}。`;
+}
+
 function renderSourceCoverage(entries: TrainingOptionEntry[], visibleValues: Set<string>) {
   const counts = new Map<string, { total: number; visible: number }>();
 
@@ -43,7 +106,7 @@ function renderSourceCoverage(entries: TrainingOptionEntry[], visibleValues: Set
   return [...counts.entries()]
     .map(
       ([sourceLabel, record]) =>
-        `<span class="coverage-pill ${record.visible > 0 ? "" : "coverage-pill-muted"}">${escapeHtml(sourceLabel)} <strong>${record.visible}/${record.total}</strong></span>`
+        `<span class="coverage-pill ${record.visible > 0 ? "" : "coverage-pill-muted"}">${escapeHtml(formatOptionSourceLabel(sourceLabel))} <strong>${record.visible}/${record.total}</strong></span>`
     )
     .join("");
 }
@@ -54,14 +117,14 @@ function renderPackageStatePill(record?: RuntimePackageRecord | null) {
   }
 
   if (record.importable) {
-    return `<span class="coverage-pill">${escapeHtml(record.version ? `${record.display_name} ${record.version}` : `${record.display_name} ready`)}</span>`;
+    return `<span class="coverage-pill">${escapeHtml(record.version ? `${record.display_name} ${record.version}` : `${record.display_name} 可用`)}</span>`;
   }
 
   if (record.installed) {
-    return `<span class="coverage-pill coverage-pill-warning">${escapeHtml(`${record.display_name} import failed`)}</span>`;
+    return `<span class="coverage-pill coverage-pill-warning">${escapeHtml(`${record.display_name} 导入失败`)}</span>`;
   }
 
-  return `<span class="coverage-pill coverage-pill-muted">${escapeHtml(`${record.display_name} missing`)}</span>`;
+  return `<span class="coverage-pill coverage-pill-muted">${escapeHtml(`${record.display_name} 缺失`)}</span>`;
 }
 
 function renderOptionCard(
@@ -71,13 +134,13 @@ function renderOptionCard(
   runtimePackages?: Record<string, RuntimePackageRecord>
 ) {
   const valueLabel = entry.schedulerTypePath
-    ? `<strong>Bridge:</strong> <code>${escapeHtml(entry.schedulerTypePath)}</code>`
-    : `<strong>Value:</strong> <code>${escapeHtml(entry.value)}</code>`;
+    ? `<strong>桥接字段：</strong> <code>${escapeHtml(entry.schedulerTypePath)}</code>`
+    : `<strong>值：</strong> <code>${escapeHtml(entry.value)}</code>`;
   const runtimePackage = entry.packageName ? runtimePackages?.[entry.packageName] : undefined;
   const pills = [
-    `<span class="coverage-pill ${enabled ? "" : "coverage-pill-muted"}">${enabled ? "visible" : "hidden"}</span>`,
-    `<span class="coverage-pill coverage-pill-muted">${escapeHtml(entry.sourceLabel)}</span>`,
-    entry.defaultVisible ? `<span class="coverage-pill">default</span>` : `<span class="coverage-pill coverage-pill-muted">extra</span>`,
+    `<span class="coverage-pill ${enabled ? "" : "coverage-pill-muted"}">${enabled ? "显示" : "隐藏"}</span>`,
+    `<span class="coverage-pill coverage-pill-muted">${escapeHtml(formatOptionSourceLabel(entry.sourceLabel))}</span>`,
+    entry.defaultVisible ? `<span class="coverage-pill">默认</span>` : `<span class="coverage-pill coverage-pill-muted">扩展</span>`,
     entry.packageName ? `<span class="coverage-pill coverage-pill-muted">${escapeHtml(entry.packageName)}</span>` : "",
     renderPackageStatePill(runtimePackage),
   ]
@@ -85,7 +148,7 @@ function renderOptionCard(
     .join("");
 
   const runtimeNote = runtimePackage && !runtimePackage.importable
-    ? `<p class="settings-option-runtime-note">${escapeHtml(runtimePackage.reason || "This package is not importable in the active runtime.")}</p>`
+    ? `<p class="settings-option-runtime-note">${escapeHtml(runtimePackage.reason || "当前运行时中无法导入这个依赖。")}</p>`
     : "";
 
   return `
@@ -105,7 +168,7 @@ function renderOptionCard(
         </div>
         <div class="coverage-list">${pills}</div>
       </div>
-      <p class="settings-option-description">${escapeHtml(entry.description)}</p>
+      <p class="settings-option-description">${escapeHtml(formatTrainingOptionDescription(kind, entry))}</p>
       ${runtimeNote}
     </label>
   `;
@@ -115,7 +178,7 @@ function renderRuntimeSummary(runtimeLabel: string, runtimePackages?: Record<str
   setText("settings-runtime-title", runtimeLabel);
 
   if (!runtimePackages) {
-    setText("settings-runtime-body", "No runtime package information was returned.");
+    setText("settings-runtime-body", "没有返回运行时依赖信息。");
     return;
   }
 
@@ -123,15 +186,15 @@ function renderRuntimeSummary(runtimeLabel: string, runtimePackages?: Record<str
     .map((name) => runtimePackages[name])
     .filter((record): record is RuntimePackageRecord => Boolean(record));
   if (trackedRecords.length === 0) {
-    setHtml("settings-runtime-body", "<p>No tracked runtime package records were returned.</p>");
+    setHtml("settings-runtime-body", "<p>没有返回被跟踪的运行时依赖记录。</p>");
     return;
   }
   const readyCount = trackedRecords.filter((record) => record.importable).length;
 
   setHtml(
-    "settings-runtime-body",
+      "settings-runtime-body",
     `
-      <p>${escapeHtml(`${readyCount}/${trackedRecords.length} tracked training packages are importable in the active runtime.`)}</p>
+      <p>${escapeHtml(`当前运行时中有 ${readyCount}/${trackedRecords.length} 个被跟踪训练依赖可正常导入。`)}</p>
       <div class="coverage-list">
         ${trackedRecords
           .map((record) => renderPackageStatePill(record))
@@ -147,8 +210,8 @@ function renderRuntimeSummary(runtimeLabel: string, runtimePackages?: Record<str
                 <p class="settings-option-description">
                   ${escapeHtml(
                     record.importable
-                      ? `Ready${record.version ? ` (${record.version})` : ""}`
-                      : record.reason || "Package is not importable in the active runtime."
+                      ? `可用${record.version ? ` (${record.version})` : ""}`
+                      : record.reason || "当前运行时中无法导入该依赖。"
                   )}
                 </p>
               </article>
@@ -166,24 +229,23 @@ function renderVisibilityPanel(kind: TrainingOptionKind, runtimePackages?: Recor
   const titleId = `settings-${kind}-title`;
   const bodyId = `settings-${kind}-body`;
   const visibleCount = entries.filter((entry) => visibleValues.has(entry.value)).length;
-  const noun = kind === "optimizer" ? "optimizers" : "schedulers";
   const helperText =
     kind === "optimizer"
-      ? "Curate what appears in optimizer_type across the rebuilt training routes."
-      : "Custom scheduler entries are converted into lr_scheduler_type automatically when you launch training.";
+      ? "这里控制源码版训练页里 optimizer_type 默认显示哪些条目。"
+      : "这里控制源码版训练页里调度器显示哪些条目，外部调度器会在启动时自动桥接到 lr_scheduler_type。";
 
-  setText(titleId, `${visibleCount}/${entries.length} ${noun} visible`);
+  setText(titleId, `${visibleCount}/${entries.length} 个${kind === "optimizer" ? "优化器" : "调度器"}显示中`);
   setHtml(
     bodyId,
     `
       <p>${escapeHtml(helperText)}</p>
       <div class="settings-option-toolbar">
-        <button class="action-button action-button-ghost action-button-small" data-training-option-action="${kind}:defaults" type="button">Reset defaults</button>
-        <button class="action-button action-button-ghost action-button-small" data-training-option-action="${kind}:builtins" type="button">Built-ins only</button>
-        <button class="action-button action-button-ghost action-button-small" data-training-option-action="${kind}:all" type="button">Show all</button>
+        <button class="action-button action-button-ghost action-button-small" data-training-option-action="${kind}:defaults" type="button">恢复默认</button>
+        <button class="action-button action-button-ghost action-button-small" data-training-option-action="${kind}:builtins" type="button">仅显示内置</button>
+        <button class="action-button action-button-ghost action-button-small" data-training-option-action="${kind}:all" type="button">全部显示</button>
       </div>
       <div class="coverage-list settings-option-coverage">
-        <span class="coverage-pill">${visibleCount} enabled</span>
+        <span class="coverage-pill">当前启用 ${visibleCount} 项</span>
         ${renderSourceCoverage(entries, visibleValues)}
       </div>
       <div class="settings-option-grid">
@@ -244,48 +306,48 @@ export async function bindSettingsData() {
 
   if (summaryResult.status === "fulfilled") {
     const data = summaryResult.value.data;
-    setText("settings-summary-title", `${data?.saved_param_count ?? 0} remembered param groups`);
+    setText("settings-summary-title", `已记录 ${data?.saved_param_count ?? 0} 组参数`);
     setHtml(
       "settings-summary-body",
       `
-        <p><strong>Config file:</strong> <code>${escapeHtml(data?.config_path ?? "unknown")}</code></p>
-        <p><strong>Last path:</strong> <code>${escapeHtml(data?.last_path || "(empty)")}</code></p>
-        <p><strong>Saved keys:</strong> ${(data?.saved_param_keys ?? []).map((key) => `<code>${escapeHtml(key)}</code>`).join(", ") || "none"}</p>
+        <p><strong>配置文件：</strong> <code>${escapeHtml(data?.config_path ?? "未知")}</code></p>
+        <p><strong>最近路径：</strong> <code>${escapeHtml(data?.last_path || "（空）")}</code></p>
+        <p><strong>已保存键名：</strong> ${(data?.saved_param_keys ?? []).map((key) => `<code>${escapeHtml(key)}</code>`).join(", ") || "无"}</p>
       `
     );
   } else {
-    setText("settings-summary-title", "Config summary request failed");
-    setText("settings-summary-body", summaryResult.reason instanceof Error ? summaryResult.reason.message : "Unknown error");
+    setText("settings-summary-title", "配置摘要读取失败");
+    setText("settings-summary-body", summaryResult.reason instanceof Error ? summaryResult.reason.message : "未知错误");
   }
 
   if (paramsResult.status === "fulfilled") {
     const data = paramsResult.value.data ?? {};
     const keys = Object.keys(data);
-    setText("settings-params-title", `${keys.length} saved param entries`);
+    setText("settings-params-title", `已保存 ${keys.length} 项参数`);
     setHtml(
       "settings-params-body",
       keys.length
         ? `<div class="coverage-list">${keys.map((key) => `<span class="coverage-pill coverage-pill-muted">${escapeHtml(key)}</span>`).join("")}</div>`
-        : "<p>No saved params returned.</p>"
+        : "<p>没有返回已保存参数。</p>"
     );
   } else {
-    setText("settings-params-title", "Saved params request failed");
-    setText("settings-params-body", paramsResult.reason instanceof Error ? paramsResult.reason.message : "Unknown error");
+    setText("settings-params-title", "已保存参数读取失败");
+    setText("settings-params-body", paramsResult.reason instanceof Error ? paramsResult.reason.message : "未知错误");
   }
 
   if (runtimeResult.status === "fulfilled") {
     const runtime = runtimeResult.value.data?.runtime;
     renderRuntimeSummary(
       runtime
-        ? `${runtime.environment} runtime · Python ${runtime.python_version}`
-        : "Runtime dependency status unavailable",
+        ? `${runtime.environment} 运行时 · Python ${runtime.python_version}`
+        : "运行时依赖状态不可用",
       runtime?.packages
     );
     renderTrainingOptionPanels(runtime?.packages);
     return;
   }
 
-  setText("settings-runtime-title", "Runtime dependency request failed");
-  setText("settings-runtime-body", runtimeResult.reason instanceof Error ? runtimeResult.reason.message : "Unknown error");
+  setText("settings-runtime-title", "运行时依赖状态读取失败");
+  setText("settings-runtime-body", runtimeResult.reason instanceof Error ? runtimeResult.reason.message : "未知错误");
   renderTrainingOptionPanels();
 }

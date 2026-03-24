@@ -34,7 +34,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
 
   const confirmCompatibilityUse = (kind: "preset" | "recipe", name: string, detail: string) =>
     window.confirm(
-      `Apply ${kind} "${name}" to ${config.modelLabel}?\n\n${detail}\n\nYou can still continue, but some route-specific fields may need manual review afterwards.`
+      `要把${kind === "preset" ? "预设" : "配方"}“${name}”应用到 ${config.modelLabel} 吗？\n\n${detail}\n\n你仍然可以继续，但之后可能还需要手动检查部分路线专属字段。`
     );
 
   const bindHistoryPanel = () => {
@@ -52,7 +52,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
           JSON.stringify(loadTrainingHistory(config.routeId), null, 2),
           "application/json;charset=utf-8"
         );
-        setTrainingUtilityNote(config.prefix, "History exported.", "success");
+        setTrainingUtilityNote(config.prefix, "历史记录已导出。", "success");
       });
     });
 
@@ -71,7 +71,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         }
         applyEditableRecord(entry.value, entry.gpu_ids, "replace");
         toggleTrainingPanel(config.prefix, "history", false);
-        setTrainingUtilityNote(config.prefix, `Applied snapshot: ${entry.name || "Unnamed snapshot"}.`, "success");
+        setTrainingUtilityNote(config.prefix, `已应用快照：${entry.name || "未命名快照"}。`, "success");
       });
     });
 
@@ -84,7 +84,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
           return;
         }
 
-        const nextName = window.prompt("Rename snapshot", entry.name || "");
+        const nextName = window.prompt("重命名快照", entry.name || "");
         if (!nextName) {
           return;
         }
@@ -92,7 +92,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         entry.name = nextName.trim();
         saveTrainingHistory(config.routeId, entries);
         bindHistoryPanel();
-        setTrainingUtilityNote(config.prefix, "Snapshot renamed.", "success");
+        setTrainingUtilityNote(config.prefix, "快照已重命名。", "success");
       });
     });
 
@@ -105,14 +105,14 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
           return;
         }
 
-        if (!window.confirm(`Delete snapshot "${entry.name || "Unnamed snapshot"}"?`)) {
+        if (!window.confirm(`要删除快照“${entry.name || "未命名快照"}”吗？`)) {
           return;
         }
 
         entries.splice(index, 1);
         saveTrainingHistory(config.routeId, entries);
         bindHistoryPanel();
-        setTrainingUtilityNote(config.prefix, "Snapshot deleted.", "success");
+        setTrainingUtilityNote(config.prefix, "快照已删除。", "success");
       });
     });
   };
@@ -137,7 +137,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
           JSON.stringify(loadTrainingRecipes(config.routeId), null, 2),
           "application/json;charset=utf-8"
         );
-        setTrainingUtilityNote(config.prefix, "Recipe library exported.", "success");
+        setTrainingUtilityNote(config.prefix, "配方库已导出。", "success");
       });
     });
 
@@ -160,7 +160,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         }
         applyEditableRecord(recipe.value, undefined, "merge");
         toggleTrainingPanel(config.prefix, "recipes", false);
-        setTrainingUtilityNote(config.prefix, `Merged recipe: ${recipe.name}.`, "success");
+        setTrainingUtilityNote(config.prefix, `已合并配方：${recipe.name}。`, "success");
       });
     });
 
@@ -177,7 +177,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         }
         applyEditableRecord(recipe.value, undefined, "replace");
         toggleTrainingPanel(config.prefix, "recipes", false);
-        setTrainingUtilityNote(config.prefix, `Replaced current values with recipe: ${recipe.name}.`, "success");
+        setTrainingUtilityNote(config.prefix, `当前表单值已被配方替换：${recipe.name}。`, "success");
       });
     });
 
@@ -194,14 +194,14 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
             metadata: {
               name: recipe.name,
               version: "1.0",
-              author: "SD-reScripts local recipe",
+              author: "SD-reScripts 本地配方",
               train_type: recipe.train_type || config.schemaName,
-              description: recipe.description || `Exported recipe from ${config.modelLabel}.`,
+              description: recipe.description || `从 ${config.modelLabel} 导出的配方。`,
             },
             data: recipe.value,
           })
         );
-        setTrainingUtilityNote(config.prefix, `Exported recipe: ${recipe.name}.`, "success");
+        setTrainingUtilityNote(config.prefix, `配方已导出：${recipe.name}。`, "success");
       });
     });
 
@@ -213,14 +213,14 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         if (!recipe) {
           return;
         }
-        const nextName = window.prompt("Rename recipe", recipe.name);
+        const nextName = window.prompt("重命名配方", recipe.name);
         if (!nextName || !nextName.trim()) {
           return;
         }
         recipe.name = nextName.trim();
         saveTrainingRecipes(config.routeId, entries);
         bindRecipePanel();
-        setTrainingUtilityNote(config.prefix, "Recipe renamed.", "success");
+        setTrainingUtilityNote(config.prefix, "配方已重命名。", "success");
       });
     });
 
@@ -232,13 +232,13 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         if (!recipe) {
           return;
         }
-        if (!window.confirm(`Delete recipe "${recipe.name}"?`)) {
+        if (!window.confirm(`要删除配方“${recipe.name}”吗？`)) {
           return;
         }
         entries.splice(index, 1);
         saveTrainingRecipes(config.routeId, entries);
         bindRecipePanel();
-        setTrainingUtilityNote(config.prefix, "Recipe deleted.", "success");
+        setTrainingUtilityNote(config.prefix, "配方已删除。", "success");
       });
     });
   };
@@ -264,7 +264,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         }
 
         const compatibility = getPresetCompatibility(config, preset);
-        const presetName = String(((preset.metadata ?? {}) as Record<string, unknown>).name || preset.name || "preset");
+        const presetName = String(((preset.metadata ?? {}) as Record<string, unknown>).name || preset.name || "预设");
         if (!compatibility.compatible && !confirmCompatibilityUse("preset", presetName, compatibility.detail)) {
           return;
         }
@@ -273,7 +273,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         toggleTrainingPanel(config.prefix, "presets", false);
         setTrainingUtilityNote(
           config.prefix,
-          `Merged preset: ${presetName}.`,
+          `已合并预设：${presetName}。`,
           "success"
         );
       });
@@ -292,7 +292,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         const entries = loadTrainingRecipes(config.routeId);
         entries.unshift({
           created_at: new Date().toLocaleString(),
-          name: String(metadata.name || preset.name || "Imported preset recipe"),
+          name: String(metadata.name || preset.name || "导入的预设配方"),
           description: typeof metadata.description === "string" ? metadata.description : undefined,
           train_type: typeof metadata.train_type === "string" ? metadata.train_type : config.schemaName,
           route_id: config.routeId,
@@ -304,7 +304,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         }
         setTrainingUtilityNote(
           config.prefix,
-          `Saved preset to local recipe library: ${String(metadata.name || preset.name || "preset")}.`,
+          `预设已保存到本地配方库：${String(metadata.name || preset.name || "预设")}。`,
           "success"
         );
       });
@@ -319,7 +319,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         }
 
         const compatibility = getPresetCompatibility(config, preset);
-        const presetName = String(((preset.metadata ?? {}) as Record<string, unknown>).name || preset.name || "preset");
+        const presetName = String(((preset.metadata ?? {}) as Record<string, unknown>).name || preset.name || "预设");
         if (!compatibility.compatible && !confirmCompatibilityUse("preset", presetName, compatibility.detail)) {
           return;
         }
@@ -328,7 +328,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         toggleTrainingPanel(config.prefix, "presets", false);
         setTrainingUtilityNote(
           config.prefix,
-          `Replaced current values with preset: ${presetName}.`,
+          `当前表单值已被预设替换：${presetName}。`,
           "success"
         );
       });
@@ -341,7 +341,7 @@ export function createTrainingPanels(config: TrainingRouteConfig, applyEditableR
         const result = await fetchPresets();
         presetsCache = filterPresetsForRoute(config, result.data?.presets ?? []);
       } catch (error) {
-        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "Failed to load presets.", "error");
+        setTrainingUtilityNote(config.prefix, error instanceof Error ? error.message : "读取预设失败。", "error");
         return;
       }
     }

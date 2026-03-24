@@ -1,18 +1,34 @@
 export function createAppShell(activeRouteHash: string, pageContent: string) {
   return `
-    <div class="app-shell">
-      <aside class="app-sidebar">
-        <div class="brand-lockup">
-          <p class="eyebrow">SD-reScripts</p>
-          <h1>Frontend Source</h1>
-          <p class="sidebar-copy">
-            A migration workspace that lets us rebuild the UI near the core logic without touching the shipped dist yet.
-          </p>
+    <div class="theme-container no-navbar route-shell" data-route="${activeRouteHash}">
+      <div class="sidebar-mask"></div>
+      <aside class="sidebar">
+        <div class="sidebar-scroll">
+          <div class="brand-lockup">
+            <p class="brand-title">SD-reScripts</p>
+            <p class="brand-subtitle">Stable Diffusion 训练界面</p>
+            <p class="sidebar-copy">
+              基于秋葉 aaaki / lora-scripts 分支继续维护
+            </p>
+          </div>
+          <nav id="side-nav" class="side-nav" aria-label="主导航"></nav>
+          <div class="sidebar-bottom">
+            <a class="sidebar-meta-link" href="https://github.com/WhitecrowAurora/lora-rescripts" target="_blank" rel="noreferrer">
+              GitHub / WhitecrowAurora
+            </a>
+            <p class="sidebar-meta-note">
+              修改维护
+              <a class="sidebar-meta-link inline" href="https://github.com/WhitecrowAurora/lora-rescripts" target="_blank" rel="noreferrer">
+                Lulynx
+              </a>
+            </p>
+          </div>
         </div>
-        <nav id="side-nav" class="side-nav" aria-label="Source workspace routes"></nav>
       </aside>
-      <main class="app-main">
-        ${pageContent}
+      <main class="page">
+        <div class="theme-default-content">
+          ${pageContent}
+        </div>
       </main>
     </div>
   `;
@@ -28,7 +44,7 @@ export function createPageHero(kicker: string, title: string, lede: string) {
   `;
 }
 
-export function createInfoCard(title: string, body: string, kicker = "module") {
+export function createInfoCard(title: string, body: string, kicker = "模块") {
   return `
     <article class="panel info-card">
       <p class="panel-kicker">${kicker}</p>

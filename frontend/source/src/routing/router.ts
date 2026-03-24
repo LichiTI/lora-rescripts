@@ -204,8 +204,8 @@ const legacyPathAliasMap: Record<string, string> = {
   "/task.md": "#/tasks",
   "/tageditor.html": "#/tageditor",
   "/tageditor.md": "#/tageditor",
-  "/tagger.html": "#/tageditor",
-  "/tagger.md": "#/tageditor",
+  "/tagger.html": "#/tools",
+  "/tagger.md": "#/tools",
   "/tensorboard.html": "#/tensorboard",
   "/tensorboard.md": "#/tensorboard",
   "/other/about.html": "#/about",
@@ -214,8 +214,8 @@ const legacyPathAliasMap: Record<string, string> = {
   "/other/settings.md": "#/settings",
   "/dreambooth/index.html": "#/dreambooth-train",
   "/dreambooth/index.md": "#/dreambooth-train",
-  "/lora/index.html": "#/sdxl-train",
-  "/lora/index.md": "#/sdxl-train",
+  "/lora/index.html": defaultRouteHash,
+  "/lora/index.md": defaultRouteHash,
 };
 
 const legacyPathAliases = Object.keys(legacyPathAliasMap).sort((left, right) => right.length - left.length);
@@ -228,6 +228,21 @@ type LegacyRouteMatch = {
 function canonicalizeRootPath(pathname: string) {
   const trimmed = pathname.replace(/\/+$/, "");
   return trimmed.length > 0 ? `${trimmed}/` : "/";
+}
+
+export function getAppRootPath(pathname = window.location.pathname) {
+  const legacyRoute = resolveLegacyRoute(pathname);
+  if (legacyRoute) {
+    return legacyRoute.canonicalRootPath;
+  }
+
+  return canonicalizeRootPath(pathname || "/");
+}
+
+export function buildLegacyHref(targetPath: string, pathname = window.location.pathname) {
+  const rootPath = getAppRootPath(pathname);
+  const normalizedTarget = targetPath.replace(/^\/+/, "");
+  return `${rootPath}${normalizedTarget}`;
 }
 
 function inferLegacyLoraHash(pageName: string) {
@@ -318,8 +333,21 @@ function replaceRoute(rootPath: string, hash: string) {
   }
 }
 
+function resolveCurrentHash() {
+  if (validRouteHashes.has(window.location.hash)) {
+    return window.location.hash;
+  }
+
+  const legacyRoute = resolveLegacyRoute(window.location.pathname);
+  if (legacyRoute) {
+    return legacyRoute.hash;
+  }
+
+  return defaultRouteHash;
+}
+
 export function getCurrentRoute(): AppRoute {
-  const hash = validRouteHashes.has(window.location.hash) ? window.location.hash : defaultRouteHash;
+  const hash = resolveCurrentHash();
   return appRoutes.find((route) => route.hash === hash) ?? appRoutes[0];
 }
 
@@ -330,7 +358,6 @@ export function ensureRoute() {
 
   const legacyRoute = resolveLegacyRoute(window.location.pathname);
   if (legacyRoute) {
-    replaceRoute(legacyRoute.canonicalRootPath, legacyRoute.hash);
     return;
   }
 

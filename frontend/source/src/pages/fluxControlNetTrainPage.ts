@@ -4,13 +4,12 @@ export function renderFluxControlNetTrainPage() {
   return renderTrainingPage({
     prefix: "flux-controlnet",
     heroKicker: "flux controlnet",
-    heroTitle: "Flux ControlNet source training page",
-    heroLede:
-      "This route reuses the same source-side training bridge for Flux ControlNet so the DiT-family conditioning workflow stays aligned with the current backend schema and payload rules.",
-    runnerTitle: "Flux ControlNet source-side runner",
-    startButtonLabel: "Start Flux ControlNet training",
+    heroTitle: "Flux ControlNet 训练",
+    heroLede: "Flux ControlNet 训练入口也走同一套桥接层，方便统一管理参数、预检查和后端提交。",
+    runnerTitle: "Flux ControlNet 训练",
+    startButtonLabel: "开始 Flux ControlNet 训练",
     legacyPath: "/lora/flux-controlnet.html",
-    legacyLabel: "Open current shipped Flux ControlNet page",
-    renderedTitle: "Flux ControlNet form bridge",
+    legacyLabel: "打开当前随包 Flux ControlNet 页面",
+    renderedTitle: "Flux ControlNet 参数表单",
   });
 }

@@ -1,12 +1,113 @@
+.training-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.95fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.training-form-pane {
+  padding: 0;
+  overflow: hidden;
+}
+
+.training-form-pane-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.25rem;
+  align-items: start;
+  padding: 1.1rem 1.2rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.training-form-pane-head h3,
+.training-launch-head h3 {
+  margin: 0.28rem 0 0;
+}
+
+.training-pane-summary {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.training-pane-toolbar {
+  display: grid;
+  gap: 0.6rem;
+  min-width: min(320px, 100%);
+}
+
+.training-route-notice {
+  margin: 0;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(62, 175, 124, 0.05);
+}
+
+.training-route-notice h3 {
+  margin: 0.28rem 0 0.45rem;
+}
+
+.training-route-notice p:last-child {
+  margin-bottom: 0;
+}
+
+.training-runtime-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.training-runtime-card {
+  padding: 1rem 1.2rem;
+}
+
+.training-runtime-card + .training-runtime-card {
+  border-left: 1px solid var(--line);
+}
+
+.training-runtime-card h3 {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.training-section-head {
+  margin: 0;
+  padding: 1rem 1.2rem 0;
+}
+
+.training-form-pane .schema-sections {
+  padding: 0 1.2rem 1.2rem;
+}
+
+.training-side-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.training-side-head {
+  margin-bottom: 0.85rem;
+}
+
+.training-preview-panel {
+  padding: 1rem 1.05rem;
+}
+
 .train-actions-panel {
-  margin-top: 1rem;
   padding: 1rem 1.1rem;
+}
+
+.training-launch-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.9rem;
+  margin-bottom: 0.9rem;
 }
 
 .train-actions-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
   align-items: start;
 }
 
@@ -18,7 +119,6 @@
 }
 
 .training-utility-panel {
-  margin-top: 1rem;
   padding: 1rem 1.1rem;
 }
 
@@ -26,6 +126,8 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.7rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--line);
 }
 
 .training-side-panel {
@@ -233,4 +335,8 @@
 .submit-status-error {
   border-color: rgba(170, 48, 42, 0.32);
   background: rgba(255, 221, 217, 0.72);
+}
+
+.training-side-stack .submit-status:first-child {
+  margin-top: 0;
 }

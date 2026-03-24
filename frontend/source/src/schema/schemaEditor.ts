@@ -42,8 +42,8 @@ export function mountSchemaEditorState(
 ) {
   storeState(nextState);
   if (!nextState) {
-    setText(domIds.summaryId, "Failed to build schema bridge state.");
-    setHtml(domIds.sectionsId, "<p>Schema bridge failed to initialize.</p>");
+    setText(domIds.summaryId, "构建 schema 桥接状态失败。");
+    setHtml(domIds.sectionsId, "<p>schema 桥接初始化失败。</p>");
     setPreText(domIds.previewId, "{}");
     return;
   }
@@ -60,7 +60,7 @@ export function mountSchemaEditorState(
   setHtml(domIds.selectId, selectHtml);
   setText(
     domIds.summaryId,
-    `${nextState.selectedName} · ${visibleSections.length}/${nextState.sections.length} visible sections · ${visibleSections.reduce((sum, section) => sum + section.fields.length, 0)} visible fields`
+    `${nextState.selectedName} · 已显示 ${visibleSections.length}/${nextState.sections.length} 个分组 · 共 ${visibleSections.reduce((sum, section) => sum + section.fields.length, 0)} 个字段`
   );
   renderSchemaSections(nextState, domIds.sectionsId);
   renderSchemaPreview(nextState, domIds.previewId);

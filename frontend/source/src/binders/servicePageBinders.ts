@@ -98,17 +98,17 @@ type CaptionBackupControls = {
 export async function bindTagEditorData() {
   try {
     const status = await fetchTagEditorStatus();
-    setText("tag-editor-status-title", `Current status: ${status.status}`);
+    setText("tag-editor-status-title", `当前状态：${status.status}`);
     setHtml(
       "tag-editor-status-body",
       `
-        <p>${escapeHtml(status.detail || "No extra detail returned.")}</p>
-        <p><a class="text-link" href="${runtimeUrl("/tageditor.html")}" target="_blank" rel="noreferrer">Open current shipped wrapper page</a></p>
+        <p>${escapeHtml(status.detail || "没有返回额外状态说明。")}</p>
+        <p><a class="text-link" href="${runtimeUrl("/tageditor.html")}" target="_blank" rel="noreferrer">打开当前随包标签编辑器页面</a></p>
       `
     );
   } catch (error) {
-    setText("tag-editor-status-title", "Tag editor status request failed");
-    setText("tag-editor-status-body", error instanceof Error ? error.message : "Unknown error");
+    setText("tag-editor-status-title", "标签编辑器状态读取失败");
+    setText("tag-editor-status-body", error instanceof Error ? error.message : "未知错误");
   }
 }
 
@@ -122,19 +122,19 @@ export async function bindToolsData() {
   try {
     const result = await fetchScripts();
     const scripts = result.data?.scripts ?? [];
-    setText("tools-summary-title", `${scripts.length} launcher scripts available`);
+    setText("tools-summary-title", `已发现 ${scripts.length} 个可用脚本入口`);
     setHtml(
       "tools-summary-body",
       `
-        <p>Categories: ${[...new Set(scripts.map((script) => script.category))].map((name) => `<code>${escapeHtml(name)}</code>`).join(", ")}</p>
-        <p>The tools workspace now includes dataset analysis, masked-loss alpha inspection, batch auto-tagging, caption cleanup, and caption restore snapshots, with more curated high-frequency flows still planned.</p>
+        <p>分类：${[...new Set(scripts.map((script) => script.category))].map((name) => `<code>${escapeHtml(name)}</code>`).join(", ")}</p>
+        <p>这里已经接入数据集分析、蒙版损失检查、批量自动打标、标签清理和标签快照恢复，后面还会继续补高频流程。</p>
       `
     );
     renderToolsBrowser(scripts);
   } catch (error) {
-    setText("tools-summary-title", "Script inventory request failed");
-    setText("tools-summary-body", error instanceof Error ? error.message : "Unknown error");
-    setHtml("tools-browser", "<p>Tool inventory failed to load.</p>");
+    setText("tools-summary-title", "工具脚本列表读取失败");
+    setText("tools-summary-body", error instanceof Error ? error.message : "未知错误");
+    setHtml("tools-browser", "<p>工具脚本列表读取失败。</p>");
   }
 }
 
@@ -145,12 +145,12 @@ function bindMaskedLossAudit() {
   }
 
   controls.browseButton.addEventListener("click", async () => {
-    setText("masked-loss-audit-status", "Opening folder picker...");
+    setText("masked-loss-audit-status", "正在打开目录选择器...");
     try {
       controls.pathInput.value = await pickFile("folder");
-      setText("masked-loss-audit-status", "Folder selected. Ready to inspect alpha masks.");
+      setText("masked-loss-audit-status", "目录已选择，可以开始检查 alpha 蒙版。");
     } catch (error) {
-      setText("masked-loss-audit-status", error instanceof Error ? error.message : "Folder picker failed.");
+      setText("masked-loss-audit-status", error instanceof Error ? error.message : "目录选择失败。");
     }
   });
 
@@ -174,12 +174,12 @@ function bindDatasetAnalyzer() {
   }
 
   controls.browseButton.addEventListener("click", async () => {
-    setText("dataset-analysis-status", "Opening folder picker...");
+    setText("dataset-analysis-status", "正在打开目录选择器...");
     try {
       controls.pathInput.value = await pickFile("folder");
-      setText("dataset-analysis-status", "Folder selected. Ready to analyze.");
+      setText("dataset-analysis-status", "目录已选择，可以开始分析。");
     } catch (error) {
-      setText("dataset-analysis-status", error instanceof Error ? error.message : "Folder picker failed.");
+      setText("dataset-analysis-status", error instanceof Error ? error.message : "目录选择失败。");
     }
   });
 
@@ -203,12 +203,12 @@ async function bindBatchTagger() {
   }
 
   controls.browseButton.addEventListener("click", async () => {
-    setText("batch-tagger-status", "Opening folder picker...");
+    setText("batch-tagger-status", "正在打开目录选择器...");
     try {
       controls.pathInput.value = await pickFile("folder");
-      setText("batch-tagger-status", "Folder selected. Ready to launch batch tagging.");
+      setText("batch-tagger-status", "目录已选择，可以开始批量打标。");
     } catch (error) {
-      setText("batch-tagger-status", error instanceof Error ? error.message : "Folder picker failed.");
+      setText("batch-tagger-status", error instanceof Error ? error.message : "目录选择失败。");
     }
   });
 
@@ -228,7 +228,7 @@ async function bindBatchTagger() {
     const result = await fetchInterrogators();
     const interrogators = result.data?.interrogators ?? [];
     if (!interrogators.length) {
-      throw new Error("No interrogator models returned.");
+      throw new Error("没有返回任何可用打标模型。");
     }
 
     controls.modelSelect.innerHTML = interrogators
@@ -239,13 +239,13 @@ async function bindBatchTagger() {
       })
       .join("");
 
-    setText("batch-tagger-status", `Loaded ${interrogators.length} interrogator models.`);
+    setText("batch-tagger-status", `已加载 ${interrogators.length} 个打标模型。`);
   } catch (error) {
     controls.modelSelect.innerHTML = `<option value="wd14-convnextv2-v2">wd14-convnextv2-v2 (WD)</option>`;
-    setText("batch-tagger-status", error instanceof Error ? error.message : "Failed to load interrogator inventory.");
+    setText("batch-tagger-status", error instanceof Error ? error.message : "读取打标模型列表失败。");
     setHtml(
       "batch-tagger-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Failed to load interrogator inventory.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "读取打标模型列表失败。")}</p></article>`
     );
   }
 }
@@ -257,12 +257,12 @@ function bindCaptionCleanup() {
   }
 
   controls.browseButton.addEventListener("click", async () => {
-    setText("caption-cleanup-status", "Opening folder picker...");
+    setText("caption-cleanup-status", "正在打开目录选择器...");
     try {
       controls.pathInput.value = await pickFile("folder");
-      setText("caption-cleanup-status", "Folder selected. Ready to preview cleanup.");
+      setText("caption-cleanup-status", "目录已选择，可以先预览清理结果。");
     } catch (error) {
-      setText("caption-cleanup-status", error instanceof Error ? error.message : "Folder picker failed.");
+      setText("caption-cleanup-status", error instanceof Error ? error.message : "目录选择失败。");
     }
   });
 
@@ -290,13 +290,13 @@ function bindCaptionBackup() {
   }
 
   controls.browseButton.addEventListener("click", async () => {
-    setText("caption-backup-status", "Opening folder picker...");
+    setText("caption-backup-status", "正在打开目录选择器...");
     try {
       controls.pathInput.value = await pickFile("folder");
-      setText("caption-backup-status", "Folder selected. Refreshing snapshots...");
+      setText("caption-backup-status", "目录已选择，正在刷新快照列表...");
       await refreshCaptionBackups(controls);
     } catch (error) {
-      setText("caption-backup-status", error instanceof Error ? error.message : "Folder picker failed.");
+      setText("caption-backup-status", error instanceof Error ? error.message : "目录选择失败。");
     }
   });
 
@@ -530,15 +530,15 @@ function getCaptionBackupControls(): CaptionBackupControls | null {
 async function runDatasetAnalysis(controls: DatasetAnalyzerControls) {
   const path = controls.pathInput.value.trim();
   if (!path) {
-    setText("dataset-analysis-status", "Pick a dataset folder first.");
-    setHtml("dataset-analysis-results", "<p class=\"dataset-analysis-empty\">No folder selected yet.</p>");
+    setText("dataset-analysis-status", "请先选择数据集目录。");
+    setHtml("dataset-analysis-results", "<p class=\"dataset-analysis-empty\">当前还没有选择目录。</p>");
     return;
   }
 
   controls.browseButton.disabled = true;
   controls.runButton.disabled = true;
-  setText("dataset-analysis-status", "Analyzing dataset...");
-  setHtml("dataset-analysis-results", "<p class=\"dataset-analysis-empty\">Scanning images, captions, and tags...</p>");
+  setText("dataset-analysis-status", "正在分析数据集...");
+  setHtml("dataset-analysis-results", "<p class=\"dataset-analysis-empty\">正在扫描图片、标签文件和标签内容...</p>");
 
   try {
     const result = await analyzeDataset({
@@ -549,19 +549,19 @@ async function runDatasetAnalysis(controls: DatasetAnalyzerControls) {
     });
 
     if (result.status !== "success" || !result.data) {
-      throw new Error(result.message || "Dataset analysis returned no data.");
+      throw new Error(result.message || "数据集分析没有返回结果。");
     }
 
     setText(
       "dataset-analysis-status",
-      `Scanned ${result.data.summary.image_count} images across ${result.data.summary.dataset_folder_count} dataset folder(s).`
+      `已扫描 ${result.data.summary.dataset_folder_count} 个目录，共 ${result.data.summary.image_count} 张图片。`
     );
     renderDatasetAnalysisReport(result.data);
   } catch (error) {
-    setText("dataset-analysis-status", error instanceof Error ? error.message : "Dataset analysis failed.");
+    setText("dataset-analysis-status", error instanceof Error ? error.message : "数据集分析失败。");
     setHtml(
       "dataset-analysis-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Dataset analysis failed.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "数据集分析失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
@@ -572,15 +572,15 @@ async function runDatasetAnalysis(controls: DatasetAnalyzerControls) {
 async function runMaskedLossAudit(controls: MaskedLossAuditControls) {
   const path = controls.pathInput.value.trim();
   if (!path) {
-    setText("masked-loss-audit-status", "Pick a dataset folder first.");
-    setHtml("masked-loss-audit-results", "<p class=\"dataset-analysis-empty\">No dataset folder selected yet.</p>");
+    setText("masked-loss-audit-status", "请先选择数据集目录。");
+    setHtml("masked-loss-audit-results", "<p class=\"dataset-analysis-empty\">当前还没有选择数据集目录。</p>");
     return;
   }
 
   controls.browseButton.disabled = true;
   controls.runButton.disabled = true;
-  setText("masked-loss-audit-status", "Inspecting alpha-channel masks...");
-  setHtml("masked-loss-audit-results", "<p class=\"dataset-analysis-empty\">Opening images and checking their alpha channels...</p>");
+  setText("masked-loss-audit-status", "正在检查 alpha 蒙版...");
+  setHtml("masked-loss-audit-results", "<p class=\"dataset-analysis-empty\">正在读取图片并检查 alpha 通道...</p>");
 
   try {
     const result = await analyzeMaskedLossDataset({
@@ -590,19 +590,19 @@ async function runMaskedLossAudit(controls: MaskedLossAuditControls) {
     });
 
     if (result.status !== "success" || !result.data) {
-      throw new Error(result.message || "Masked-loss audit returned no data.");
+      throw new Error(result.message || "蒙版损失检查没有返回结果。");
     }
 
     setText(
       "masked-loss-audit-status",
-      `Inspected ${result.data.summary.image_count} images. Found ${result.data.summary.usable_mask_image_count} image(s) with usable alpha masks.`
+      `已检查 ${result.data.summary.image_count} 张图片，其中 ${result.data.summary.usable_mask_image_count} 张带有可用 alpha 蒙版。`
     );
     renderMaskedLossAuditReport(result.data);
   } catch (error) {
-    setText("masked-loss-audit-status", error instanceof Error ? error.message : "Masked-loss audit failed.");
+    setText("masked-loss-audit-status", error instanceof Error ? error.message : "蒙版损失检查失败。");
     setHtml(
       "masked-loss-audit-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Masked-loss audit failed.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "蒙版损失检查失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
@@ -613,15 +613,15 @@ async function runMaskedLossAudit(controls: MaskedLossAuditControls) {
 async function runBatchTagger(controls: BatchTaggerControls) {
   const path = controls.pathInput.value.trim();
   if (!path) {
-    setText("batch-tagger-status", "Pick an image folder first.");
-    setHtml("batch-tagger-results", "<p class=\"dataset-analysis-empty\">No image folder selected yet.</p>");
+    setText("batch-tagger-status", "请先选择图片目录。");
+    setHtml("batch-tagger-results", "<p class=\"dataset-analysis-empty\">当前还没有选择图片目录。</p>");
     return;
   }
 
   controls.browseButton.disabled = true;
   controls.runButton.disabled = true;
-  setText("batch-tagger-status", "Starting batch tagging...");
-  setHtml("batch-tagger-results", "<p class=\"dataset-analysis-empty\">Submitting interrogator job to the backend...</p>");
+  setText("batch-tagger-status", "正在启动批量打标...");
+  setHtml("batch-tagger-results", "<p class=\"dataset-analysis-empty\">正在向后端提交打标任务...</p>");
 
   try {
     const threshold = parseBoundedNumber(controls.thresholdInput.value, 0.35, 0, 1);
@@ -644,33 +644,33 @@ async function runBatchTagger(controls: BatchTaggerControls) {
     });
 
     if (result.status !== "success") {
-      throw new Error(result.message || "Batch tagging failed to start.");
+      throw new Error(result.message || "批量打标启动失败。");
     }
 
-    setText("batch-tagger-status", result.message || "Batch tagging started.");
+    setText("batch-tagger-status", result.message || "批量打标任务已启动。");
     setHtml(
       "batch-tagger-results",
       `
         <article class="dataset-analysis-block">
-          <p class="panel-kicker">launched</p>
-          <h3>Batch tagger job submitted</h3>
+          <p class="panel-kicker">已启动</p>
+          <h3>已提交批量打标任务</h3>
           <p><code>${escapeHtml(path)}</code></p>
-          <p>Model: <code>${escapeHtml(controls.modelSelect.value)}</code></p>
+          <p>模型：<code>${escapeHtml(controls.modelSelect.value)}</code></p>
           <p>
-            Threshold: <strong>${escapeHtml(String(threshold))}</strong>
-            · Character threshold: <strong>${escapeHtml(String(characterThreshold))}</strong>
-            · Conflict mode: <strong>${escapeHtml(controls.conflictSelect.value)}</strong>
+            阈值：<strong>${escapeHtml(String(threshold))}</strong>
+            · 角色阈值：<strong>${escapeHtml(String(characterThreshold))}</strong>
+            · 冲突处理：<strong>${escapeHtml(controls.conflictSelect.value)}</strong>
           </p>
           <p>
-            Recursive: <strong>${controls.recursiveInput.checked ? "yes" : "no"}</strong>
-            · Replace underscore: <strong>${controls.replaceUnderscoreInput.checked ? "yes" : "no"}</strong>
-            · Escape tags: <strong>${controls.escapeTagInput.checked ? "yes" : "no"}</strong>
+            递归：<strong>${controls.recursiveInput.checked ? "是" : "否"}</strong>
+            · 下划线转空格：<strong>${controls.replaceUnderscoreInput.checked ? "是" : "否"}</strong>
+            · 转义标签：<strong>${controls.escapeTagInput.checked ? "是" : "否"}</strong>
           </p>
           <p>
-            Auto backup: <strong>${controls.autoBackupInput.checked ? "yes" : "no"}</strong>
+            自动备份：<strong>${controls.autoBackupInput.checked ? "是" : "否"}</strong>
             ${
               result.data?.backup
-                ? `· Snapshot: <code>${escapeHtml(result.data.backup.archive_name)}</code>`
+                ? `· 快照：<code>${escapeHtml(result.data.backup.archive_name)}</code>`
                 : ""
             }
           </p>
@@ -679,15 +679,15 @@ async function runBatchTagger(controls: BatchTaggerControls) {
               ? `<p>${escapeHtml(result.data.warnings.join(" "))}</p>`
               : ""
           }
-          <p>The backend runs this in the background. Watch the console output and inspect generated <code>.txt</code> files in the dataset folder.</p>
+          <p>后端会在后台执行这项任务。可以查看控制台输出，并检查数据集目录里生成的 <code>.txt</code> 文件。</p>
         </article>
       `
     );
   } catch (error) {
-    setText("batch-tagger-status", error instanceof Error ? error.message : "Batch tagging failed.");
+    setText("batch-tagger-status", error instanceof Error ? error.message : "批量打标失败。");
     setHtml(
       "batch-tagger-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Batch tagging failed.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "批量打标失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
@@ -698,8 +698,8 @@ async function runBatchTagger(controls: BatchTaggerControls) {
 async function runCaptionCleanup(controls: CaptionCleanupControls, mode: "preview" | "apply") {
   const path = controls.pathInput.value.trim();
   if (!path) {
-    setText("caption-cleanup-status", "Pick a caption folder first.");
-    setHtml("caption-cleanup-results", "<p class=\"dataset-analysis-empty\">No caption folder selected yet.</p>");
+    setText("caption-cleanup-status", "请先选择标签目录。");
+    setHtml("caption-cleanup-results", "<p class=\"dataset-analysis-empty\">当前还没有选择标签目录。</p>");
     return;
   }
 
@@ -725,10 +725,10 @@ async function runCaptionCleanup(controls: CaptionCleanupControls, mode: "previe
   controls.browseButton.disabled = true;
   controls.previewButton.disabled = true;
   controls.applyButton.disabled = true;
-  setText("caption-cleanup-status", mode === "preview" ? "Previewing caption cleanup..." : "Applying caption cleanup...");
+  setText("caption-cleanup-status", mode === "preview" ? "正在预览标签清理..." : "正在应用标签清理...");
   setHtml(
     "caption-cleanup-results",
-    `<p class="dataset-analysis-empty">${mode === "preview" ? "Scanning caption files and building sample diffs..." : "Writing cleaned captions back to disk..."}</p>`
+    `<p class="dataset-analysis-empty">${mode === "preview" ? "正在扫描标签文件并生成样本差异..." : "正在把清理结果写回磁盘..."}</p>`
   );
 
   try {
@@ -738,22 +738,22 @@ async function runCaptionCleanup(controls: CaptionCleanupControls, mode: "previe
         : await applyCaptionCleanup(requestPayload);
 
     if (result.status !== "success" || !result.data) {
-      throw new Error(result.message || `Caption cleanup ${mode} failed.`);
+      throw new Error(result.message || `标签清理${mode === "preview" ? "预览" : "应用"}失败。`);
     }
 
     setText(
       "caption-cleanup-status",
       result.message ||
         (mode === "preview"
-          ? `Previewed ${result.data.summary.changed_file_count} caption file changes.`
-          : `Applied cleanup to ${result.data.summary.changed_file_count} caption files.`)
+          ? `已预览 ${result.data.summary.changed_file_count} 个标签文件的改动。`
+          : `已对 ${result.data.summary.changed_file_count} 个标签文件应用清理。`)
     );
     renderCaptionCleanupReport(result.data);
   } catch (error) {
-    setText("caption-cleanup-status", error instanceof Error ? error.message : "Caption cleanup failed.");
+    setText("caption-cleanup-status", error instanceof Error ? error.message : "标签清理失败。");
     setHtml(
       "caption-cleanup-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Caption cleanup failed.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "标签清理失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
@@ -769,9 +769,9 @@ async function refreshCaptionBackups(
 ) {
   const path = controls.pathInput.value.trim();
   if (!path) {
-    setText("caption-backup-status", "Pick a caption folder first.");
-    setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">No caption folder selected yet.</p>");
-    controls.selectInput.innerHTML = `<option value="">Refresh snapshots for this folder</option>`;
+    setText("caption-backup-status", "请先选择标签目录。");
+    setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">当前还没有选择标签目录。</p>");
+    controls.selectInput.innerHTML = `<option value="">请先刷新该目录的快照列表</option>`;
     return;
   }
 
@@ -779,7 +779,7 @@ async function refreshCaptionBackups(
   controls.createButton.disabled = true;
   controls.refreshButton.disabled = true;
   controls.restoreButton.disabled = true;
-  setText("caption-backup-status", "Loading caption snapshots...");
+  setText("caption-backup-status", "正在读取标签快照...");
 
   try {
     const result = await listCaptionBackups({ path });
@@ -794,21 +794,21 @@ async function refreshCaptionBackups(
             return `<option value="${escapeHtml(backup.archive_name)}"${selected}>${escapeHtml(backup.snapshot_name)} · ${escapeHtml(backup.archive_name)}</option>`;
           })
           .join("")
-      : `<option value="">No snapshots for this folder yet</option>`;
+      : `<option value="">这个目录下还没有快照</option>`;
 
     if (backups.length && selectedValue) {
       controls.selectInput.value = selectedValue;
     }
 
-    setText("caption-backup-status", backups.length ? `Loaded ${backups.length} caption snapshots.` : "No caption snapshots found for this folder.");
+    setText("caption-backup-status", backups.length ? `已加载 ${backups.length} 个标签快照。` : "这个目录下没有找到标签快照。");
     if (renderInventory) {
       renderCaptionBackupInventory(backups, backups.length ? selectedValue : null);
     }
   } catch (error) {
-    setText("caption-backup-status", error instanceof Error ? error.message : "Failed to load caption snapshots.");
+    setText("caption-backup-status", error instanceof Error ? error.message : "读取标签快照失败。");
     setHtml(
       "caption-backup-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Failed to load caption snapshots.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "读取标签快照失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
@@ -821,8 +821,8 @@ async function refreshCaptionBackups(
 async function createCaptionBackupSnapshot(controls: CaptionBackupControls) {
   const path = controls.pathInput.value.trim();
   if (!path) {
-    setText("caption-backup-status", "Pick a caption folder first.");
-    setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">No caption folder selected yet.</p>");
+    setText("caption-backup-status", "请先选择标签目录。");
+    setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">当前还没有选择标签目录。</p>");
     return;
   }
 
@@ -830,7 +830,7 @@ async function createCaptionBackupSnapshot(controls: CaptionBackupControls) {
   controls.createButton.disabled = true;
   controls.refreshButton.disabled = true;
   controls.restoreButton.disabled = true;
-  setText("caption-backup-status", "Creating caption snapshot...");
+  setText("caption-backup-status", "正在创建标签快照...");
 
   try {
     const result = await createCaptionBackup({
@@ -841,17 +841,17 @@ async function createCaptionBackupSnapshot(controls: CaptionBackupControls) {
     });
 
     if (result.status !== "success" || !result.data) {
-      throw new Error(result.message || "Caption snapshot creation failed.");
+      throw new Error(result.message || "标签快照创建失败。");
     }
 
-    setText("caption-backup-status", result.message || `Created ${result.data.archive_name}`);
+    setText("caption-backup-status", result.message || `已创建 ${result.data.archive_name}`);
     controls.nameInput.value = "";
     await refreshCaptionBackups(controls, result.data.archive_name);
   } catch (error) {
-    setText("caption-backup-status", error instanceof Error ? error.message : "Caption snapshot creation failed.");
+    setText("caption-backup-status", error instanceof Error ? error.message : "标签快照创建失败。");
     setHtml(
       "caption-backup-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Caption snapshot creation failed.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "标签快照创建失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
@@ -866,18 +866,18 @@ async function restoreCaptionBackupSnapshot(controls: CaptionBackupControls) {
   const archiveName = controls.selectInput.value;
 
   if (!path) {
-    setText("caption-backup-status", "Pick a caption folder first.");
-    setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">No caption folder selected yet.</p>");
+    setText("caption-backup-status", "请先选择标签目录。");
+    setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">当前还没有选择标签目录。</p>");
     return;
   }
 
   if (!archiveName) {
-    setText("caption-backup-status", "Select a snapshot to restore.");
+    setText("caption-backup-status", "请选择要恢复的快照。");
     return;
   }
 
   const confirmed = window.confirm(
-    `Restore caption snapshot ${archiveName} into this folder?\n\nThis overwrites matching caption files from the snapshot.`
+    `要把标签快照 ${archiveName} 恢复到这个目录吗？\n\n这会覆盖快照中对应的标签文件。`
   );
   if (!confirmed) {
     return;
@@ -887,8 +887,8 @@ async function restoreCaptionBackupSnapshot(controls: CaptionBackupControls) {
   controls.createButton.disabled = true;
   controls.refreshButton.disabled = true;
   controls.restoreButton.disabled = true;
-  setText("caption-backup-status", "Restoring caption snapshot...");
-  setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">Writing snapshot files back to the folder...</p>");
+  setText("caption-backup-status", "正在恢复标签快照...");
+  setHtml("caption-backup-results", "<p class=\"dataset-analysis-empty\">正在把快照文件写回目录...</p>");
 
   try {
     const result = await restoreCaptionBackup({
@@ -898,17 +898,17 @@ async function restoreCaptionBackupSnapshot(controls: CaptionBackupControls) {
     });
 
     if (result.status !== "success" || !result.data) {
-      throw new Error(result.message || "Caption snapshot restore failed.");
+      throw new Error(result.message || "标签快照恢复失败。");
     }
 
-    setText("caption-backup-status", result.message || `Restored ${result.data.restored_file_count} caption files.`);
+    setText("caption-backup-status", result.message || `已恢复 ${result.data.restored_file_count} 个标签文件。`);
     renderCaptionBackupRestoreReport(result.data);
     await refreshCaptionBackups(controls, archiveName, false);
   } catch (error) {
-    setText("caption-backup-status", error instanceof Error ? error.message : "Caption snapshot restore failed.");
+    setText("caption-backup-status", error instanceof Error ? error.message : "标签快照恢复失败。");
     setHtml(
       "caption-backup-results",
-      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "Caption snapshot restore failed.")}</p></article>`
+      `<article class="dataset-analysis-block dataset-analysis-warning"><p>${escapeHtml(error instanceof Error ? error.message : "标签快照恢复失败。")}</p></article>`
     );
   } finally {
     controls.browseButton.disabled = false;
