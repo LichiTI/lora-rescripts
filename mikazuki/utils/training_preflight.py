@@ -100,6 +100,12 @@ def analyze_training_preflight(
             "SDXL clip_skip is experimental in this build. Training and inference should use the same SDXL clip-skip behavior."
         )
 
+    if training_type.startswith("sdxl") and bool(payload.get("sageattn")):
+        warnings.append(
+            "SDXL SageAttention is experimental in this build and requires the SageAttention runtime. / "
+            "当前构建中的 SDXL SageAttention 仍属实验功能，并且需要 SageAttention 专用环境。"
+        )
+
     if bool(payload.get("masked_loss")):
         alpha_candidates = int(dataset_summary.get("alpha_capable_image_count", 0)) if dataset_summary else 0
         if alpha_candidates == 0 and train_data_dir:

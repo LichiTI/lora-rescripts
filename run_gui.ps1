@@ -5,6 +5,14 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $blackwellPython = Join-Path $repoRoot "python_blackwell\python.exe"
 $blackwellDepsMarker = Join-Path $repoRoot "python_blackwell\.deps_installed"
+$sageAttentionRuntimeDirName = if (Test-Path (Join-Path $repoRoot "python-sageattention")) { "python-sageattention" } else { "python_sageattention" }
+$sageAttentionRuntimeDir = Join-Path $repoRoot $sageAttentionRuntimeDirName
+$sageAttentionPython = Join-Path $sageAttentionRuntimeDir "python.exe"
+$sageAttentionDepsMarker = Join-Path $sageAttentionRuntimeDir ".deps_installed"
+$sageAttentionBlackwellRuntimeDirName = if (Test-Path (Join-Path $repoRoot "python-sageattention-blackwell")) { "python-sageattention-blackwell" } else { "python_sageattention_blackwell" }
+$sageAttentionBlackwellRuntimeDir = Join-Path $repoRoot $sageAttentionBlackwellRuntimeDirName
+$sageAttentionBlackwellPython = Join-Path $sageAttentionBlackwellRuntimeDir "python.exe"
+$sageAttentionBlackwellDepsMarker = Join-Path $sageAttentionBlackwellRuntimeDir ".deps_installed"
 $portablePython = Join-Path $repoRoot "python\python.exe"
 $venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
 $portableDepsMarker = Join-Path $repoRoot "python\.deps_installed"
@@ -13,15 +21,31 @@ $portableTagEditorPython = Join-Path $repoRoot "python_tageditor\python.exe"
 $venvTagEditorPython = Join-Path $repoRoot "venv-tageditor\Scripts\python.exe"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 $preferBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "blackwell"
+$preferSageAttentionRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention"
+$preferSageAttentionBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention-blackwell"
 $mainRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$blackwellPreferredProfile = "czmahi-20250502"
+$sageAttentionPreferredProfile = "triton-v1"
+$sageAttentionBlackwellPreferredProfile = "triton-v1"
+
+if ((@($preferBlackwellRuntime, $preferSageAttentionRuntime, $preferSageAttentionBlackwellRuntime) | Where-Object { $_ }).Count -gt 1) {
+    throw "Only one dedicated runtime can be preferred at a time. Clear MIKAZUKI_PREFERRED_RUNTIME or choose blackwell / sageattention / sageattention-blackwell."
+}
 
 function Test-PipReady {
     param (
         [string]$PythonExe
     )
 
-    & $PythonExe -m pip --version 1>$null 2>$null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -m pip --version 1>$null 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Test-ModulesReady {
@@ -34,14 +58,21 @@ function Test-ModulesReady {
         return $true
     }
 
-    & $PythonExe -c "import importlib, sys; failed=[]; 
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -c "import importlib, sys; failed=[]; 
 for name in sys.argv[1:]:
     try:
         importlib.import_module(name)
     except Exception:
         failed.append(name)
 raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
-    return $LASTEXITCODE -eq 0
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Test-PackageConstraints {
@@ -79,8 +110,15 @@ for item in sys.argv[1:]:
 raise SystemExit(0 if ok else 1)
 "@
 
-    & $PythonExe -c $script @pairs 1>$null 2>$null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -c $script @pairs 1>$null 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Get-PythonMinorVersion {
@@ -93,6 +131,397 @@ function Get-PythonMinorVersion {
         return $null
     }
     return $version.Trim()
+}
+
+function Set-DedicatedRuntimeCaches {
+    param (
+        [string]$RuntimeName,
+        [string]$PythonExe
+    )
+
+    if ($RuntimeName -notin @("blackwell", "sageattention", "sageattention-blackwell")) {
+        return
+    }
+
+    $runtimeRoot = Split-Path -Parent $PythonExe
+    if ([string]::IsNullOrWhiteSpace($runtimeRoot) -or -not (Test-Path $runtimeRoot)) {
+        return
+    }
+
+    $cacheRoot = Join-Path $runtimeRoot ".cache"
+    $tritonCacheDir = if ($Env:TRITON_CACHE_DIR) { $Env:TRITON_CACHE_DIR } else { Join-Path $cacheRoot "triton" }
+    $torchInductorCacheDir = if ($Env:TORCHINDUCTOR_CACHE_DIR) { $Env:TORCHINDUCTOR_CACHE_DIR } else { Join-Path $cacheRoot "torchinductor" }
+
+    foreach ($path in @($cacheRoot, $tritonCacheDir, $torchInductorCacheDir)) {
+        if (-not (Test-Path $path)) {
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+        }
+    }
+
+    if (-not $Env:TRITON_CACHE_DIR) {
+        $Env:TRITON_CACHE_DIR = $tritonCacheDir
+    }
+    if (-not $Env:TORCHINDUCTOR_CACHE_DIR) {
+        $Env:TORCHINDUCTOR_CACHE_DIR = $torchInductorCacheDir
+    }
+
+    if (-not $Env:TRITON_HOME) {
+        $Env:TRITON_HOME = $cacheRoot
+    }
+
+    Write-Host -ForegroundColor DarkGray "Persistent compile cache enabled for $RuntimeName runtime:"
+    Write-Host -ForegroundColor DarkGray "- TRITON_CACHE_DIR=$tritonCacheDir"
+    Write-Host -ForegroundColor DarkGray "- TORCHINDUCTOR_CACHE_DIR=$torchInductorCacheDir"
+}
+
+function Get-BlackwellExpectedPackageVersions {
+    param (
+        [string]$Profile
+    )
+
+    switch ($Profile) {
+        "czmahi-20250502" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.8.0.dev20250501+cu128"
+                TorchVision = "0.22.0.dev20250502+cu128"
+                Xformers = "0.0.31+8fc8ec5a.d20250503"
+            }
+        }
+        "panchovix-20250321" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.8.0.dev20250320+cu128"
+                TorchVision = "0.22.0.dev20250321+cu128"
+                Xformers = "0.0.30+9a2cd3ef.d20250321"
+            }
+        }
+        default {
+            return @{
+                PythonMinor = "3.12"
+                Torch = ""
+                TorchVision = ""
+                Xformers = ""
+            }
+        }
+    }
+}
+
+function Get-SageAttentionExpectedPackageVersions {
+    param (
+        [string]$Profile
+    )
+
+    switch ($Profile) {
+        "triton-v1" {
+            return @{
+                PythonMinor = ""
+                Torch = "2.10.0+cu128"
+                TorchVision = "0.25.0+cu128"
+                SageAttention = ""
+                Triton = ""
+            }
+        }
+        default {
+            return @{
+                PythonMinor = ""
+                Torch = ""
+                TorchVision = ""
+                SageAttention = ""
+                Triton = ""
+            }
+        }
+    }
+}
+
+function ConvertFrom-PythonJsonTail {
+    param (
+        [object]$Raw
+    )
+
+    if ($null -eq $Raw) {
+        return $null
+    }
+
+    $text = if ($Raw -is [System.Array]) {
+        ($Raw | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    }
+    else {
+        [string]$Raw
+    }
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $jsonLine = $text -split "\r?\n" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -match '^[\{\[]' } |
+        Select-Object -Last 1
+
+    if ([string]::IsNullOrWhiteSpace($jsonLine)) {
+        return $null
+    }
+
+    try {
+        return $jsonLine | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Invoke-PythonJsonProbe {
+    param (
+        [string]$PythonExe,
+        [string]$ScriptContent
+    )
+
+    $tempPath = [System.IO.Path]::GetTempFileName()
+    $tempPyPath = [System.IO.Path]::ChangeExtension($tempPath, ".py")
+    Move-Item -LiteralPath $tempPath -Destination $tempPyPath -Force
+
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tempPyPath, $ScriptContent, $utf8NoBom)
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $raw = & $PythonExe $tempPyPath 2>$null
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+            return $null
+        }
+
+        return ConvertFrom-PythonJsonTail -Raw $raw
+    }
+    finally {
+        Remove-Item -LiteralPath $tempPyPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-BlackwellRuntimeProbe {
+    param (
+        [string]$PythonExe
+    )
+
+    $script = @"
+import json
+import sys
+import importlib.metadata as md
+
+result = {
+    "python_version": sys.version.split()[0],
+    "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+    "torch_version": "",
+    "torchvision_version": "",
+    "xformers_version": "",
+    "cuda_available": False,
+    "xformers_import_ok": False,
+    "xformers_ops_ok": False,
+    "xformers_error": "",
+}
+
+try:
+    import torch
+except Exception as exc:
+    result["xformers_error"] = f"torch import failed: {exc}"
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+result["torch_version"] = getattr(torch, "__version__", "")
+result["cuda_available"] = bool(torch.cuda.is_available())
+
+try:
+    result["torchvision_version"] = md.version("torchvision")
+except Exception:
+    result["torchvision_version"] = ""
+
+try:
+    result["xformers_version"] = md.version("xformers")
+except Exception:
+    result["xformers_version"] = ""
+
+try:
+    import xformers
+    result["xformers_import_ok"] = True
+    _ = xformers.__version__
+    from xformers.ops import memory_efficient_attention  # noqa: F401
+    result["xformers_ops_ok"] = True
+except Exception as exc:
+    result["xformers_error"] = str(exc)
+
+print(json.dumps(result))
+"@
+
+    return Invoke-PythonJsonProbe -PythonExe $PythonExe -ScriptContent $script
+}
+
+function Get-SageAttentionRuntimeProbe {
+    param (
+        [string]$PythonExe
+    )
+
+    $script = @"
+import json
+import sys
+import importlib.metadata as md
+
+result = {
+    "python_version": sys.version.split()[0],
+    "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+    "torch_version": "",
+    "torchvision_version": "",
+    "sageattention_version": "",
+    "triton_version": "",
+    "cuda_available": False,
+    "triton_import_ok": False,
+    "sageattention_import_ok": False,
+    "sageattention_symbols_ok": False,
+    "sageattention_error": "",
+}
+
+def metadata_version(*names):
+    for name in names:
+        try:
+            return md.version(name)
+        except Exception:
+            continue
+    return ""
+
+try:
+    import torch
+except Exception as exc:
+    result["sageattention_error"] = f"torch import failed: {exc}"
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+result["torch_version"] = getattr(torch, "__version__", "")
+result["cuda_available"] = bool(torch.cuda.is_available())
+result["torchvision_version"] = metadata_version("torchvision")
+result["sageattention_version"] = metadata_version("sageattention")
+result["triton_version"] = metadata_version("triton-windows", "triton")
+
+try:
+    import triton  # noqa: F401
+    result["triton_import_ok"] = True
+except Exception as exc:
+    result["sageattention_error"] = f"triton import failed: {exc}"
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+try:
+    from sageattention import sageattn, sageattn_varlen
+    result["sageattention_import_ok"] = True
+    result["sageattention_symbols_ok"] = callable(sageattn) and callable(sageattn_varlen)
+    if not result["sageattention_symbols_ok"]:
+        result["sageattention_error"] = "sageattention import succeeded but required symbols are missing"
+except Exception as exc:
+    result["sageattention_error"] = str(exc)
+
+print(json.dumps(result))
+"@
+
+    return Invoke-PythonJsonProbe -PythonExe $PythonExe -ScriptContent $script
+}
+
+function Test-BlackwellRuntimeReady {
+    param (
+        [string]$PythonExe,
+        [hashtable]$Expected,
+        [ref]$Message
+    )
+
+    $probe = Get-BlackwellRuntimeProbe -PythonExe $PythonExe
+    if (-not $probe) {
+        $Message.Value = "could not probe python_blackwell runtime details"
+        return $false
+    }
+
+    $issues = New-Object System.Collections.Generic.List[string]
+    if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
+        $issues.Add("Python minor is $($probe.python_minor), expected $($Expected.PythonMinor)") | Out-Null
+    }
+    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
+        $issues.Add("Torch is $($probe.torch_version), expected $($Expected.Torch)") | Out-Null
+    }
+    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
+        $issues.Add("TorchVision is $($probe.torchvision_version), expected $($Expected.TorchVision)") | Out-Null
+    }
+    if ($Expected.Xformers -and $probe.xformers_version -ne $Expected.Xformers) {
+        $issues.Add("xformers is $($probe.xformers_version), expected $($Expected.Xformers)") | Out-Null
+    }
+    if (-not $probe.xformers_import_ok -or -not $probe.xformers_ops_ok) {
+        $errorMessage = $probe.xformers_error
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+            $errorMessage = "xformers import or ops binding check failed"
+        }
+        $issues.Add($errorMessage) | Out-Null
+    }
+
+    if ($issues.Count -gt 0) {
+        $Message.Value = ($issues -join "; ")
+        return $false
+    }
+
+    $Message.Value = "Python $($probe.python_version); Torch $($probe.torch_version); TorchVision $($probe.torchvision_version); xformers $($probe.xformers_version)"
+    return $true
+}
+
+function Test-SageAttentionRuntimeReady {
+    param (
+        [string]$PythonExe,
+        [hashtable]$Expected,
+        [ref]$Message
+    )
+
+    $probe = Get-SageAttentionRuntimeProbe -PythonExe $PythonExe
+    if (-not $probe) {
+        $Message.Value = "could not probe $sageAttentionRuntimeDirName runtime details"
+        return $false
+    }
+
+    $issues = New-Object System.Collections.Generic.List[string]
+    if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
+        $issues.Add("Python minor is $($probe.python_minor), expected $($Expected.PythonMinor)") | Out-Null
+    }
+    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
+        $issues.Add("Torch is $($probe.torch_version), expected $($Expected.Torch)") | Out-Null
+    }
+    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
+        $issues.Add("TorchVision is $($probe.torchvision_version), expected $($Expected.TorchVision)") | Out-Null
+    }
+    if ($Expected.SageAttention -and $probe.sageattention_version -ne $Expected.SageAttention) {
+        $issues.Add("sageattention is $($probe.sageattention_version), expected $($Expected.SageAttention)") | Out-Null
+    }
+    if ($Expected.Triton -and $probe.triton_version -ne $Expected.Triton) {
+        $issues.Add("triton is $($probe.triton_version), expected $($Expected.Triton)") | Out-Null
+    }
+    if (-not $probe.cuda_available) {
+        $issues.Add("CUDA is not available") | Out-Null
+    }
+    if (-not $probe.triton_import_ok) {
+        $issues.Add("triton import failed") | Out-Null
+    }
+    if (-not $probe.sageattention_import_ok -or -not $probe.sageattention_symbols_ok) {
+        $errorMessage = $probe.sageattention_error
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+            $errorMessage = "sageattention import or symbol check failed"
+        }
+        $issues.Add($errorMessage) | Out-Null
+    }
+
+    if ($issues.Count -gt 0) {
+        $Message.Value = ($issues -join "; ")
+        return $false
+    }
+
+    $Message.Value = "Python $($probe.python_version); Torch $($probe.torch_version); TorchVision $($probe.torchvision_version); Triton $($probe.triton_version); SageAttention $($probe.sageattention_version)"
+    return $true
 }
 
 function Get-MainPythonSelection {
@@ -109,6 +538,32 @@ Recommended fix:
 "@
     }
 
+    if ($preferSageAttentionRuntime -and -not (Test-Path $sageAttentionPython)) {
+        throw @"
+SageAttention startup was requested, but the dedicated runtime is missing.
+
+Expected:
+- $sageAttentionPython
+
+Recommended fix:
+1. Extract a Python 3.11 embeddable package into .\$sageAttentionRuntimeDirName
+2. Run run_For_SageAttention_Experimental.bat again
+"@
+    }
+
+    if ($preferSageAttentionBlackwellRuntime -and -not (Test-Path $sageAttentionBlackwellPython)) {
+        throw @"
+Blackwell SageAttention startup was requested, but the dedicated runtime is missing.
+
+Expected:
+- $sageAttentionBlackwellPython
+
+Recommended fix:
+1. Extract a Python 3.11 embeddable package into .\$sageAttentionBlackwellRuntimeDirName
+2. Run run_For_Only_Blackwell_SageAttention_Experimental.bat again
+"@
+    }
+
     if ($preferBlackwellRuntime -and (Test-Path $blackwellPython)) {
         Write-Host -ForegroundColor Green "Using Blackwell experimental Python..."
         if (-not (Test-PipReady -PythonExe $blackwellPython)) {
@@ -122,6 +577,38 @@ Recommended fix:
             PythonExe = $blackwellPython
             DepsMarker = $blackwellDepsMarker
             Runtime = "blackwell"
+        }
+    }
+
+    if ($preferSageAttentionRuntime -and (Test-Path $sageAttentionPython)) {
+        Write-Host -ForegroundColor Green "Using SageAttention experimental Python..."
+        if (-not (Test-PipReady -PythonExe $sageAttentionPython)) {
+            Write-Host -ForegroundColor Yellow "$sageAttentionRuntimeDirName is not initialized yet. Running setup_embeddable_python.bat..."
+            & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $sageAttentionRuntimeDirName
+            if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $sageAttentionPython)) {
+                throw "SageAttention experimental Python is incomplete: pip is not available."
+            }
+        }
+        return @{
+            PythonExe = $sageAttentionPython
+            DepsMarker = $sageAttentionDepsMarker
+            Runtime = "sageattention"
+        }
+    }
+
+    if ($preferSageAttentionBlackwellRuntime -and (Test-Path $sageAttentionBlackwellPython)) {
+        Write-Host -ForegroundColor Green "Using Blackwell SageAttention experimental Python..."
+        if (-not (Test-PipReady -PythonExe $sageAttentionBlackwellPython)) {
+            Write-Host -ForegroundColor Yellow "$sageAttentionBlackwellRuntimeDirName is not initialized yet. Running setup_embeddable_python.bat..."
+            & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $sageAttentionBlackwellRuntimeDirName
+            if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $sageAttentionBlackwellPython)) {
+                throw "Blackwell SageAttention experimental Python is incomplete: pip is not available."
+            }
+        }
+        return @{
+            PythonExe = $sageAttentionBlackwellPython
+            DepsMarker = $sageAttentionBlackwellDepsMarker
+            Runtime = "sageattention-blackwell"
         }
     }
 
@@ -193,19 +680,49 @@ Developer override:
 "@
 }
 
+$blackwellExpectedPackages = Get-BlackwellExpectedPackageVersions -Profile $blackwellPreferredProfile
+$sageAttentionExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $sageAttentionPreferredProfile
+$sageAttentionBlackwellExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $sageAttentionBlackwellPreferredProfile
 $mainPython = Get-MainPythonSelection
 $pythonExe = $mainPython.PythonExe
 $depsMarker = $mainPython.DepsMarker
 $runtimeName = $mainPython.Runtime
+Set-DedicatedRuntimeCaches -RuntimeName $runtimeName -PythonExe $pythonExe
 $mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules
 $blackwellXformersReady = $true
+$blackwellRuntimeMessage = ""
+$sageAttentionRuntimeReady = $true
+$sageAttentionRuntimeMessage = ""
 if ($runtimeName -eq "blackwell") {
-    $blackwellXformersReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("xformers")
+    $blackwellXformersReady = Test-BlackwellRuntimeReady -PythonExe $pythonExe -Expected $blackwellExpectedPackages -Message ([ref]$blackwellRuntimeMessage)
+    if (-not $blackwellXformersReady -and $blackwellRuntimeMessage) {
+        Write-Host -ForegroundColor Yellow "Blackwell runtime is not ready yet: $blackwellRuntimeMessage"
+    }
 }
-if (-not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady) {
+elseif ($runtimeName -eq "sageattention") {
+    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+    if (-not $sageAttentionRuntimeReady -and $sageAttentionRuntimeMessage) {
+        Write-Host -ForegroundColor Yellow "SageAttention runtime is not ready yet: $sageAttentionRuntimeMessage"
+    }
+}
+elseif ($runtimeName -eq "sageattention-blackwell") {
+    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionBlackwellExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+    if (-not $sageAttentionRuntimeReady -and $sageAttentionRuntimeMessage) {
+        Write-Host -ForegroundColor Yellow "Blackwell SageAttention runtime is not ready yet: $sageAttentionRuntimeMessage"
+    }
+}
+if (-not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady -or -not $sageAttentionRuntimeReady) {
     if ($runtimeName -eq "blackwell") {
         Write-Host -ForegroundColor Yellow "Blackwell experimental dependencies are not installed yet. Running install_blackwell.ps1..."
-        & (Join-Path $repoRoot "install_blackwell.ps1") -TorchChannel "czmahi-20250502"
+        & (Join-Path $repoRoot "install_blackwell.ps1") -TorchChannel $blackwellPreferredProfile
+    }
+    elseif ($runtimeName -eq "sageattention") {
+        Write-Host -ForegroundColor Yellow "SageAttention experimental dependencies are not installed yet. Running install_sageattention.ps1..."
+        & (Join-Path $repoRoot "install_sageattention.ps1") -Profile $sageAttentionPreferredProfile -RuntimeTarget general
+    }
+    elseif ($runtimeName -eq "sageattention-blackwell") {
+        Write-Host -ForegroundColor Yellow "Blackwell SageAttention experimental dependencies are not installed yet. Running install_sageattention.ps1..."
+        & (Join-Path $repoRoot "install_sageattention.ps1") -Profile $sageAttentionBlackwellPreferredProfile -RuntimeTarget blackwell
     }
     else {
         Write-Host -ForegroundColor Yellow "Dependencies are not installed yet. Running install.ps1..."
@@ -215,14 +732,40 @@ if (-not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellX
     $pythonExe = $mainPython.PythonExe
     $depsMarker = $mainPython.DepsMarker
     $runtimeName = $mainPython.Runtime
+    Set-DedicatedRuntimeCaches -RuntimeName $runtimeName -PythonExe $pythonExe
     $mainModulesReady = Test-ModulesReady -PythonExe $pythonExe -Modules $mainRuntimeModules
     $blackwellXformersReady = $true
+    $blackwellRuntimeMessage = ""
+    $sageAttentionRuntimeReady = $true
+    $sageAttentionRuntimeMessage = ""
     if ($runtimeName -eq "blackwell") {
-        $blackwellXformersReady = Test-ModulesReady -PythonExe $pythonExe -Modules @("xformers")
+        $blackwellXformersReady = Test-BlackwellRuntimeReady -PythonExe $pythonExe -Expected $blackwellExpectedPackages -Message ([ref]$blackwellRuntimeMessage)
     }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady) {
+    elseif ($runtimeName -eq "sageattention") {
+        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+    }
+    elseif ($runtimeName -eq "sageattention-blackwell") {
+        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionBlackwellExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady -or -not $sageAttentionRuntimeReady) {
+        if ($runtimeName -eq "blackwell" -and $blackwellRuntimeMessage) {
+            throw "Dependency installation failed. Blackwell runtime is still not ready: $blackwellRuntimeMessage"
+        }
+        if ($runtimeName -in @("sageattention", "sageattention-blackwell") -and $sageAttentionRuntimeMessage) {
+            throw "Dependency installation failed. SageAttention runtime is still not ready: $sageAttentionRuntimeMessage"
+        }
         throw "Dependency installation failed."
     }
+}
+
+if ($runtimeName -eq "blackwell" -and $blackwellRuntimeMessage) {
+    Write-Host -ForegroundColor Green "Blackwell pinned runtime check passed: $blackwellRuntimeMessage"
+}
+elseif ($runtimeName -eq "sageattention" -and $sageAttentionRuntimeMessage) {
+    Write-Host -ForegroundColor Green "SageAttention runtime check passed: $sageAttentionRuntimeMessage"
+}
+elseif ($runtimeName -eq "sageattention-blackwell" -and $sageAttentionRuntimeMessage) {
+    Write-Host -ForegroundColor Green "Blackwell SageAttention runtime check passed: $sageAttentionRuntimeMessage"
 }
 
 if ($Env:MIKAZUKI_BLACKWELL_STARTUP -eq "1") {
@@ -233,6 +776,15 @@ if ($Env:MIKAZUKI_BLACKWELL_STARTUP -eq "1") {
         if ($LASTEXITCODE -ne 0) {
             Write-Host -ForegroundColor Yellow "Blackwell xformers patch step reported a warning. Continuing startup..."
         }
+    }
+}
+
+if ($Env:MIKAZUKI_SAGEATTENTION_STARTUP -eq "1") {
+    if ($runtimeName -eq "sageattention-blackwell") {
+        Write-Host -ForegroundColor Yellow "Blackwell SageAttention startup mode enabled. This runtime prepares the dedicated Blackwell SageAttention environment; enable sageattn manually on supported routes."
+    }
+    else {
+        Write-Host -ForegroundColor Yellow "SageAttention startup mode enabled. This runtime prepares SageAttention only; enable sageattn manually on supported routes."
     }
 }
 
@@ -250,7 +802,7 @@ if (-not ($args -contains "--disable-tageditor")) {
     }
     else {
         $fallbackMainPython = $null
-        if ($runtimeName -eq "blackwell") {
+        if ($runtimeName -in @("blackwell", "sageattention", "sageattention-blackwell")) {
             if (Test-Path $portablePython) {
                 $fallbackMainPython = $portablePython
                 $tagEditorMarker = Join-Path $repoRoot "python\.tageditor_installed"
@@ -308,5 +860,6 @@ if (-not ($args -contains "--disable-tageditor")) {
     }
 }
 
+$Env:MIKAZUKI_SKIP_REQUIREMENTS_VALIDATION = "1"
 Set-Location $repoRoot
 & $pythonExe "gui.py" @args

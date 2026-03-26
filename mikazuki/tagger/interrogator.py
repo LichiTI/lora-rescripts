@@ -59,6 +59,13 @@ available_interrogators = {
         'wd-vit-large-tagger-v3',
         repo_id='SmilingWolf/wd-vit-large-tagger-v3',
     ),
+    'eva02_large_E621_FULL_V1': WaifuDiffusionInterrogator(
+        'eva02_large_E621_FULL_V1',
+        repo_id='nzs234/eva02_large_E621_FULL_V1',
+        model_path='model.onnx',
+        tags_path='selected_tags.csv',
+        extra_files=['model.onnx.data', 'tags.json', 'thresholds.json'],
+    ),
     'cl_tagger_1_01': CLTaggerInterrogator(
         'cl_tagger_1_01',
         repo_id='cella110n/cl_tagger',

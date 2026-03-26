@@ -22,8 +22,15 @@ function Test-PipReady {
         [string]$PythonExe
     )
 
-    & $PythonExe -m pip --version 1>$null 2>$null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -m pip --version 1>$null 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Invoke-Step {
@@ -63,14 +70,164 @@ function Test-ModulesReady {
         return $true
     }
 
-    & $PythonExe -c "import importlib, sys; failed=[]; 
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -c "import importlib, sys; failed=[]; 
 for name in sys.argv[1:]:
     try:
         importlib.import_module(name)
     except Exception:
         failed.append(name)
 raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
-    return $LASTEXITCODE -eq 0
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function Get-BlackwellExpectedPackageVersions {
+    param (
+        [string]$Profile
+    )
+
+    switch ($Profile) {
+        "czmahi-20250502" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.8.0.dev20250501+cu128"
+                TorchVision = "0.22.0.dev20250502+cu128"
+                Xformers = "0.0.31+8fc8ec5a.d20250503"
+            }
+        }
+        "panchovix-20250321" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.8.0.dev20250320+cu128"
+                TorchVision = "0.22.0.dev20250321+cu128"
+                Xformers = "0.0.30+9a2cd3ef.d20250321"
+            }
+        }
+        default {
+            return @{
+                PythonMinor = "3.12"
+                Torch = ""
+                TorchVision = ""
+                Xformers = ""
+            }
+        }
+    }
+}
+
+function Get-BlackwellRuntimeProbe {
+    param (
+        [string]$PythonExe
+    )
+
+    $script = @"
+import json
+import sys
+import importlib.metadata as md
+
+result = {
+    "python_version": sys.version.split()[0],
+    "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+    "torch_version": "",
+    "torchvision_version": "",
+    "xformers_version": "",
+    "cuda_available": False,
+    "torch_cuda_runtime": "",
+    "xformers_import_ok": False,
+    "xformers_ops_ok": False,
+    "xformers_error": "",
+}
+
+try:
+    import torch
+except Exception as exc:
+    result["xformers_error"] = f"torch import failed: {exc}"
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+result["torch_version"] = getattr(torch, "__version__", "")
+result["torch_cuda_runtime"] = getattr(torch.version, "cuda", "")
+result["cuda_available"] = bool(torch.cuda.is_available())
+
+try:
+    result["torchvision_version"] = md.version("torchvision")
+except Exception:
+    result["torchvision_version"] = ""
+
+try:
+    result["xformers_version"] = md.version("xformers")
+except Exception:
+    result["xformers_version"] = ""
+
+try:
+    import xformers
+    result["xformers_import_ok"] = True
+    _ = xformers.__version__
+    from xformers.ops import memory_efficient_attention  # noqa: F401
+    result["xformers_ops_ok"] = True
+except Exception as exc:
+    result["xformers_error"] = str(exc)
+
+print(json.dumps(result))
+"@
+
+    $raw = & $PythonExe -c $script 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        return $null
+    }
+
+    try {
+        return $raw | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Assert-BlackwellRuntimeReady {
+    param (
+        [string]$PythonExe,
+        [hashtable]$Expected,
+        [bool]$RequireXformers = $true
+    )
+
+    $probe = Get-BlackwellRuntimeProbe -PythonExe $PythonExe
+    if (-not $probe) {
+        throw "Could not probe python_blackwell runtime details after installation."
+    }
+
+    $issues = New-Object System.Collections.Generic.List[string]
+    if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
+        $issues.Add("Python minor is $($probe.python_minor), expected $($Expected.PythonMinor)") | Out-Null
+    }
+    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
+        $issues.Add("Torch is $($probe.torch_version), expected $($Expected.Torch)") | Out-Null
+    }
+    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
+        $issues.Add("TorchVision is $($probe.torchvision_version), expected $($Expected.TorchVision)") | Out-Null
+    }
+    if ($RequireXformers -and $Expected.Xformers -and $probe.xformers_version -ne $Expected.Xformers) {
+        $issues.Add("xformers is $($probe.xformers_version), expected $($Expected.Xformers)") | Out-Null
+    }
+    if ($RequireXformers -and (-not $probe.xformers_import_ok -or -not $probe.xformers_ops_ok)) {
+        $errorMessage = $probe.xformers_error
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) {
+            $errorMessage = "xformers import or ops binding check failed"
+        }
+        $issues.Add($errorMessage) | Out-Null
+    }
+
+    if ($issues.Count -gt 0) {
+        throw "Blackwell runtime verification failed: $($issues -join '; ')"
+    }
+
+    Write-Host -ForegroundColor Green "Blackwell runtime versions: Python $($probe.python_version); Torch $($probe.torch_version); TorchVision $($probe.torchvision_version); xformers $($probe.xformers_version)"
+    Write-Host -ForegroundColor Green "CUDA available: $($probe.cuda_available); runtime: $($probe.torch_cuda_runtime)"
 }
 
 function Resolve-XformersWheel {
@@ -154,6 +311,7 @@ if (-not (Test-PipReady -PythonExe $blackwellPython)) {
 }
 
 Set-Location $repoRoot
+$blackwellExpectedPackages = Get-BlackwellExpectedPackageVersions -Profile $TorchChannel
 
 $torchInstallArgs = @()
 $optionalTorchaudioArgs = $null
@@ -215,7 +373,11 @@ if (-not (Test-ModulesReady -PythonExe $blackwellPython -Modules $mainRequiredMo
 
 if (-not $SkipXformers) {
     $resolvedWheel = Resolve-XformersWheel -RequestedWheel $XformersWheel -Profile $TorchChannel
+    Invoke-OptionalStep "Removing any existing xformers package..." {
+        & $blackwellPython -m pip uninstall -y xformers
+    } "Existing xformers cleanup reported a warning. Continuing with fresh install."
     if ($resolvedWheel) {
+        Write-Host -ForegroundColor Yellow "Using Blackwell xformers wheel: $resolvedWheel"
         Invoke-Step "Installing Blackwell xformers wheel from local file..." {
             & $blackwellPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
         }
@@ -242,7 +404,7 @@ To continue safely, either:
 }
 
 Invoke-Step "Verifying Blackwell environment..." {
-    & $blackwellPython -c "import torch; print('Torch:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('CUDA runtime:', torch.version.cuda)"
+    Assert-BlackwellRuntimeReady -PythonExe $blackwellPython -Expected $blackwellExpectedPackages -RequireXformers:(-not $SkipXformers)
 }
 
 Set-Content -Path $blackwellMarker -Value "" -Encoding ASCII

@@ -190,18 +190,27 @@ Schema.intersect([
         no_token_padding: Schema.boolean().default(false).description("禁用 token 填充（与 Diffusers 的旧 Dreambooth 脚本一致）"),
     }).description("高级设置"),
 
-    Schema.object({
-        mixed_precision: Schema.union(["no", "fp16", "bf16"]).default("fp16").description("训练混合精度"),
-        full_fp16: Schema.boolean().description("完全使用 FP16 精度"),
-        full_bf16: Schema.boolean().description("完全使用 BF16 精度 仅支持 SDXL"),
-        xformers: Schema.boolean().default(true).description("启用 xformers"),
-        sdpa: Schema.boolean().description("启用 sdpa"),
-        lowram: Schema.boolean().default(false).description("低内存模式 该模式下会将 U-net、文本编码器、VAE 直接加载到显存中"),
-        cache_latents: Schema.boolean().default(true).description("缓存图像 latent"),
-        cache_latents_to_disk: Schema.boolean().default(true).description("缓存图像 latent 到磁盘"),
-        persistent_data_loader_workers: Schema.boolean().default(true).description("保留加载训练集的worker，减少每个 epoch 之间的停顿。"),
-        vae_batch_size: Schema.number().min(1).description("vae 编码批量大小"),
-    }).description("速度优化选项"),
+    Schema.intersect([
+        Schema.object({
+            mixed_precision: Schema.union(["no", "fp16", "bf16"]).default("fp16").description("训练混合精度"),
+            full_fp16: Schema.boolean().description("完全使用 FP16 精度"),
+            full_bf16: Schema.boolean().description("完全使用 BF16 精度 仅支持 SDXL"),
+            xformers: Schema.boolean().default(true).description("启用 xformers"),
+            sdpa: Schema.boolean().description("启用 sdpa"),
+            lowram: Schema.boolean().default(false).description("低内存模式 该模式下会将 U-net、文本编码器、VAE 直接加载到显存中"),
+            cache_latents: Schema.boolean().default(true).description("缓存图像 latent"),
+            cache_latents_to_disk: Schema.boolean().default(true).description("缓存图像 latent 到磁盘"),
+            persistent_data_loader_workers: Schema.boolean().default(true).description("保留加载训练集的worker，减少每个 epoch 之间的停顿。"),
+            vae_batch_size: Schema.number().min(1).description("vae 编码批量大小"),
+        }),
+        Schema.union([
+            Schema.object({
+                model_train_type: Schema.const("sdxl-finetune").required(),
+                sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+            }),
+            Schema.object({}),
+        ]),
+    ]).description("速度优化选项"),
 
     Schema.object({
         ddp_timeout: Schema.number().min(0).description("分布式训练超时时间"),

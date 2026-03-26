@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
@@ -45,12 +45,12 @@ def _resolve_frontend_mode() -> str:
 
 
 FRONTEND_MODE = _resolve_frontend_mode()
-LEGACY_ENTRY = "lora/index.html"
+LEGACY_ENTRY = "index.html"
 WORKSPACE_ENTRY = "index.html"
 FRONTEND_ENTRY = WORKSPACE_ENTRY if FRONTEND_MODE == "workspace" else LEGACY_ENTRY
 
 if not os.path.exists(os.path.join("frontend", "dist", FRONTEND_ENTRY)):
-    FRONTEND_ENTRY = WORKSPACE_ENTRY
+    FRONTEND_ENTRY = LEGACY_ENTRY if os.path.exists(os.path.join("frontend", "dist", LEGACY_ENTRY)) else WORKSPACE_ENTRY
 
 
 async def app_startup():
@@ -107,10 +107,16 @@ async def index():
     return FileResponse(f"./frontend/dist/{FRONTEND_ENTRY}")
 
 
+@app.get("/index.md")
+@app.get("/index.html")
+async def home_alias():
+    return RedirectResponse(url="/", status_code=307)
+
+
 @app.get("/workspace")
 @app.get("/workspace/")
 async def workspace_index():
-    return FileResponse(f"./frontend/dist/{WORKSPACE_ENTRY}")
+    return RedirectResponse(url="/", status_code=307)
 
 
 @app.get("/favicon.ico", response_class=FileResponse)

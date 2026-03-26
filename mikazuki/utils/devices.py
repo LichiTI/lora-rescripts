@@ -1,3 +1,7 @@
+import importlib
+import os
+import sys
+
 from mikazuki.log import log
 from packaging.version import Version
 
@@ -14,6 +18,104 @@ xformers_status = {
 }
 
 
+def _infer_attention_runtime_mode() -> str:
+    if os.environ.get("MIKAZUKI_SAGEATTENTION_STARTUP") == "1":
+        return "sageattention"
+    if os.environ.get("MIKAZUKI_BLACKWELL_STARTUP") == "1":
+        return "blackwell"
+
+    executable = sys.executable.replace("\\", "/").lower()
+    if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
+        return "sageattention"
+    if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
+        return "sageattention"
+    if "/python_blackwell/" in executable:
+        return "blackwell"
+    return "standard"
+
+
+def get_attention_runtime_mode() -> str:
+    return _infer_attention_runtime_mode()
+
+
+def _probe_sageattention_status(torch_module) -> dict:
+    status = {
+        "installed": False,
+        "importable": False,
+        "symbols_ok": False,
+        "reason": "Not checked yet.",
+    }
+
+    try:
+        importlib.import_module("triton")
+    except Exception as exc:
+        status["reason"] = f"triton import failed: {_short_exc_message(exc)}"
+        return status
+
+    try:
+        sage_module = importlib.import_module("sageattention")
+        sageattn = getattr(sage_module, "sageattn", None)
+        sageattn_varlen = getattr(sage_module, "sageattn_varlen", None)
+        status["installed"] = True
+        status["importable"] = True
+        status["symbols_ok"] = callable(sageattn) and callable(sageattn_varlen)
+        if status["symbols_ok"]:
+            status["reason"] = "ok"
+        else:
+            status["reason"] = "required SageAttention symbols are missing."
+    except Exception as exc:
+        status["reason"] = f"sageattention import failed: {_short_exc_message(exc)}"
+
+    if not torch_module.cuda.is_available() and status["reason"] == "ok":
+        status["reason"] = "CUDA is not available."
+
+    return status
+
+
+def _build_attention_backend_summary(torch_module, xformers_info: dict) -> dict:
+    runtime_mode = _infer_attention_runtime_mode()
+    sdpa_available = bool(
+        torch_module.cuda.is_available() and hasattr(torch_module.nn.functional, "scaled_dot_product_attention")
+    )
+    sageattention_status = _probe_sageattention_status(torch_module)
+
+    preferred_backend = "torch"
+    if runtime_mode == "sageattention" and sageattention_status["symbols_ok"] and torch_module.cuda.is_available():
+        preferred_backend = "sageattn"
+    elif xformers_info.get("supported"):
+        preferred_backend = "xformers"
+    elif sdpa_available:
+        preferred_backend = "sdpa"
+
+    if runtime_mode == "sageattention" and preferred_backend == "sageattn":
+        detail = (
+            "SageAttention runtime active. Routes that explicitly enable sageattn will use SageAttention; "
+            "other xformers configs will fall back to SDPA when supported."
+        )
+        detail_zh = (
+            "当前为 SageAttention 专用运行时。显式启用 sageattn 的训练路由会使用 SageAttention；"
+            "其他仍勾选 xformers 的配置在支持时会自动降级到 SDPA。"
+        )
+    elif preferred_backend == "xformers":
+        detail = "xformers is currently the strongest verified attention backend in this runtime."
+        detail_zh = "当前运行时里，xformers 是最优先且已验证可用的 attention 后端。"
+    elif preferred_backend == "sdpa":
+        detail = "SDPA is currently the default fallback attention backend in this runtime."
+        detail_zh = "当前运行时里，SDPA 是默认的回退 attention 后端。"
+    else:
+        detail = "Only the baseline torch attention path is currently available."
+        detail_zh = "当前仅可使用基础的 torch attention 路径。"
+
+    return {
+        "runtime_mode": runtime_mode,
+        "preferred_backend": preferred_backend,
+        "sdpa_available": sdpa_available,
+        "sageattention": sageattention_status,
+        "detail": detail,
+        "detail_zh": detail_zh,
+    }
+
+
 def _short_exc_message(exc) -> str:
     message = str(exc).strip()
     if not message:
@@ -27,6 +129,8 @@ def _is_inconclusive_xformers_probe_error(reason: str) -> bool:
         "no operator found" in lowered
         or "memory_efficient_attention_forward" in lowered
         or "operator wasn't built" in lowered
+        or "no kernel image is available for execution on the device" in lowered
+        or "no kernel image available for execution on the device" in lowered
     )
 
 
@@ -255,16 +359,41 @@ def check_torch_gpu():
                 f'Torch detected GPU: {name} VRAM {round(memory / 1024 / 1024)} Arch {torch.cuda.get_device_capability(device)} Cores {torch.cuda.get_device_properties(device).multi_processor_count}')
 
         status = refresh_xformers_status(torch)
+        attention_summary = _build_attention_backend_summary(torch, status)
+        log.info(f"Running on attention backend: {attention_summary['preferred_backend']}")
+        log.info(f"当前运行的注意力后端：{attention_summary['preferred_backend']}")
+        log.info(
+            "Attention backend summary: "
+            f"preferred={attention_summary['preferred_backend']} | "
+            f"runtime={attention_summary['runtime_mode']} | "
+            f"xformers={'ready' if status.get('supported') else 'unavailable'} | "
+            f"sdpa={'ready' if attention_summary['sdpa_available'] else 'unavailable'} | "
+            f"sageattn={'ready' if attention_summary['sageattention']['symbols_ok'] else 'unavailable'}"
+        )
+        log.info(attention_summary["detail"])
+        log.info(f"注意力后端摘要：当前优先后端={attention_summary['preferred_backend']}。{attention_summary['detail_zh']}")
+
         if not status["installed"]:
-            log.warning(
-                f"xformers is not available in the current environment: {status['reason']}"
-            )
-            log.warning(
-                "When a training config enables xformers, Mikazuki will automatically fall back to SDPA when possible."
-            )
-            log.warning(
-                f"当前环境不可用 xformers：{status['reason']}。若训练配置启用了 xformers，Mikazuki 会尽量自动降级到 sdpa。"
-            )
+            if attention_summary["runtime_mode"] == "sageattention" and attention_summary["sageattention"]["symbols_ok"]:
+                log.info(
+                    f"xformers is not installed in this SageAttention runtime: {status['reason']}"
+                )
+                log.info(
+                    "This is expected for the dedicated SageAttention runtime. xformers-style configs will fall back to SDPA here."
+                )
+                log.info(
+                    f"SageAttention 专用运行时中未安装 xformers：{status['reason']}。这属于预期行为；若训练配置仍启用了 xformers，这里会回退到 sdpa。"
+                )
+            else:
+                log.warning(
+                    f"xformers is not available in the current environment: {status['reason']}"
+                )
+                log.warning(
+                    "When a training config enables xformers, Mikazuki will automatically fall back to SDPA when possible."
+                )
+                log.warning(
+                    f"当前环境不可用 xformers：{status['reason']}。若训练配置启用了 xformers，Mikazuki 会尽量自动降级到 sdpa。"
+                )
         elif not status["supported"]:
             if status.get("version"):
                 log.warning(f"xformers version detected: {status['version']}")

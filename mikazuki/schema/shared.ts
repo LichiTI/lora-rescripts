@@ -207,6 +207,11 @@
                     sample_every_n_epochs: Schema.number().default(2).description("每 N 个 epoch 生成一次预览图"),
                     sample_at_first: Schema.boolean().default(false).description("训练开始前先生成一次预览图"),
                 }),
+                Schema.object({
+                    enable_preview: Schema.const(true).required(),
+                    randomly_choice_prompt: Schema.const(true).required(),
+                    random_prompt_include_subdirs: Schema.boolean().default(false).description('从 train_data_dir 下所有子目录随机选择 Prompt（用于多子目录数据集）'),
+                }),
                 Schema.object({}),
             ]),
         ]),

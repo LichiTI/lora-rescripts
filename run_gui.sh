@@ -258,4 +258,5 @@ if [[ "$disable_tageditor" -eq 0 ]]; then
 fi
 
 cd "$script_dir"
+export MIKAZUKI_SKIP_REQUIREMENTS_VALIDATION=1
 exec "$python_exe" gui.py "$@"

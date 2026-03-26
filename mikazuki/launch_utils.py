@@ -300,8 +300,11 @@ def prepare_environment(disable_auto_mirror: bool = True, prepare_onnxruntime: b
 
     # if not check_run("mikazuki/scripts/torch_check.py"):
     #     sys.exit(1)
-
-    validate_requirements("requirements.txt")
+    skip_requirements_validation = os.environ.get("MIKAZUKI_SKIP_REQUIREMENTS_VALIDATION", "") == "1"
+    if skip_requirements_validation:
+        log.info("Launcher already validated the main runtime. Skipping redundant requirements revalidation.")
+    else:
+        validate_requirements("requirements.txt")
     setup_windows_bitsandbytes()
 
     if prepare_onnxruntime:

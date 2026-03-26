@@ -38,7 +38,11 @@ from mikazuki.utils.training_preflight import analyze_training_preflight
 from mikazuki.utils import train_utils
 from mikazuki.utils.dataset_analysis import analyze_dataset
 from mikazuki.utils.masked_loss_audit import analyze_masked_loss_dataset
-from mikazuki.utils.devices import get_xformers_status, printable_devices
+from mikazuki.utils.devices import (
+    get_attention_runtime_mode,
+    get_xformers_status,
+    printable_devices,
+)
 from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
@@ -149,8 +153,11 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
         return None, config["sample_prompts"]
 
     train_data_dir = config["train_data_dir"]
-    sub_dir = [dir for dir in glob(os.path.join(train_data_dir, '*')) if os.path.isdir(dir)]
+    sub_dirs = [dir for dir in glob(os.path.join(train_data_dir, '*')) if os.path.isdir(dir)]
+    sub_dirs_with_txt = [dir for dir in sub_dirs if glob(os.path.join(dir, '*.txt'))]
+    root_txt_files = glob(os.path.join(train_data_dir, '*.txt'))
 
+    enable_preview = parse_boolish(config.get('enable_preview', False))
     positive_prompts = config.pop('positive_prompts', None)
     negative_prompts = config.pop('negative_prompts', '')
     sample_width = config.pop('sample_width', 512)
@@ -158,13 +165,40 @@ def get_sample_prompts(config: dict) -> Tuple[Optional[str], str]:
     sample_cfg = config.pop('sample_cfg', 7)
     sample_seed = config.pop('sample_seed', 2333)
     sample_steps = config.pop('sample_steps', 24)
-    randomly_choice_prompt = config.pop('randomly_choice_prompt', False)
+    randomly_choice_prompt = parse_boolish(config.pop('randomly_choice_prompt', False))
+    random_prompt_include_subdirs = parse_boolish(config.pop('random_prompt_include_subdirs', False))
+
+    # random prompt sampling is only meaningful for preview generation
+    if not enable_preview:
+        randomly_choice_prompt = False
 
     if randomly_choice_prompt:
-        if len(sub_dir) != 1:
-            raise ValueError('训练数据集下有多个子文件夹，无法启用随机选取 Prompt 功能')
+        txt_files = []
+        if random_prompt_include_subdirs:
+            # Root-level captions should still be valid for flat datasets.
+            txt_files.extend(root_txt_files)
+            # collect captions from all direct dataset subdirectories first
+            prompt_source_dirs = [dir_path for dir_path in sub_dirs if glob(os.path.join(dir_path, '*.txt'))]
+            if not prompt_source_dirs:
+                # fallback to current directory to support flat datasets
+                prompt_source_dirs = [train_data_dir]
+            for dir_path in prompt_source_dirs:
+                txt_files.extend(glob(os.path.join(dir_path, '*.txt')))
+        else:
+            # Prefer the dataset root when it already contains captions. This
+            # keeps flat datasets working even if unrelated helper folders also
+            # exist beside the images.
+            if root_txt_files:
+                txt_files = root_txt_files
+            else:
+                if len(sub_dirs_with_txt) > 1:
+                    raise ValueError('训练数据集下有多个包含 txt 标注的子文件夹，请启用“从所有子目录随机选择 Prompt”。')
 
-        txt_files = glob(os.path.join(sub_dir[0], '*.txt'))
+                prompt_source_dir = train_data_dir
+                if len(sub_dirs_with_txt) == 1:
+                    prompt_source_dir = sub_dirs_with_txt[0]
+                txt_files = glob(os.path.join(prompt_source_dir, '*.txt'))
+
         if not txt_files:
             raise ValueError('训练数据集路径没有 txt 文件')
         try:
@@ -181,6 +215,72 @@ def read_prompt_text_file(path: str) -> str:
     return Path(path).read_text(encoding="utf-8", errors="ignore")
 
 
+def parse_boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off", "none", "null"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
+def apply_sageattention_runtime_override(config: dict) -> Optional[str]:
+    if get_attention_runtime_mode() != "sageattention":
+        return None
+
+    if parse_boolish(config.get("mem_eff_attn", False)):
+        return None
+
+    uses_xformers_flag = parse_boolish(config.get("xformers", False))
+    attn_mode = str(config.get("attn_mode", "")).strip().lower()
+    uses_xformers_attn_mode = attn_mode == "xformers"
+    wants_sageattention = (
+        parse_boolish(config.get("sageattn", False))
+        or parse_boolish(config.get("use_sage_attn", False))
+        or attn_mode == "sageattn"
+    )
+
+    if not uses_xformers_flag and not uses_xformers_attn_mode:
+        return None
+
+    if uses_xformers_flag:
+        config["xformers"] = False
+
+    if uses_xformers_attn_mode:
+        config["attn_mode"] = "sageattn" if wants_sageattention else "sdpa"
+
+    if wants_sageattention:
+        if "sdpa" in config:
+            config["sdpa"] = False
+        message = (
+            "检测到当前为 SageAttention 专用运行时，已自动忽略 xformers，"
+            "本次训练将优先使用 SageAttention。"
+        )
+        log.info(message)
+        return message
+
+    if "sdpa" in config:
+        config["sdpa"] = True
+        message = (
+            "检测到当前为 SageAttention 专用运行时，已自动忽略 xformers。"
+            "由于当前配置未启用 SageAttention，本次训练将改用 sdpa。"
+        )
+    else:
+        message = (
+            "检测到当前为 SageAttention 专用运行时，已自动忽略 xformers。"
+            "若希望本次训练直接使用 SageAttention，请启用 sageattn。"
+        )
+    log.warning(message)
+    return message
+
+
 def build_sample_prompt_file_name(config: dict) -> str:
     base_name = str(config.get("output_name", "")).strip() or str(config.get("model_train_type", "")).strip() or "sample-prompts"
     safe_name = re.sub(r"[^0-9A-Za-z._-]+", "-", base_name).strip("._-") or "sample-prompts"
@@ -195,7 +295,7 @@ def build_prompt_preview_text(content: str, max_lines: int = 3) -> Tuple[str, in
 
 
 def build_sample_prompt_record(config: dict) -> Optional[dict]:
-    enable_preview = bool(config.get("enable_preview"))
+    enable_preview = parse_boolish(config.get("enable_preview"))
     notes: list[str] = []
     warnings: list[str] = []
 
@@ -258,9 +358,13 @@ def build_sample_prompt_record(config: dict) -> Optional[dict]:
 
     source = "generated"
     detail = "Current positive / negative prompt fields"
-    if config.get("randomly_choice_prompt"):
-        source = "random_dataset_prompt_preview"
-        detail = "Random caption-derived preview from dataset"
+    if parse_boolish(config.get("randomly_choice_prompt")):
+        if parse_boolish(config.get("random_prompt_include_subdirs")):
+            source = "random_dataset_prompt_preview_all_subdirs"
+            detail = "Random caption-derived preview from all dataset subdirectories"
+        else:
+            source = "random_dataset_prompt_preview"
+            detail = "Random caption-derived preview from dataset"
 
     preview, line_count = build_prompt_preview_text(sample_prompt)
     return {
@@ -393,6 +497,10 @@ async def create_toml_file(request: Request):
     validated, message = train_utils.validate_model(config["pretrained_model_name_or_path"], model_train_type)
     if not validated:
         return APIResponseFail(message=message)
+
+    sageattention_override_message = apply_sageattention_runtime_override(config)
+    if sageattention_override_message:
+        start_warnings.append(sageattention_override_message)
 
     attention_fallback_message = apply_attention_backend_fallback(config, gpu_ids)
     if attention_fallback_message:

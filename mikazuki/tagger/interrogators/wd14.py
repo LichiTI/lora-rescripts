@@ -22,11 +22,13 @@ class WaifuDiffusionInterrogator(Interrogator):
             name: str,
             model_path='model.onnx',
             tags_path='selected_tags.csv',
+            extra_files=None,
             **kwargs
     ) -> None:
         super().__init__(name)
         self.model_path = model_path
         self.tags_path = tags_path
+        self.extra_files = list(extra_files or [])
         self.kwargs = kwargs
 
     def download(self) -> Tuple[os.PathLike, os.PathLike]:
@@ -36,6 +38,10 @@ class WaifuDiffusionInterrogator(Interrogator):
             **self.kwargs, filename=self.model_path))
         tags_path = Path(hf_hub_download(
             **self.kwargs, filename=self.tags_path))
+
+        for extra_file in self.extra_files:
+            hf_hub_download(**self.kwargs, filename=extra_file)
+
         return model_path, tags_path
 
     def load(self) -> None:

@@ -113,7 +113,9 @@ Schema.intersect([
     SHARED_SCHEMAS.NOISE_SETTINGS,
     SHARED_SCHEMAS.DATA_ENCHANCEMENT,
     SHARED_SCHEMAS.OTHER,
-    Schema.object(UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {}, [
+    Schema.object(UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {
+        sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+    }, [
         "cache_text_encoder_outputs",
         "cache_text_encoder_outputs_to_disk",
         "text_encoder_batch_size",

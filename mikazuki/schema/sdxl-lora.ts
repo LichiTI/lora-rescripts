@@ -78,6 +78,7 @@ Schema.intersect([
 
     Schema.object(
         UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {
+            sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
             sdpa: Schema.boolean().default(true).description("启用 sdpa"),
             cache_text_encoder_outputs: Schema.boolean().default(true).description("缓存文本编码器的输出，减少显存使用。使用时需要关闭 shuffle_caption"),
             cache_text_encoder_outputs_to_disk: Schema.boolean().default(false).description("缓存文本编码器的输出到磁盘"),

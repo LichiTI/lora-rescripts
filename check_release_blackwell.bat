@@ -4,7 +4,7 @@ setlocal
 
 cd /d "%~dp0"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_release_blackwell.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_release_blackwell.ps1" %*
 if errorlevel 1 (
     echo.
     echo [ERROR] Release check failed.

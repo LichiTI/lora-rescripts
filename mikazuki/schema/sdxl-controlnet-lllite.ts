@@ -114,6 +114,8 @@ Schema.intersect([
     SHARED_SCHEMAS.NOISE_SETTINGS,
     SHARED_SCHEMAS.DATA_ENCHANCEMENT,
     SHARED_SCHEMAS.OTHER,
-    Schema.object(UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {}, ["cpu_offload_checkpointing"])).description("速度优化选项"),
+    Schema.object(UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {
+        sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+    }, ["cpu_offload_checkpointing"])).description("速度优化选项"),
     SHARED_SCHEMAS.DISTRIBUTED_TRAINING
 ]);

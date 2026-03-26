@@ -119,7 +119,16 @@ Schema.intersect([
     SHARED_SCHEMAS.OTHER,
 
     // 速度优化选项
-    Schema.object(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH).description("速度优化选项"),
+    Schema.intersect([
+        Schema.object(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH),
+        Schema.union([
+            Schema.object({
+                model_train_type: Schema.const("sdxl-lora").required(),
+                sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+            }),
+            Schema.object({}),
+        ]),
+    ]).description("速度优化选项"),
 
     // 分布式训练
     SHARED_SCHEMAS.DISTRIBUTED_TRAINING

@@ -59,6 +59,7 @@ Current maintenance notes for this fork:
 - polished portable startup and project-local Python handling
 - fixed tag editor startup, dependency compatibility, and UI theme consistency
 - improved training compatibility for config parsing, SDXL checkpoint loading, and xformers to sdpa fallback
+- added experimental SageAttention startup/runtime paths, including a dedicated Blackwell entry
 - refreshed packaging details, docs, and download guidance
 
 ## ✨NEW: Train WebUI
@@ -107,6 +108,30 @@ If you are in China mainland, please use `install-cn.ps1`.
 #### Train
 
 run `run_gui.ps1`, then program will open [http://127.0.0.1:28000](http://127.0.0.1:28000) automanticlly
+
+#### SageAttention Experimental Startup
+
+If you want to try `sageattn`, there are now dedicated experimental startup scripts on Windows:
+
+- `run_For_SageAttention_Experimental.bat`: general SageAttention runtime for NVIDIA GPUs
+- `run_For_NVIDIA_SageAttention_Experimental.bat`: compatibility alias for the same general SageAttention runtime
+- `run_For_Only_Blackwell_SageAttention_Experimental.bat`: recommended experimental path for RTX 50 / RTX PRO Blackwell users when xformers is unreliable
+
+Notes:
+
+- the first run will automatically prepare a dedicated runtime and keep the main `python` / `python_blackwell` / xformers environments untouched
+- SageAttention only affects routes and configs that explicitly enable `sageattn`; launching with a SageAttention script does not force every trainer to stop using `sdpa` or `xformers`
+- you can verify the runtime with `check_sageattention_env.bat` or `check_sageattention_env.bat --blackwell`
+- if you want to provide a prebuilt local wheel, place it in `sageattention-wheels` or `sageattention_wheels`
+- for the Blackwell runtime, wheel names containing `blackwell` or `sm120` are preferred automatically
+
+Current validated experimental base stack:
+
+- Python `3.11.9`
+- Torch `2.10.0+cu128`
+- TorchVision `0.25.0+cu128`
+- Triton Windows `3.5.1.post24`
+- SageAttention `1.0.6`
 
 ### Linux
 

@@ -272,6 +272,106 @@ def wait_on_server():
             break
 
 
+def ensure_gradio_localhost_no_proxy():
+    entries = []
+    seen = set()
+
+    for key in ("NO_PROXY", "no_proxy"):
+        current = os.environ.get(key, "")
+        for item in current.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            lowered = item.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            entries.append(item)
+
+    changed = False
+    for host in ("127.0.0.1", "localhost", "::1"):
+        lowered = host.lower()
+        if lowered not in seen:
+            entries.append(host)
+            seen.add(lowered)
+            changed = True
+
+    merged = ",".join(entries)
+    for key in ("NO_PROXY", "no_proxy"):
+        if os.environ.get(key) != merged:
+            os.environ[key] = merged
+            changed = True
+
+    return merged, changed
+
+
+def build_launch_kwargs(allowed_paths, server_name_override=None):
+    server_name = server_name_override
+    if server_name is None:
+        server_name = cmd_args.opts.server_name
+    if not server_name:
+        server_name = "127.0.0.1"
+
+    return {
+        "server_port": cmd_args.opts.port,
+        "server_name": server_name,
+        "share": cmd_args.opts.share,
+        "auth": [tuple(cred.split(":")) for cred in cmd_args.opts.auth]
+        if cmd_args.opts.auth
+        else None,
+        "ssl_keyfile": cmd_args.opts.tls_key,
+        "ssl_certfile": cmd_args.opts.tls_cert,
+        "debug": cmd_args.opts.gradio_debug,
+        "prevent_thread_lock": True,
+        "allowed_paths": allowed_paths,
+        "root_path": cmd_args.opts.root_path or None,
+    }
+
+
+def launch_interface_with_localhost_fallback(allowed_paths):
+    global interface
+
+    _, proxy_updated = ensure_gradio_localhost_no_proxy()
+    if proxy_updated:
+        logger.warn("Added localhost / 127.0.0.1 to NO_PROXY for Gradio local launch compatibility.")
+        logger.warn("已将 localhost / 127.0.0.1 加入 NO_PROXY，以提高 Gradio 本地启动兼容性。")
+
+    launch_kwargs = build_launch_kwargs(allowed_paths)
+    try:
+        return interface.launch(**launch_kwargs)
+    except ValueError as exc:
+        error_text = str(exc)
+        if "localhost is not accessible" not in error_text.lower():
+            write_status("failed", error_text)
+            raise
+
+        write_status("starting_server", "Localhost probe failed, retrying with 127.0.0.1 and NO_PROXY bypass...")
+        logger.warn("Gradio localhost probe failed. Retrying tag editor launch with server_name=127.0.0.1.")
+        logger.warn("Gradio 的 localhost 探测失败，正在改用 server_name=127.0.0.1 重试标签编辑器。")
+
+        try:
+            interface.close()
+            time.sleep(0.25)
+        except Exception:
+            pass
+
+        retry_kwargs = build_launch_kwargs(allowed_paths, server_name_override="127.0.0.1")
+        try:
+            return interface.launch(**retry_kwargs)
+        except Exception as retry_exc:
+            retry_text = str(retry_exc)
+            write_status("failed", retry_text)
+            logger.error(
+                "Tag editor retry still failed. Make sure localhost / 127.0.0.1 bypasses proxy, "
+                "or launch with --share if internet sharing is acceptable."
+            )
+            logger.error(
+                "标签编辑器重试后仍然失败。请确认 localhost / 127.0.0.1 不走系统代理；"
+                "若可以接受公网分享，再手动使用 --share 启动。"
+            )
+            raise
+
+
 # ================================================================
 
 
@@ -321,20 +421,7 @@ def main():
         allowed_paths = settings.current.allowed_paths.split(', ')
         allowed_paths = [str(Path(path).absolute()) for path in allowed_paths] + [utilities.base_dir_path()]
         write_status("starting_server", "Starting Gradio server on port 28001...")
-        app, _, _ = interface.launch(
-            server_port=cmd_args.opts.port,
-            server_name=cmd_args.opts.server_name,
-            share=cmd_args.opts.share,
-            auth=[tuple(cred.split(":")) for cred in cmd_args.opts.auth]
-            if cmd_args.opts.auth
-            else None,
-            ssl_keyfile=cmd_args.opts.tls_key,
-            ssl_certfile=cmd_args.opts.tls_cert,
-            debug=cmd_args.opts.gradio_debug,
-            prevent_thread_lock=True,
-            allowed_paths=allowed_paths,
-            root_path=cmd_args.opts.root_path or None,
-        )
+        app, _, _ = launch_interface_with_localhost_fallback(allowed_paths)
         write_status("ready", "Tag editor service is ready.")
 
         # Disable a very open middleware as Stable Diffusion web UI does

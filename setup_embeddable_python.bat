@@ -7,9 +7,17 @@ set "TARGET_DIR=python"
 if /i "%~1"=="--auto" set "AUTO_MODE=1"
 if /i "%~1"=="python_tageditor" set "TARGET_DIR=python_tageditor"
 if /i "%~1"=="python_blackwell" set "TARGET_DIR=python_blackwell"
+if /i "%~1"=="python-sageattention" set "TARGET_DIR=python-sageattention"
+if /i "%~1"=="python_sageattention" set "TARGET_DIR=python_sageattention"
+if /i "%~1"=="python-sageattention-blackwell" set "TARGET_DIR=python-sageattention-blackwell"
+if /i "%~1"=="python_sageattention_blackwell" set "TARGET_DIR=python_sageattention_blackwell"
 if /i "%~1"=="python" set "TARGET_DIR=python"
 if /i "%~2"=="python_tageditor" set "TARGET_DIR=python_tageditor"
 if /i "%~2"=="python_blackwell" set "TARGET_DIR=python_blackwell"
+if /i "%~2"=="python-sageattention" set "TARGET_DIR=python-sageattention"
+if /i "%~2"=="python_sageattention" set "TARGET_DIR=python_sageattention"
+if /i "%~2"=="python-sageattention-blackwell" set "TARGET_DIR=python-sageattention-blackwell"
+if /i "%~2"=="python_sageattention_blackwell" set "TARGET_DIR=python_sageattention_blackwell"
 if /i "%~2"=="python" set "TARGET_DIR=python"
 
 echo ========================================
@@ -71,7 +79,7 @@ echo [2/3] Checking pip...
 if errorlevel 1 (
     set "GET_PIP=%TEMP%\get-pip.py"
     echo pip not found, downloading bootstrap script...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!'"
+    "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '!GET_PIP!'"
     if errorlevel 1 (
         echo [ERROR] Failed to download get-pip.py
         echo.

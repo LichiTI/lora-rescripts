@@ -15,7 +15,7 @@ cd /d "%~dp0"
 set "MIKAZUKI_BLACKWELL_STARTUP=1"
 set "MIKAZUKI_PREFERRED_RUNTIME=blackwell"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run_gui.ps1" %*
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0run_gui.ps1" %*
 if errorlevel 1 (
     echo.
     echo [ERROR] Program execution failed.

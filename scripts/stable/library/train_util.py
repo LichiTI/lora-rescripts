@@ -3391,12 +3391,32 @@ def get_git_revision_hash() -> str:
 
 
 #     diffusers.models.attention.CrossAttention.forward = forward_xformers
-def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdpa):
+def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdpa, sageattn=False):
     if mem_eff_attn:
         logger.info("Enable memory efficient attention for U-Net")
+        logger.info("Training attention backend: mem_eff_attn")
+        logger.info("当前训练使用的注意力后端：mem_eff_attn")
         unet.set_use_memory_efficient_attention(False, True)
+    elif sageattn:
+        logger.info("Enable SageAttention for U-Net")
+        logger.info("Training attention backend: sageattn")
+        logger.info("当前训练使用的注意力后端：sageattn")
+        try:
+            from sageattention import sageattn as _sageattn  # noqa: F401
+        except ImportError:
+            raise ImportError("No SageAttention / SageAttentionがインストールされていないようです / 未检测到 SageAttention")
+
+        if not hasattr(unet, "set_use_sageattn"):
+            raise ValueError(
+                "SageAttention is not supported by this U-Net implementation / "
+                "このU-Net実装はSageAttentionをサポートしていません / 当前 U-Net 实现不支持 SageAttention"
+            )
+
+        unet.set_use_sageattn(True)
     elif xformers:
         logger.info("Enable xformers for U-Net")
+        logger.info("Training attention backend: xformers")
+        logger.info("当前训练使用的注意力后端：xformers")
         try:
             import xformers.ops
         except ImportError:
@@ -3405,6 +3425,8 @@ def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdp
         unet.set_use_memory_efficient_attention(True, False)
     elif sdpa:
         logger.info("Enable SDPA for U-Net")
+        logger.info("Training attention backend: sdpa")
+        logger.info("当前训练使用的注意力后端：sdpa")
         unet.set_use_sdpa(True)
 
 
@@ -3979,6 +4001,11 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--sdpa",
         action="store_true",
         help="use sdpa for CrossAttention (requires PyTorch 2.0) / CrossAttentionにsdpaを使う（PyTorch 2.0が必要）",
+    )
+    parser.add_argument(
+        "--sageattn",
+        action="store_true",
+        help="use SageAttention for CrossAttention (experimental; requires SageAttention runtime) / CrossAttentionにSageAttentionを使う（実験的・SageAttention実行環境が必要） / 为 CrossAttention 启用 SageAttention（实验性，需要 SageAttention 环境）",
     )
     parser.add_argument(
         "--vae",

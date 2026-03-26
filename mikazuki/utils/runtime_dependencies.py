@@ -58,6 +58,11 @@ PACKAGE_REGISTRY = {
         "display_name": "pytorch-optimizer",
         "required_by_default": True,
     },
+    "sageattention": {
+        "package_name": "sageattention",
+        "display_name": "sageattention",
+        "required_by_default": False,
+    },
     "bitsandbytes": {
         "package_name": "bitsandbytes",
         "display_name": "bitsandbytes",
@@ -105,6 +110,10 @@ def _infer_environment_name() -> str:
     executable = sys.executable.replace("\\", "/").lower()
     if "/python_blackwell/" in executable:
         return "blackwell"
+    if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
+        return "sageattention"
+    if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
+        return "sageattention"
     if "/python_tageditor/" in executable or "/venv-tageditor/" in executable:
         return "tageditor"
     if "/venv/" in executable:
@@ -181,6 +190,12 @@ def _append_requirement(target: dict[str, list[str]], module_name: str, reason: 
         target[module_name].append(reason)
 
 
+def _config_flag_enabled(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _add_optimizer_requirement(target: dict[str, list[str]], optimizer_type: str) -> None:
     if not optimizer_type:
         return
@@ -225,10 +240,23 @@ def _add_scheduler_requirement(target: dict[str, list[str]], scheduler_type: str
     _append_requirement(target, module_name, f"lr_scheduler_type={normalized}")
 
 
+def _add_attention_requirement(target: dict[str, list[str]], config: dict) -> None:
+    attn_mode = str(config.get("attn_mode", "")).strip().lower()
+    if attn_mode == "sageattn":
+        _append_requirement(target, "sageattention", "attn_mode=sageattn")
+        return
+
+    if _config_flag_enabled(config.get("use_sage_attn")):
+        _append_requirement(target, "sageattention", "use_sage_attn=true")
+    if _config_flag_enabled(config.get("sageattn")):
+        _append_requirement(target, "sageattention", "sageattn=true")
+
+
 def collect_training_dependency_requirements(config: dict) -> dict[str, list[str]]:
     requirements: dict[str, list[str]] = {}
     _add_optimizer_requirement(requirements, str(config.get("optimizer_type", "")).strip())
     _add_scheduler_requirement(requirements, str(config.get("lr_scheduler_type", "")).strip())
+    _add_attention_requirement(requirements, config)
     return requirements
 
 
