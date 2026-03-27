@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.0.2**
+**v1.0.8 Beta3**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -52,15 +52,28 @@ SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trai
 
 LoRA & Dreambooth training GUI & scripts preset & one key training environment for [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
 
-## v1.0.2
+## Recent Updates
 
-Current maintenance notes for this fork:
+### v1.0.8 Beta3
+
+- added native Anima training pages and backend integration for Anima LoRA / finetune workflows
+- added friendly Anima LoRA / LoKr switching, JSON caption priority, and improved preview prompt flow
+- added experimental SageAttention 2 startup scripts and improved attention backend detection / fallback behavior
+- improved staged mixed-resolution stability, distributed / mixed-GPU launch handling, and training preflight checks
+
+### v1.0.6 Beta2
+
+- added experimental SageAttention startup support for supported NVIDIA environments
+- improved Blackwell / RTX 50 / RTX PRO compatibility and reduced startup failures on newer GPUs
+- improved xformers / SDPA / SageAttention fallback logic and runtime troubleshooting visibility
+- improved mixed GPU selection, dataset cache preflight, and training option coverage
+- added experimental staged mixed-resolution training and expanded optimizer / scheduler integration
+
+### v1.0.2
 
 - polished portable startup and project-local Python handling
 - fixed tag editor startup, dependency compatibility, and UI theme consistency
-- improved training compatibility for config parsing, SDXL checkpoint loading, and xformers to sdpa fallback
-- added experimental SageAttention startup/runtime paths, including a dedicated Blackwell entry
-- refreshed packaging details, docs, and download guidance
+- improved config parsing, SDXL checkpoint loading, and general training compatibility
 
 ## ✨NEW: Train WebUI
 
