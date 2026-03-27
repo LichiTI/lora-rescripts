@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import os
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
 from mikazuki.log import log
 from mikazuki.utils import train_utils
+from mikazuki.utils.dataset_cache_preflight import analyze_dataset_cache_preflight
 from mikazuki.utils.dataset_analysis import analyze_dataset
+from mikazuki.utils.mixed_resolution import (
+    build_mixed_resolution_plan,
+    build_mixed_resolution_summary_text,
+)
 from mikazuki.utils.runtime_dependencies import analyze_training_runtime_dependencies
 
 
@@ -129,6 +135,27 @@ def analyze_training_preflight(
     elif resume_path:
         notes.append("Resume is configured from an existing state, but the current run is not set to save new state snapshots.")
 
+    mixed_resolution = None
+    try:
+        mixed_resolution = build_mixed_resolution_plan(payload, training_type=training_type)
+        if mixed_resolution.enabled:
+            notes.append(build_mixed_resolution_summary_text(mixed_resolution))
+    except ValueError as exc:
+        errors.append(str(exc))
+    except Exception as exc:
+        log.warning(f"Training preflight mixed-resolution analysis failed: {exc}")
+        warnings.append("Mixed-resolution planning could not complete during preflight.")
+
+    cache_preflight = None
+    try:
+        cache_preflight = analyze_dataset_cache_preflight(payload, training_type=training_type)
+        errors.extend(cache_preflight.get("errors", []))
+        warnings.extend(cache_preflight.get("warnings", []))
+        notes.extend(cache_preflight.get("notes", []))
+    except Exception as exc:
+        log.warning(f"Training preflight cache analysis failed: {exc}")
+        warnings.append("Dataset cache audit could not complete during preflight.")
+
     sample_prompt = None
     try:
         sample_prompt = sample_prompt_builder(payload)
@@ -171,6 +198,8 @@ def analyze_training_preflight(
         "notes": dedupe_strings(notes),
         "dataset": dataset_summary,
         "conditioning_dataset": conditioning_summary,
+        "mixed_resolution": asdict(mixed_resolution) if mixed_resolution is not None else None,
+        "cache": cache_preflight,
         "sample_prompt": sample_prompt,
         "dependencies": dependency_report,
     }

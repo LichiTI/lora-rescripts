@@ -7,6 +7,7 @@ import re
 
 from glob import glob
 from datetime import datetime
+from dataclasses import asdict
 from pathlib import Path
 from typing import Tuple, Optional
 
@@ -34,6 +35,11 @@ from mikazuki.utils.caption_backup import (create_caption_backup,
                                            restore_caption_backup)
 from mikazuki.utils.caption_cleanup import (apply_caption_cleanup,
                                             preview_caption_cleanup)
+from mikazuki.utils.dataset_cache_preflight import analyze_dataset_cache_preflight
+from mikazuki.utils.mixed_resolution import (
+    build_mixed_resolution_plan,
+    build_mixed_resolution_summary_text,
+)
 from mikazuki.utils.training_preflight import analyze_training_preflight
 from mikazuki.utils import train_utils
 from mikazuki.utils.dataset_analysis import analyze_dataset
@@ -409,6 +415,81 @@ def apply_attention_backend_fallback(config: dict, gpu_ids) -> Optional[str]:
     return message
 
 
+def normalize_requested_gpu_ids(raw_gpu_ids) -> tuple[list[str], Optional[str]]:
+    def _extract_ids(value):
+        if value is None:
+            return []
+        if isinstance(value, bool):
+            return []
+        if isinstance(value, (int, float)):
+            return [str(int(value))]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+
+            gpu_matches = re.findall(r"\bGPU\s*(\d+)\b", stripped, flags=re.IGNORECASE)
+            if gpu_matches:
+                return gpu_matches
+
+            if stripped.isdigit():
+                return [stripped]
+
+            tokens = [token for token in re.split(r"[\s,\[\]\(\)\"']+", stripped) if token]
+            return [token for token in tokens if token.isdigit()]
+
+        if isinstance(value, (list, tuple, set)):
+            normalized = []
+            for item in value:
+                normalized.extend(_extract_ids(item))
+            return normalized
+
+        return []
+
+    parsed_ids = _extract_ids(raw_gpu_ids)
+    unique_ids = []
+    seen = set()
+    for gpu_id in parsed_ids:
+        if gpu_id in seen:
+            continue
+        seen.add(gpu_id)
+        unique_ids.append(gpu_id)
+
+    max_available = len(printable_devices) if printable_devices else None
+    if max_available is None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                max_available = int(torch.cuda.device_count())
+        except Exception:
+            max_available = None
+    valid_ids = []
+    dropped_ids = []
+    for gpu_id in unique_ids:
+        try:
+            gpu_index = int(gpu_id)
+        except (TypeError, ValueError):
+            dropped_ids.append(str(gpu_id))
+            continue
+
+        if gpu_index < 0 or (max_available is not None and gpu_index >= max_available):
+            dropped_ids.append(str(gpu_id))
+            continue
+
+        valid_ids.append(str(gpu_index))
+
+    warning = None
+    if dropped_ids:
+        warning = (
+            "已自动忽略不可用或非 CUDA 的 GPU 选择："
+            + ", ".join(dropped_ids)
+            + "。当前只会使用可被 PyTorch CUDA 识别的训练显卡。"
+        )
+
+    return valid_ids, warning
+
+
 def simulate_attention_backend_fallback_warning(config: dict, gpu_ids) -> Optional[str]:
     if config.get("mem_eff_attn", False):
         return None
@@ -476,8 +557,15 @@ async def create_toml_file(request: Request):
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
-    gpu_ids = config.pop("gpu_ids", None)
+    raw_gpu_ids = config.pop("gpu_ids", None)
+    gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
     start_warnings = []
+    if gpu_filter_warning:
+        start_warnings.append(gpu_filter_warning)
+    if gpu_ids:
+        start_warnings.append(f"本次训练将使用 GPU: {', '.join(gpu_ids)}")
+    else:
+        start_warnings.append("本次训练未显式指定 GPU，默认使用当前 PyTorch 可见的主训练显卡。")
 
     suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     model_train_type = config.pop("model_train_type", "sd-lora")
@@ -493,6 +581,34 @@ async def create_toml_file(request: Request):
         conditioning_data_dir = config.get("conditioning_data_dir", "")
         if not conditioning_data_dir or not train_utils.validate_data_dir(conditioning_data_dir):
             return APIResponseFail(message="条件图数据集路径不存在或没有图片，请检查目录。")
+
+    try:
+        planning_config = dict(config)
+        planning_config["num_processes"] = max(1, len(gpu_ids))
+        mixed_resolution_plan = build_mixed_resolution_plan(planning_config, training_type=model_train_type)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Mixed-resolution planning failed unexpectedly")
+        return APIResponseFail(message="阶段分辨率训练规划失败，请查看日志。")
+
+    mixed_resolution_payload = None
+    if mixed_resolution_plan.enabled:
+        mixed_resolution_payload = asdict(mixed_resolution_plan)
+        start_warnings.append(
+            f"已启用阶段分辨率训练：共 {len(mixed_resolution_plan.phases)} 个阶段，将按顺序自动切换分辨率与 batch。"
+        )
+
+    try:
+        cache_preflight = analyze_dataset_cache_preflight(config, training_type=model_train_type)
+    except Exception:
+        log.exception("Dataset cache preflight failed unexpectedly")
+        return APIResponseFail(message="数据集缓存预检失败，请查看日志。")
+
+    if cache_preflight.get("errors"):
+        return APIResponseFail(message="\n".join(cache_preflight["errors"]))
+
+    start_warnings.extend(cache_preflight.get("warnings", []))
 
     validated, message = train_utils.validate_model(config["pretrained_model_name_or_path"], model_train_type)
     if not validated:
@@ -543,6 +659,10 @@ async def create_toml_file(request: Request):
 
     result = process.run_train(toml_file, trainer_file, gpu_ids, suggest_cpu_threads)
 
+    if mixed_resolution_payload is not None:
+        result.data = result.data or {}
+        result.data["mixed_resolution"] = mixed_resolution_payload
+
     if start_warnings:
         result.data = result.data or {}
         result.data["warnings"] = start_warnings
@@ -563,7 +683,14 @@ async def training_preflight(request: Request) -> APIResponse:
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
-    gpu_ids = config.get("gpu_ids")
+    raw_gpu_ids = config.get("gpu_ids")
+    gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
+    if gpu_ids:
+        config["gpu_ids"] = gpu_ids
+        config["num_processes"] = len(gpu_ids)
+    else:
+        config.pop("gpu_ids", None)
+        config["num_processes"] = 1
     training_type = str(config.get("model_train_type", "sd-lora"))
 
     result = analyze_training_preflight(
@@ -574,6 +701,9 @@ async def training_preflight(request: Request) -> APIResponse:
         sample_prompt_builder=build_sample_prompt_preview,
         attention_fallback_checker=lambda payload: simulate_attention_backend_fallback_warning(payload, gpu_ids),
     )
+
+    if gpu_filter_warning:
+        result["warnings"] = result.get("warnings", []) + [gpu_filter_warning]
 
     return APIResponseSuccess(data=result)
 

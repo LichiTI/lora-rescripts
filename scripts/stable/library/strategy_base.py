@@ -461,10 +461,21 @@ class LatentsCachingStrategy:
             npz = np.load(npz_path)
             if "latents" + key_reso_suffix not in npz:
                 return False
+            latents = npz["latents" + key_reso_suffix]
+            if latents.shape[1:3] != expected_latents_size:
+                return False
             if flip_aug and "latents_flipped" + key_reso_suffix not in npz:
                 return False
+            if flip_aug:
+                latents_flipped = npz["latents_flipped" + key_reso_suffix]
+                if latents_flipped.shape[1:3] != expected_latents_size:
+                    return False
             if apply_alpha_mask and "alpha_mask" + key_reso_suffix not in npz:
                 return False
+            if apply_alpha_mask:
+                alpha_mask = npz["alpha_mask" + key_reso_suffix]
+                if tuple(alpha_mask.shape[0:2]) != (bucket_reso[1], bucket_reso[0]):
+                    return False
         except Exception as e:
             logger.error(f"Error loading file: {npz_path}")
             raise e

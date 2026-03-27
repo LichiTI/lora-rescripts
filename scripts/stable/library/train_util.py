@@ -223,7 +223,7 @@ class ImageInfo:
         self.latents_npz: Optional[str] = None  # set in cache_latents
         self.latents_original_size: Optional[Tuple[int, int]] = None  # original image size, not latents size
         self.latents_crop_ltrb: Optional[Tuple[int, int]] = (
-            None  # crop left top right bottom in original pixel size, not latents size
+            None  # crop left top right bottom in resized / target pixel space, not latent space
         )
         self.cond_img_path: Optional[str] = None
         self.image: Optional[Image.Image] = None  # optional, original PIL Image
@@ -386,10 +386,14 @@ class BucketManager:
         else:
             resized_width = bucket_reso[0]
             resized_height = bucket_reso[0] / image_ar
-        crop_left = (bucket_reso[0] - resized_width) // 2
-        crop_top = (bucket_reso[1] - resized_height) // 2
-        crop_right = crop_left + resized_width
-        crop_bottom = crop_top + resized_height
+        crop_left = int((bucket_reso[0] - resized_width) / 2 + 0.5)
+        crop_top = int((bucket_reso[1] - resized_height) / 2 + 0.5)
+        crop_right = int(crop_left + resized_width + 0.5)
+        crop_bottom = int(crop_top + resized_height + 0.5)
+        crop_left = max(0, min(crop_left, bucket_reso[0]))
+        crop_top = max(0, min(crop_top, bucket_reso[1]))
+        crop_right = max(crop_left, min(crop_right, bucket_reso[0]))
+        crop_bottom = max(crop_top, min(crop_bottom, bucket_reso[1]))
         return crop_left, crop_top, crop_right, crop_bottom
 
 
@@ -1598,6 +1602,7 @@ class BaseDataset(torch.utils.data.Dataset):
         latents_list = []
         alpha_mask_list = []
         images = []
+        image_paths = []
         original_sizes_hw = []
         crop_top_lefts = []
         target_sizes_hw = []
@@ -1610,6 +1615,7 @@ class BaseDataset(torch.utils.data.Dataset):
             subset = self.image_to_subset[image_key]
 
             custom_attributes.append(subset.custom_attributes)
+            image_paths.append(image_info.absolute_path)
 
             # in case of fine tuning, is_reg is always False
             loss_weights.append(self.prior_loss_weight if image_info.is_reg else 1.0)
@@ -1840,7 +1846,28 @@ class BaseDataset(torch.utils.data.Dataset):
             images = None
         example["images"] = images
 
-        example["latents"] = torch.stack(latents_list) if latents_list[0] is not None else None
+        if latents_list[0] is not None:
+            latent_shapes = [tuple(latents.shape) for latents in latents_list]
+            first_latent_shape = latent_shapes[0]
+            mismatched_latents = [
+                f"{path} => {shape}" for path, shape in zip(image_paths, latent_shapes) if shape != first_latent_shape
+            ]
+            if mismatched_latents:
+                batch_summary = "\n".join([f"{path} => {shape}" for path, shape in zip(image_paths, latent_shapes)])
+                raise RuntimeError(
+                    "Latents in the same batch have different shapes. This usually means stale latent cache files were reused "
+                    "(for example after changing resolution/bucket settings or replacing images without clearing cache). "
+                    "Delete the dataset latent cache files (*.npz such as *_sd.npz / *_sdxl.npz / legacy .npz) and any "
+                    "metadata_cache.json in the dataset folder, then run again.\n"
+                    "同一个 batch 中的 latent 形状不一致。通常表示复用了过期的 latent 缓存文件，"
+                    "例如修改了分辨率 / bucket 设置，或替换了图片但没有清理缓存。"
+                    "请删除数据集目录中的 latent 缓存文件（*.npz，例如 *_sd.npz / *_sdxl.npz / 旧版 .npz）"
+                    "以及 metadata_cache.json 后再重试。\n"
+                    f"Batch latents:\n{batch_summary}"
+                )
+            example["latents"] = torch.stack(latents_list)
+        else:
+            example["latents"] = None
         example["captions"] = captions
 
         example["original_sizes_hw"] = torch.stack([torch.LongTensor(x) for x in original_sizes_hw])
@@ -3004,22 +3031,32 @@ def trim_and_resize_if_required(
         image = resize_image(image, image_width, image_height, resized_size[0], resized_size[1], resize_interpolation)
 
     image_height, image_width = image.shape[0:2]
+    crop_left = 0
+    crop_top = 0
+    crop_right = image_width
+    crop_bottom = image_height
 
     if image_width > reso[0]:
         trim_size = image_width - reso[0]
         p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
         # logger.info(f"w {trim_size} {p}")
+        crop_left = int(p)
+        crop_right = int(p + reso[0])
         image = image[:, p : p + reso[0]]
     if image_height > reso[1]:
         trim_size = image_height - reso[1]
         p = trim_size // 2 if not random_crop else random.randint(0, trim_size)
         # logger.info(f"h {trim_size} {p})
+        crop_top = int(p)
+        crop_bottom = int(p + reso[1])
         image = image[p : p + reso[1]]
 
-    # random cropの場合のcropされた値をどうcrop left/topに反映するべきか全くアイデアがない
-    # I have no idea how to reflect the cropped value in crop left/top in the case of random crop
-
-    crop_ltrb = BucketManager.get_crop_ltrb(reso, original_size)
+    crop_ltrb = (
+        int(crop_left),
+        int(crop_top),
+        int(crop_right),
+        int(crop_bottom),
+    )
 
     assert image.shape[0] == reso[1] and image.shape[1] == reso[0], f"internal error, illegal trimmed size: {image.shape}, {reso}"
     return image, original_size, crop_ltrb
