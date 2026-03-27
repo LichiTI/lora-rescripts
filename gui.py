@@ -65,8 +65,10 @@ def using_project_local_main_python() -> bool:
         (repo_root / "python").resolve(),
         (repo_root / "python_blackwell").resolve(),
         (repo_root / "python-sageattention").resolve(),
+        (repo_root / "python-sageattention-latest").resolve(),
         (repo_root / "python-sageattention-blackwell").resolve(),
         (repo_root / "python_sageattention").resolve(),
+        (repo_root / "python_sageattention_latest").resolve(),
         (repo_root / "python_sageattention_blackwell").resolve(),
         (repo_root / "venv").resolve(),
     ]
@@ -86,8 +88,8 @@ def ensure_project_local_main_python():
 
     raise RuntimeError(
         "This build is locked to project-local Python by default. "
-        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python, ./python_blackwell, ./python-sageattention, ./python-sageattention-blackwell, or ./venv. "
-        "Legacy ./python_sageattention and ./python_sageattention_blackwell folders are also accepted. "
+        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python, ./python_blackwell, ./python-sageattention, ./python-sageattention-latest, ./python-sageattention-blackwell, or ./venv. "
+        "Legacy ./python_sageattention, ./python_sageattention_latest, and ./python_sageattention_blackwell folders are also accepted. "
         "For development only, set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to override this guard intentionally."
     )
 
@@ -99,8 +101,20 @@ def run_tensorboard():
         return
 
     log.info("Starting tensorboard...")
-    subprocess.Popen([sys.executable, "-m", "tensorboard.main", "--logdir", "logs",
-                     "--host", args.tensorboard_host, "--port", str(args.tensorboard_port)])
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "tensorboard.main",
+            "--logdir",
+            str(base_dir_path() / "logs"),
+            "--host",
+            args.tensorboard_host,
+            "--port",
+            str(args.tensorboard_port),
+        ],
+        cwd=base_dir_path(),
+    )
 
 
 @catch_exception

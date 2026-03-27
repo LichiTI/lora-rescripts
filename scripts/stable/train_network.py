@@ -943,9 +943,37 @@ class NetworkTrainer:
             # save current ecpoch and step
             train_state_file = os.path.join(output_dir, "train_state.json")
             # +1 is needed because the state is saved before current_step is set from global_step
-            logger.info(f"save train state to {train_state_file} at epoch {current_epoch.value} step {current_step.value+1}")
+            mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+            effective_current_epoch = int(current_epoch.value) + mixed_resolution_phase_start_epoch
+            logger.info(
+                f"save train state to {train_state_file} at epoch {effective_current_epoch} step {current_step.value+1}"
+            )
+            state_payload = {
+                "current_epoch": effective_current_epoch,
+                "current_step": current_step.value + 1,
+            }
+            if mixed_resolution_phase_start_epoch > 0:
+                state_payload["mixed_resolution_local_epoch"] = int(current_epoch.value)
+            mixed_resolution_plan_id = str(getattr(args, "mixed_resolution_plan_id", "") or "").strip()
+            if mixed_resolution_plan_id:
+                state_payload["mixed_resolution_plan_id"] = mixed_resolution_plan_id
+            mixed_phase_index = getattr(args, "mixed_resolution_phase_index", None)
+            if mixed_phase_index is not None:
+                state_payload["mixed_resolution_phase_index"] = mixed_phase_index
+            mixed_phase_target_step = getattr(args, "mixed_resolution_phase_target_step", None)
+            if mixed_phase_target_step is not None:
+                state_payload["mixed_resolution_phase_target_step"] = mixed_phase_target_step
+            mixed_phase_target_epoch = getattr(args, "mixed_resolution_phase_target_epoch", None)
+            if mixed_phase_target_epoch is not None:
+                state_payload["mixed_resolution_phase_target_epoch"] = mixed_phase_target_epoch
+            logging_run_dir = str(getattr(args, "logging_run_dir", "") or "").strip()
+            if not logging_run_dir:
+                logging_run_dir = str(getattr(accelerator, "project_dir", "") or "").strip()
+            if logging_run_dir:
+                state_payload["logging_run_dir"] = logging_run_dir
+                state_payload["logging_dir"] = logging_run_dir
             with open(train_state_file, "w", encoding="utf-8") as f:
-                json.dump({"current_epoch": current_epoch.value, "current_step": current_step.value + 1}, f)
+                json.dump(state_payload, f)
 
         steps_from_state = None
 
@@ -980,6 +1008,15 @@ class NetworkTrainer:
         if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
             args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
 
+        mixed_resolution_epoch_display_offset = int(getattr(args, "mixed_resolution_epoch_display_offset", 0) or 0)
+        mixed_resolution_phase_target_epoch = int(getattr(args, "mixed_resolution_phase_target_epoch", 0) or 0)
+        mixed_resolution_phase_start_epoch = int(getattr(args, "mixed_resolution_phase_start_epoch", 0) or 0)
+        mixed_resolution_phase_start_step = int(getattr(args, "mixed_resolution_phase_start_step", 0) or 0)
+        displayed_num_train_epochs = mixed_resolution_phase_target_epoch if mixed_resolution_phase_target_epoch > 0 else num_train_epochs
+
+        def get_effective_epoch_no(epoch_index: int) -> int:
+            return max(1, epoch_index + 1 + mixed_resolution_epoch_display_offset)
+
         # 学習する
         # TODO: find a way to handle total batch size when there are multiple datasets
         total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -991,7 +1028,12 @@ class NetworkTrainer:
         )
         accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
         accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-        accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+        accelerator.print(f"  num epochs / epoch数: {displayed_num_train_epochs}")
+        if mixed_resolution_phase_target_epoch > 0:
+            accelerator.print(
+                f"  mixed-resolution epoch window / 阶段分辨率连续 epoch 区间: "
+                f"{mixed_resolution_phase_start_epoch + 1} -> {mixed_resolution_phase_target_epoch}"
+            )
         accelerator.print(
             f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
         )
@@ -1011,7 +1053,7 @@ class NetworkTrainer:
             "ss_num_validation_images": val_dataset_group.num_train_images if val_dataset_group is not None else 0,
             "ss_num_reg_images": train_dataset_group.num_reg_images,
             "ss_num_batches_per_epoch": len(train_dataloader),
-            "ss_num_epochs": num_train_epochs,
+            "ss_num_epochs": displayed_num_train_epochs,
             "ss_gradient_checkpointing": args.gradient_checkpointing,
             "ss_gradient_accumulation_steps": args.gradient_accumulation_steps,
             "ss_max_train_steps": args.max_train_steps,
@@ -1255,6 +1297,8 @@ class NetworkTrainer:
             ), f"max_train_steps should be greater than initial step / max_train_stepsは初期ステップより大きい必要があります: {args.max_train_steps} vs {initial_step}"
 
         epoch_to_start = 0
+        progress_start_step = 0
+        steps_per_epoch_for_resume = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         if initial_step > 0:
             if args.skip_until_initial_step:
                 # if skip_until_initial_step is specified, load data and discard it to ensure the same data is used
@@ -1266,13 +1310,15 @@ class NetworkTrainer:
                 initial_step *= args.gradient_accumulation_steps
 
                 # set epoch to start to make initial_step less than len(train_dataloader)
-                epoch_to_start = initial_step // math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+                epoch_to_start = initial_step // steps_per_epoch_for_resume
+                progress_start_step = initial_step
             else:
                 # if not, only epoch no is skipped for informative purpose
-                epoch_to_start = initial_step // math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+                epoch_to_start = initial_step // steps_per_epoch_for_resume
+                progress_start_step = initial_step
                 initial_step = 0  # do not skip
 
-        global_step = 0
+        global_step = progress_start_step
 
         noise_scheduler = self.get_noise_scheduler(args, accelerator.device)
 
@@ -1341,7 +1387,7 @@ class NetworkTrainer:
             for skip_epoch in range(epoch_to_start):  # skip epochs
                 logger.info(f"skipping epoch {skip_epoch+1} because initial_step (multiplied) is {initial_step}")
                 initial_step -= len(train_dataloader)
-            global_step = initial_step
+            global_step = progress_start_step
 
         # log device and dtype for each model
         logger.info(f"unet dtype: {unet_weight_dtype}, device: {unet.device}")
@@ -1355,7 +1401,10 @@ class NetworkTrainer:
         clean_memory_on_device(accelerator.device)
 
         progress_bar = tqdm(
-            range(args.max_train_steps - initial_step), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps"
+            range(args.max_train_steps - progress_start_step),
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc="steps",
         )
 
         validation_steps = (
@@ -1399,10 +1448,11 @@ class NetworkTrainer:
             random.setstate(python_rng_state)
 
         for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}\n")
-            current_epoch.value = epoch + 1
+            effective_epoch_no = get_effective_epoch_no(epoch)
+            accelerator.print(f"\nepoch {effective_epoch_no}/{displayed_num_train_epochs}\n")
+            current_epoch.value = max(1, effective_epoch_no - mixed_resolution_phase_start_epoch)
 
-            metadata["ss_epoch"] = str(epoch + 1)
+            metadata["ss_epoch"] = str(effective_epoch_no)
 
             accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)  # network.train() is called here
 
@@ -1498,7 +1548,7 @@ class NetworkTrainer:
                         accelerator.wait_for_everyone()
                         if accelerator.is_main_process:
                             ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, max(0, effective_epoch_no - 1))
 
                             if args.save_state:
                                 train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
@@ -1529,7 +1579,7 @@ class NetworkTrainer:
                         mean_grad_norm,
                         mean_combined_norm,
                     )
-                    self.step_logging(accelerator, logs, global_step, epoch + 1)
+                    self.step_logging(accelerator, logs, global_step, effective_epoch_no)
 
                 # VALIDATION PER STEP: global_step is already incremented
                 # for example, if validate_every_n_steps=100, validate at step 100, 200, 300, ...
@@ -1593,7 +1643,7 @@ class NetworkTrainer:
                             "loss/validation/step_average": val_step_loss_recorder.moving_average,
                             "loss/validation/step_divergence": loss_validation_divergence,
                         }
-                        self.step_logging(accelerator, logs, global_step, epoch=epoch + 1)
+                        self.step_logging(accelerator, logs, global_step, epoch=effective_epoch_no)
 
                     restore_rng_state(rng_states)
                     args.min_timestep = original_args_min_timestep
@@ -1607,7 +1657,7 @@ class NetworkTrainer:
 
             # EPOCH VALIDATION
             should_validate_epoch = (
-                (epoch + 1) % args.validate_every_n_epochs == 0 if args.validate_every_n_epochs is not None else True
+                effective_epoch_no % args.validate_every_n_epochs == 0 if args.validate_every_n_epochs is not None else True
             )
 
             if should_validate_epoch and len(val_dataloader) > 0:
@@ -1672,7 +1722,7 @@ class NetworkTrainer:
                         "loss/validation/epoch_average": avr_loss,
                         "loss/validation/epoch_divergence": loss_validation_divergence,
                     }
-                    self.epoch_logging(accelerator, logs, global_step, epoch + 1)
+                    self.epoch_logging(accelerator, logs, global_step, effective_epoch_no)
 
                 restore_rng_state(rng_states)
                 args.min_timestep = original_args_min_timestep
@@ -1684,27 +1734,27 @@ class NetworkTrainer:
             # END OF EPOCH
             if is_tracking:
                 logs = {"loss/epoch_average": loss_recorder.moving_average}
-                self.epoch_logging(accelerator, logs, global_step, epoch + 1)
+                self.epoch_logging(accelerator, logs, global_step, effective_epoch_no)
 
             accelerator.wait_for_everyone()
 
             # 指定エポックごとにモデルを保存
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None:
-                saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                saving = effective_epoch_no % args.save_every_n_epochs == 0 and effective_epoch_no < displayed_num_train_epochs
                 if is_main_process and saving:
-                    ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+                    ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, effective_epoch_no)
+                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, effective_epoch_no)
 
-                    remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                    remove_epoch_no = train_util.get_remove_epoch_no(args, effective_epoch_no)
                     if remove_epoch_no is not None:
                         remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
                         remove_model(remove_ckpt_name)
 
                     if args.save_state:
-                        train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                        train_util.save_and_remove_state_on_epoch_end(args, accelerator, effective_epoch_no)
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
+            self.sample_images(accelerator, args, effective_epoch_no, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             progress_bar.unpause()
             optimizer_train_fn()
 
@@ -1724,7 +1774,7 @@ class NetworkTrainer:
 
         if is_main_process:
             ckpt_name = train_util.get_last_ckpt_name(args, "." + args.save_model_as)
-            save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+            save_model(ckpt_name, network, global_step, displayed_num_train_epochs, force_sync_upload=True)
 
             logger.info("model saved.")
 

@@ -4,12 +4,11 @@ import os
 import sys
 import webbrowser
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException
 
 from mikazuki.app.config import app_config
 from mikazuki.app.api import load_schemas, load_presets
@@ -17,40 +16,48 @@ from mikazuki.app.api import router as api_router
 # from mikazuki.app.ipc import router as ipc_router
 from mikazuki.app.proxy import router as proxy_router
 from mikazuki.utils.devices import check_torch_gpu
+from mikazuki.utils.frontend_profiles import BUILTIN_PROFILE_ID, resolve_frontend_profile
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 
 
-class SPAStaticFiles(StaticFiles):
-    def __init__(self, *args, spa_fallback: str = "index.html", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.spa_fallback = spa_fallback
-
-    async def get_response(self, path: str, scope):
-        try:
-            return await super().get_response(path, scope)
-        except HTTPException as ex:
-            if ex.status_code == 404:
-                return await super().get_response(self.spa_fallback, scope)
-            else:
-                raise ex
+def _get_requested_ui_profile_id() -> str:
+    env_profile = os.environ.get("MIKAZUKI_UI_PROFILE", "").strip()
+    if env_profile:
+        return env_profile
+    return str(app_config["active_ui_profile"] or BUILTIN_PROFILE_ID)
 
 
-def _resolve_frontend_mode() -> str:
-    mode = os.environ.get("MIKAZUKI_UI_MODE", "legacy").strip().lower()
-    if mode not in {"legacy", "workspace"}:
-        return "legacy"
-    return mode
+def _get_current_frontend_profile() -> dict:
+    requested_profile_id = _get_requested_ui_profile_id()
+    profile = resolve_frontend_profile(requested_profile_id)
+    entry_dir = Path(profile["entry_dir"]).resolve()
+    entry_file = str(profile.get("entry_file") or "index.html")
+    if (entry_dir / entry_file).exists():
+        return profile
+    return resolve_frontend_profile(BUILTIN_PROFILE_ID)
 
 
-FRONTEND_MODE = _resolve_frontend_mode()
-LEGACY_ENTRY = "index.html"
-WORKSPACE_ENTRY = "index.html"
-FRONTEND_ENTRY = WORKSPACE_ENTRY if FRONTEND_MODE == "workspace" else LEGACY_ENTRY
+def _resolve_frontend_file(request_path: str) -> Path:
+    profile = _get_current_frontend_profile()
+    root_dir = Path(profile["entry_dir"]).resolve()
+    entry_file = str(profile.get("entry_file") or "index.html")
+    normalized = request_path.strip("/")
 
-if not os.path.exists(os.path.join("frontend", "dist", FRONTEND_ENTRY)):
-    FRONTEND_ENTRY = LEGACY_ENTRY if os.path.exists(os.path.join("frontend", "dist", LEGACY_ENTRY)) else WORKSPACE_ENTRY
+    if not normalized:
+        return root_dir / entry_file
+
+    candidate = (root_dir / normalized).resolve()
+    try:
+        candidate.relative_to(root_dir)
+    except ValueError:
+        return root_dir / entry_file
+
+    if candidate.exists() and candidate.is_file():
+        return candidate
+
+    return root_dir / entry_file
 
 
 async def app_startup():
@@ -104,7 +111,7 @@ app.include_router(api_router, prefix="/api")
 
 @app.get("/")
 async def index():
-    return FileResponse(f"./frontend/dist/{FRONTEND_ENTRY}")
+    return FileResponse(_resolve_frontend_file(""))
 
 
 @app.get("/index.md")
@@ -123,4 +130,7 @@ async def workspace_index():
 async def favicon():
     return FileResponse("assets/favicon.ico")
 
-app.mount("/", SPAStaticFiles(directory="frontend/dist", html=True, spa_fallback=FRONTEND_ENTRY), name="static")
+
+@app.get("/{full_path:path}")
+async def frontend_static(full_path: str):
+    return FileResponse(_resolve_frontend_file(full_path))

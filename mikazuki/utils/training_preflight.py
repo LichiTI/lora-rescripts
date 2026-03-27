@@ -6,15 +6,106 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
+from mikazuki.launch_utils import base_dir_path
 from mikazuki.log import log
 from mikazuki.utils import train_utils
 from mikazuki.utils.dataset_cache_preflight import analyze_dataset_cache_preflight
 from mikazuki.utils.dataset_analysis import analyze_dataset
+from mikazuki.utils.distributed import resolve_distributed_runtime
+from mikazuki.utils.distributed_sync import resolve_worker_sync_runtime
 from mikazuki.utils.mixed_resolution import (
     build_mixed_resolution_plan,
     build_mixed_resolution_summary_text,
 )
+from mikazuki.utils.resume_guard import validate_resume_launch_guard
 from mikazuki.utils.runtime_dependencies import analyze_training_runtime_dependencies
+from mikazuki.utils.tensorboard_runs import apply_tensorboard_runtime_config
+
+
+def parse_boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off", "none", "null"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
+def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list[str], warnings: list[str], notes: list[str]) -> None:
+    if not training_type.startswith("anima"):
+        return
+
+    qwen3_path = str(payload.get("qwen3", "")).strip()
+    if not qwen3_path:
+        errors.append("qwen3 is required for Anima training. / Anima 训练必须填写 Qwen3 文本模型路径。")
+    elif not os.path.exists(qwen3_path):
+        errors.append(f"Qwen3 path does not exist: {qwen3_path}")
+    elif os.path.isdir(qwen3_path):
+        notes.append("Qwen3 resource: using a local model directory.")
+    else:
+        notes.append("Qwen3 resource: using a single checkpoint file with bundled local configs.")
+
+    vae_path = str(payload.get("vae", "")).strip()
+    if training_type == "anima-finetune":
+        if not vae_path:
+            errors.append("vae is required for anima-finetune. / anima-finetune 必须填写 VAE 路径。")
+        elif not os.path.exists(vae_path):
+            errors.append(f"VAE path does not exist: {vae_path}")
+        else:
+            notes.append("Anima VAE path detected.")
+    elif vae_path:
+        if not os.path.exists(vae_path):
+            errors.append(f"VAE path does not exist: {vae_path}")
+        else:
+            notes.append("External VAE path detected.")
+
+    llm_adapter_path = str(payload.get("llm_adapter_path", "")).strip()
+    if llm_adapter_path:
+        if not os.path.exists(llm_adapter_path):
+            errors.append(f"LLM Adapter path does not exist: {llm_adapter_path}")
+        else:
+            notes.append("External LLM Adapter path detected. It will override adapter weights inside the checkpoint.")
+
+    t5_tokenizer_path = str(payload.get("t5_tokenizer_path", "")).strip()
+    if t5_tokenizer_path:
+        if not os.path.exists(t5_tokenizer_path):
+            errors.append(f"T5 tokenizer path does not exist: {t5_tokenizer_path}")
+        else:
+            notes.append("Custom T5 tokenizer path detected.")
+    else:
+        notes.append("T5 tokenizer path left empty; Anima will fall back to the bundled configs/t5_old tokenizer if available.")
+
+    custom_attributes = payload.get("custom_attributes")
+    prefer_json_caption = False
+    if isinstance(custom_attributes, dict):
+        prefer_json_caption = parse_boolish(custom_attributes.get("prefer_json_caption"))
+    if not prefer_json_caption:
+        prefer_json_caption = parse_boolish(payload.get("prefer_json_caption"))
+
+    if prefer_json_caption:
+        notes.append("Anima JSON caption priority is enabled. Same-name .json tags will be preferred before caption_extension fallback.")
+
+    inline_sample_prompts = str(payload.get("sample_prompts", "")).strip()
+    if inline_sample_prompts and "\n" in inline_sample_prompts:
+        notes.append("Multi-prompt preview rotation detected. Inline sample_prompts will be written to a temporary prompt file at launch.")
+
+    sample_scheduler = str(payload.get("sample_scheduler", "")).strip().lower()
+    if sample_scheduler and sample_scheduler != "simple":
+        warnings.append("Anima preview scheduler currently falls back to simple. / 当前 Anima 预览调度器仅支持 simple，其他值会自动回退。")
+
+    if training_type == "anima-lora":
+        network_module = str(payload.get("network_module", "")).strip().lower()
+        if network_module == "lycoris.kohya":
+            notes.append("Anima adapter mode: LoKr / LyCORIS.")
+        else:
+            notes.append("Anima adapter mode: LoRA.")
 
 
 def analyze_training_preflight(
@@ -37,6 +128,10 @@ def analyze_training_preflight(
     conditioning_data_dir = str(payload.get("conditioning_data_dir", "")).strip()
     resume_path = str(payload.get("resume", "")).strip()
     model_path = str(payload.get("pretrained_model_name_or_path", "")).strip()
+    raw_gpu_ids = payload.get("gpu_ids")
+    gpu_ids = [str(item) for item in raw_gpu_ids] if isinstance(raw_gpu_ids, list) else []
+    distributed_runtime = None
+    worker_sync_runtime = None
 
     if not trainer_supported:
         errors.append(f"Unsupported trainer type: {training_type}")
@@ -85,6 +180,15 @@ def analyze_training_preflight(
         else:
             notes.append(f"Resume path detected: {resume_path}")
 
+    try:
+        guard_ok, guard_message = validate_resume_launch_guard(payload, base_dir_path())
+    except Exception as exc:
+        log.warning(f"Training preflight resume guard failed: {exc}")
+        warnings.append("Resume/output guard could not complete during preflight.")
+    else:
+        if not guard_ok:
+            errors.append(guard_message)
+
     raw_validation_split = payload.get("validation_split", 0)
     try:
         validation_split = float(raw_validation_split or 0)
@@ -112,6 +216,8 @@ def analyze_training_preflight(
             "当前构建中的 SDXL SageAttention 仍属实验功能，并且需要 SageAttention 专用环境。"
         )
 
+    add_anima_preflight_guidance(payload, training_type, errors, warnings, notes)
+
     if bool(payload.get("masked_loss")):
         alpha_candidates = int(dataset_summary.get("alpha_capable_image_count", 0)) if dataset_summary else 0
         if alpha_candidates == 0 and train_data_dir:
@@ -135,9 +241,53 @@ def analyze_training_preflight(
     elif resume_path:
         notes.append("Resume is configured from an existing state, but the current run is not set to save new state snapshots.")
 
+    if bool(payload.get("clear_dataset_npz_before_train")):
+        notes.append("clear_dataset_npz_before_train is enabled, so train/reg dataset .npz caches will be cleared before launch.")
+
+    try:
+        distributed_runtime = resolve_distributed_runtime(payload, gpu_ids)
+    except ValueError as exc:
+        errors.append(str(exc))
+    except Exception as exc:
+        log.warning(f"Training preflight distributed runtime analysis failed: {exc}")
+        warnings.append("Distributed runtime analysis could not complete during preflight.")
+    else:
+        warnings.extend(distributed_runtime.get("warnings", []))
+        notes.extend(distributed_runtime.get("notes", []))
+        if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
+            notes.append("当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。")
+        try:
+            worker_sync_runtime = resolve_worker_sync_runtime(payload, distributed_runtime, base_dir_path())
+        except ValueError as exc:
+            errors.append(str(exc))
+        except Exception as exc:
+            log.warning(f"Training preflight worker sync analysis failed: {exc}")
+            warnings.append("Worker sync analysis could not complete during preflight.")
+        else:
+            warnings.extend(worker_sync_runtime.get("warnings", []))
+            notes.extend(worker_sync_runtime.get("notes", []))
+
+    try:
+        tensorboard_runtime = apply_tensorboard_runtime_config(payload, base_dir_path())
+    except Exception as exc:
+        log.warning(f"Training preflight tensorboard runtime analysis failed: {exc}")
+        warnings.append("TensorBoard run directory analysis could not complete during preflight.")
+    else:
+        if tensorboard_runtime.get("enabled") and tensorboard_runtime.get("run_dir") is not None:
+            notes.append(f"TensorBoard 日志预计写入: {tensorboard_runtime['run_dir']}")
+            if tensorboard_runtime.get("reused_from_state"):
+                notes.append("TensorBoard 将沿用 resume state 中记录的原日志目录。")
+            elif tensorboard_runtime.get("resume_merge"):
+                notes.append("TensorBoard 将复用当前模型最近一次已有的日志目录。")
+            else:
+                notes.append("TensorBoard 将创建新的日志运行目录。")
+
     mixed_resolution = None
     try:
-        mixed_resolution = build_mixed_resolution_plan(payload, training_type=training_type)
+        mixed_resolution_payload = dict(payload)
+        if distributed_runtime is not None:
+            mixed_resolution_payload["num_processes"] = int(distributed_runtime.get("total_num_processes", 1) or 1)
+        mixed_resolution = build_mixed_resolution_plan(mixed_resolution_payload, training_type=training_type)
         if mixed_resolution.enabled:
             notes.append(build_mixed_resolution_summary_text(mixed_resolution))
     except ValueError as exc:
@@ -198,6 +348,8 @@ def analyze_training_preflight(
         "notes": dedupe_strings(notes),
         "dataset": dataset_summary,
         "conditioning_dataset": conditioning_summary,
+        "distributed": distributed_runtime,
+        "distributed_sync": worker_sync_runtime,
         "mixed_resolution": asdict(mixed_resolution) if mixed_resolution is not None else None,
         "cache": cache_preflight,
         "sample_prompt": sample_prompt,

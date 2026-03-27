@@ -14,6 +14,8 @@ set "TAGEDITOR_PYTHON_EXE=%~dp0python_tageditor\python.exe"
 set "BLACKWELL_PYTHON_EXE=%~dp0python_blackwell\python.exe"
 set "SAGEATTENTION_DIR_PRIMARY=python-sageattention"
 set "SAGEATTENTION_DIR_LEGACY=python_sageattention"
+set "SAGEATTENTION2_DIR_PRIMARY=python-sageattention-latest"
+set "SAGEATTENTION2_DIR_LEGACY=python_sageattention_latest"
 set "SAGEATTENTION_BLACKWELL_DIR_PRIMARY=python-sageattention-blackwell"
 set "SAGEATTENTION_BLACKWELL_DIR_LEGACY=python_sageattention_blackwell"
 
@@ -61,8 +63,7 @@ if /i "%DEL_HF%"=="Y" (
     mkdir "huggingface" 2>nul
     echo [Deleted] HuggingFace cache/config
     echo Includes: hub, accelerate, datasets, modules, xet, assets, token files
-)
-else (
+) else (
     echo [Keep] HuggingFace cache/config
 )
 
@@ -75,19 +76,7 @@ if /i "%SLIM_MAIN%"=="Y" (
     if not exist "%PYTHON_EXE%" (
         echo [Skip] portable main Python not found
     ) else (
-        echo [Main] Removing site-packages, scripts and share payload while keeping bootstrap tools...
-        "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
-          "$ErrorActionPreference='Stop';" ^
-          "$site = Join-Path (Get-Location) 'python\Lib\site-packages';" ^
-          "$scripts = Join-Path (Get-Location) 'python\Scripts';" ^
-          "$share = Join-Path (Get-Location) 'python\share';" ^
-          "$keepPatterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-          "if(Test-Path $site){ Get-ChildItem -LiteralPath $site -Force | Where-Object { $name = $_.Name; -not ($keepPatterns | ForEach-Object { $name -like $_ } | Where-Object { $_ } | Select-Object -First 1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-          "if(Test-Path $scripts){ Get-ChildItem -LiteralPath $scripts -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-          "if(Test-Path $share){ Get-ChildItem -LiteralPath $share -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }"
-        del /q "python\.deps_installed" 2>nul
-        del /q "python\.tageditor_installed" 2>nul
-        echo [Done] main Python slimmed
+        call :slim_python_runtime "python" "Main" ".deps_installed .tageditor_installed"
     )
 ) else (
     echo [Keep] main Python packages
@@ -102,18 +91,7 @@ if /i "%SLIM_TAGEDITOR%"=="Y" (
     if not exist "%TAGEDITOR_PYTHON_EXE%" (
         echo [Skip] tag editor Python not found
     ) else (
-        echo [TagEditor] Removing site-packages, scripts and share payload while keeping bootstrap tools...
-        "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
-          "$ErrorActionPreference='Stop';" ^
-          "$site = Join-Path (Get-Location) 'python_tageditor\Lib\site-packages';" ^
-          "$scripts = Join-Path (Get-Location) 'python_tageditor\Scripts';" ^
-          "$share = Join-Path (Get-Location) 'python_tageditor\share';" ^
-          "$keepPatterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-          "if(Test-Path $site){ Get-ChildItem -LiteralPath $site -Force | Where-Object { $name = $_.Name; -not ($keepPatterns | ForEach-Object { $name -like $_ } | Where-Object { $_ } | Select-Object -First 1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-          "if(Test-Path $scripts){ Get-ChildItem -LiteralPath $scripts -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-          "if(Test-Path $share){ Get-ChildItem -LiteralPath $share -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }"
-        del /q "python_tageditor\.tageditor_installed" 2>nul
-        echo [Done] tag editor Python slimmed
+        call :slim_python_runtime "python_tageditor" "TagEditor" ".tageditor_installed"
     )
 ) else (
     echo [Keep] tag editor Python packages
@@ -128,18 +106,7 @@ if /i "%SLIM_BLACKWELL%"=="Y" (
     if not exist "%BLACKWELL_PYTHON_EXE%" (
         echo [Skip] Blackwell Python not found
     ) else (
-        echo [Blackwell] Removing site-packages, scripts and share payload while keeping bootstrap tools...
-        "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
-          "$ErrorActionPreference='Stop';" ^
-          "$site = Join-Path (Get-Location) 'python_blackwell\Lib\site-packages';" ^
-          "$scripts = Join-Path (Get-Location) 'python_blackwell\Scripts';" ^
-          "$share = Join-Path (Get-Location) 'python_blackwell\share';" ^
-          "$keepPatterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-          "if(Test-Path $site){ Get-ChildItem -LiteralPath $site -Force | Where-Object { $name = $_.Name; -not ($keepPatterns | ForEach-Object { $name -like $_ } | Where-Object { $_ } | Select-Object -First 1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-          "if(Test-Path $scripts){ Get-ChildItem -LiteralPath $scripts -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-          "if(Test-Path $share){ Get-ChildItem -LiteralPath $share -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }"
-        del /q "python_blackwell\.deps_installed" 2>nul
-        echo [Done] Blackwell Python slimmed
+        call :slim_python_runtime "python_blackwell" "Blackwell" ".deps_installed"
     )
 ) else (
     echo [Keep] Blackwell Python packages
@@ -154,6 +121,8 @@ set /p "SLIM_SAGEATTENTION=: "
 if /i "%SLIM_SAGEATTENTION%"=="Y" (
     call :slim_python_runtime "%SAGEATTENTION_DIR_PRIMARY%" "SageAttention"
     if /i not "%SAGEATTENTION_DIR_PRIMARY%"=="%SAGEATTENTION_DIR_LEGACY%" call :slim_python_runtime "%SAGEATTENTION_DIR_LEGACY%" "SageAttention Legacy"
+    call :slim_python_runtime "%SAGEATTENTION2_DIR_PRIMARY%" "SageAttention2"
+    if /i not "%SAGEATTENTION2_DIR_PRIMARY%"=="%SAGEATTENTION2_DIR_LEGACY%" call :slim_python_runtime "%SAGEATTENTION2_DIR_LEGACY%" "SageAttention2 Legacy"
     call :slim_python_runtime "%SAGEATTENTION_BLACKWELL_DIR_PRIMARY%" "SageAttention Blackwell"
     if /i not "%SAGEATTENTION_BLACKWELL_DIR_PRIMARY%"=="%SAGEATTENTION_BLACKWELL_DIR_LEGACY%" call :slim_python_runtime "%SAGEATTENTION_BLACKWELL_DIR_LEGACY%" "SageAttention Blackwell Legacy"
 ) else (
@@ -174,6 +143,7 @@ exit /b 0
 :slim_python_runtime
 set "RUNTIME_DIR=%~1"
 set "RUNTIME_LABEL=%~2"
+set "RUNTIME_MARKERS=%~3"
 
 if "%RUNTIME_DIR%"=="" exit /b 0
 if not exist "%~dp0%RUNTIME_DIR%\python.exe" (
@@ -181,16 +151,30 @@ if not exist "%~dp0%RUNTIME_DIR%\python.exe" (
     exit /b 0
 )
 
+set "RUNTIME_IN_USE="
+for /f %%P in ('"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "$runtime=[System.IO.Path]::GetFullPath((Join-Path (Get-Location) ''%RUNTIME_DIR%'')); $found=$false; foreach($proc in Get-CimInstance Win32_Process){ if($proc.ExecutablePath){ try{ $exe=[System.IO.Path]::GetFullPath($proc.ExecutablePath) } catch { $exe=$proc.ExecutablePath }; if($exe.StartsWith($runtime,[System.StringComparison]::OrdinalIgnoreCase)){ $found=$true; break } } }; if($found){ ''1'' } else { ''0'' }"') do set "RUNTIME_IN_USE=%%P"
+if "%RUNTIME_IN_USE%"=="1" (
+    echo [Skip] %RUNTIME_LABEL% Python is currently in use. Please close related GUI / tensorboard / tag editor processes and run cleanup again.
+    exit /b 0
+)
+
 echo [%RUNTIME_LABEL%] Removing site-packages, scripts and share payload while keeping bootstrap tools... (%RUNTIME_DIR%)
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop';" ^
-  "$site = Join-Path (Get-Location) '%RUNTIME_DIR%\Lib\site-packages';" ^
-  "$scripts = Join-Path (Get-Location) '%RUNTIME_DIR%\Scripts';" ^
-  "$share = Join-Path (Get-Location) '%RUNTIME_DIR%\share';" ^
+  "$runtime = Join-Path (Get-Location) '%RUNTIME_DIR%';" ^
+  "$site = Join-Path $runtime 'Lib\site-packages';" ^
+  "$scripts = Join-Path $runtime 'Scripts';" ^
+  "$share = Join-Path $runtime 'share';" ^
   "$keepPatterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-  "if(Test-Path $site){ Get-ChildItem -LiteralPath $site -Force | Where-Object { $name = $_.Name; -not ($keepPatterns | ForEach-Object { $name -like $_ } | Where-Object { $_ } | Select-Object -First 1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-  "if(Test-Path $scripts){ Get-ChildItem -LiteralPath $scripts -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue };" ^
-  "if(Test-Path $share){ Get-ChildItem -LiteralPath $share -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }"
-del /q "%RUNTIME_DIR%\.deps_installed" 2>nul
+  "$failed = New-Object System.Collections.Generic.List[string];" ^
+  "if(Test-Path $site){ foreach($item in Get-ChildItem -LiteralPath $site -Force){ $name = $item.Name; $keep = $false; foreach($pattern in $keepPatterns){ if($name -like $pattern){ $keep = $true; break } }; if(-not $keep){ try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop } catch { $failed.Add($item.FullName) } } } };" ^
+  "if(Test-Path $scripts){ foreach($item in Get-ChildItem -LiteralPath $scripts -Force){ try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop } catch { $failed.Add($item.FullName) } } };" ^
+  "if(Test-Path $share){ foreach($item in Get-ChildItem -LiteralPath $share -Force){ try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop } catch { $failed.Add($item.FullName) } } };" ^
+  "if($failed.Count -gt 0){ Write-Host ('FAILED:' + ($failed -join '; ')); exit 1 }"
+if errorlevel 1 (
+    echo [Fail] %RUNTIME_LABEL% Python slimming failed. Close any running processes using %RUNTIME_DIR% and try again.
+    exit /b 1
+)
+for %%M in (%RUNTIME_MARKERS%) do del /q "%RUNTIME_DIR%\%%~M" 2>nul
 echo [Done] %RUNTIME_LABEL% Python slimmed (%RUNTIME_DIR%)
 exit /b 0

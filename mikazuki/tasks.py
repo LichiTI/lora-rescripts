@@ -3,11 +3,13 @@ import sys
 import os
 import threading
 import uuid
+from pathlib import Path
 from enum import Enum
 from typing import Dict, List
 from subprocess import Popen, PIPE, TimeoutExpired, CalledProcessError, CompletedProcess
 import psutil
 
+from mikazuki.launch_utils import base_dir_path
 from mikazuki.log import log
 
 try:
@@ -37,12 +39,13 @@ class TaskStatus(Enum):
 
 
 class Task:
-    def __init__(self, task_id, command, environ=None):
+    def __init__(self, task_id, command, environ=None, cwd=None):
         self.task_id = task_id
         self.lock = threading.Lock()
         self.command = command
         self.status = TaskStatus.CREATED
         self.environ = environ or os.environ
+        self.cwd = str(Path(cwd).resolve()) if cwd else str(base_dir_path())
 
     def communicate(self, input=None, timeout=None):
         try:
@@ -67,7 +70,7 @@ class Task:
 
     def execute(self):
         self.status = TaskStatus.RUNNING
-        self.process = subprocess.Popen(self.command, env=self.environ)
+        self.process = subprocess.Popen(self.command, env=self.environ, cwd=self.cwd)
 
     def terminate(self):
         try:
@@ -84,14 +87,14 @@ class TaskManager:
         self.max_concurrent = max_concurrent
         self.tasks: Dict[Task] = {}
 
-    def create_task(self, command: List[str], environ):
+    def create_task(self, command: List[str], environ, cwd=None):
         running_tasks = [t for _, t in self.tasks.items() if t.status == TaskStatus.RUNNING]
         if len(running_tasks) >= self.max_concurrent:
             log.error(
                 f"Unable to create a task because there are already {len(running_tasks)} tasks running, reaching the maximum concurrent limit. / 无法创建任务，因为已经有 {len(running_tasks)} 个任务正在运行，已达到最大并发限制。")
             return None
         task_id = str(uuid.uuid4())
-        task = Task(task_id=task_id, command=command, environ=environ)
+        task = Task(task_id=task_id, command=command, environ=environ, cwd=cwd)
         self.tasks[task_id] = task
         # task.execute() # breaking change
         log.info(f"Task {task_id} created")

@@ -40,7 +40,7 @@ Schema.intersect([
 
     Schema.object({
         max_train_epochs: Schema.number().min(1).default(10).description("最大训练 epoch（轮数）"),
-        train_batch_size: Schema.number().min(1).default(2).description("批量大小"),
+        train_batch_size: Schema.number().min(1).default(2).description("批量大小。单卡/单进程时就是实际 batch；多卡/分布式时按全局 batch 解释，启动时会自动换算成每卡。"),
         gradient_checkpointing: Schema.boolean().default(true).description("梯度检查点"),
         gradient_accumulation_steps: Schema.number().min(1).default(1).description("梯度累加步数"),
         max_grad_norm: Schema.number().min(0).step(0.1).default(1.0).description("梯度裁剪上限，0 表示不裁剪"),

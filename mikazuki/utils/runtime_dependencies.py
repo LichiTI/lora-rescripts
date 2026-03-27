@@ -58,6 +58,21 @@ PACKAGE_REGISTRY = {
         "display_name": "pytorch-optimizer",
         "required_by_default": True,
     },
+    "lycoris": {
+        "package_name": "lycoris-lora",
+        "display_name": "lycoris-lora",
+        "required_by_default": False,
+    },
+    "safetensors": {
+        "package_name": "safetensors",
+        "display_name": "safetensors",
+        "required_by_default": True,
+    },
+    "sentencepiece": {
+        "package_name": "sentencepiece",
+        "display_name": "sentencepiece",
+        "required_by_default": False,
+    },
     "sageattention": {
         "package_name": "sageattention",
         "display_name": "sageattention",
@@ -110,6 +125,8 @@ def _infer_environment_name() -> str:
     executable = sys.executable.replace("\\", "/").lower()
     if "/python_blackwell/" in executable:
         return "blackwell"
+    if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
+        return "sageattention2"
     if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
         return "sageattention"
     if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
@@ -252,11 +269,32 @@ def _add_attention_requirement(target: dict[str, list[str]], config: dict) -> No
         _append_requirement(target, "sageattention", "sageattn=true")
 
 
+def _add_network_module_requirement(target: dict[str, list[str]], config: dict) -> None:
+    network_module = str(config.get("network_module", "")).strip()
+    if not network_module:
+        return
+
+    lower_name = network_module.lower()
+    if lower_name.startswith("lycoris."):
+        _append_requirement(target, "lycoris", f"network_module={network_module}")
+
+
+def _add_anima_requirement(target: dict[str, list[str]], config: dict) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if not model_train_type.startswith("anima"):
+        return
+
+    _append_requirement(target, "safetensors", f"model_train_type={model_train_type}")
+    _append_requirement(target, "sentencepiece", f"model_train_type={model_train_type}")
+
+
 def collect_training_dependency_requirements(config: dict) -> dict[str, list[str]]:
     requirements: dict[str, list[str]] = {}
     _add_optimizer_requirement(requirements, str(config.get("optimizer_type", "")).strip())
     _add_scheduler_requirement(requirements, str(config.get("lr_scheduler_type", "")).strip())
     _add_attention_requirement(requirements, config)
+    _add_network_module_requirement(requirements, config)
+    _add_anima_requirement(requirements, config)
     return requirements
 
 

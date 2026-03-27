@@ -114,8 +114,8 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "--attn_mode",
         choices=["torch", "xformers", "flash", "sageattn", "sdpa"],  # "sdpa" is for backward compatibility
         default=None,
-        help="Attention implementation to use. Default is None (torch). xformers requires --split_attn. sageattn does not support training (inference only). This option overrides --xformers or --sdpa."
-        " / 使用するAttentionの実装。デフォルトはNone（torch）です。xformersは--split_attnの指定が必要です。sageattnはトレーニングをサポートしていません（推論のみ）。このオプションは--xformersまたは--sdpaを上書きします。",
+        help="Attention implementation to use. Default is None (torch). xformers requires --split_attn. sageattn can be used when the active runtime has SageAttention installed. This option overrides --xformers or --sdpa."
+        " / 使用するAttentionの実装。デフォルトはNone（torch）です。xformersは--split_attnの指定が必要です。sageattn は、現在の运行时已安装 SageAttention 时可用于训练。这个选项会覆盖 --xformers 或 --sdpa。",
     )
     parser.add_argument(
         "--split_attn",
@@ -134,6 +134,13 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         action="store_true",
         help="Disable internal VAE caching mechanism to reduce memory usage. Encoding / decoding will also be faster, but this differs from official behavior."
         + " / VAEのメモリ使用量を減らすために内部のキャッシュ機構を無効にします。エンコード/デコードも速くなりますが、公式の動作とは異なります。",
+    )
+    parser.add_argument(
+        "--sample_scheduler",
+        type=str,
+        default="simple",
+        help="Sampling scheduler used by Anima preview generation during training. Currently 'simple' is supported."
+        + " / Anima の学習中プレビュー生成で使用するサンプリング scheduler。現在は simple のみサポートします。",
     )
 
 
@@ -313,6 +320,8 @@ def do_sample(
     guidance_scale: float = 1.0,
     flow_shift: float = 3.0,
     neg_crossattn_emb: Optional[torch.Tensor] = None,
+    sample_sampler: str = "euler",
+    sample_scheduler: str = "simple",
 ) -> torch.Tensor:
     """Generate a sample using Euler discrete sampling for rectified flow.
 
@@ -327,10 +336,22 @@ def do_sample(
         guidance_scale: CFG scale (1.0 = no guidance)
         flow_shift: Flow shift parameter for rectified flow
         neg_crossattn_emb: Negative cross-attention embeddings for CFG
+        sample_sampler: Preview sampler name from UI/config
+        sample_scheduler: Preview scheduler name from UI/config
 
     Returns:
         Denoised latents
     """
+    sample_scheduler = str(sample_scheduler or "simple").strip().lower()
+    if sample_scheduler != "simple":
+        logger.warning(f"Anima preview scheduler '{sample_scheduler}' is not implemented yet, fallback to simple")
+        sample_scheduler = "simple"
+
+    sample_sampler = str(sample_sampler or "euler").strip().lower()
+    if sample_sampler not in {"euler", "k_euler"}:
+        logger.warning(f"Anima preview sampler '{sample_sampler}' is not implemented yet, fallback to euler")
+        sample_sampler = "euler"
+
     # Latent shape: (1, 16, 1, H/8, W/8) for single image
     latent_h = height // 8
     latent_w = width // 8
@@ -463,6 +484,36 @@ def sample_images(
     clean_memory_on_device(accelerator.device)
 
 
+def resolve_preview_size(args: argparse.Namespace, width: int, height: int) -> tuple[int, int]:
+    if width > 0 and height > 0:
+        return width, height
+
+    fallback_width = 1024
+    fallback_height = 1024
+    resolution = getattr(args, "resolution", None)
+    if isinstance(resolution, str):
+        parts = [part.strip() for part in resolution.split(",") if part.strip()]
+        if len(parts) >= 2:
+            try:
+                fallback_width = int(parts[0])
+                fallback_height = int(parts[1])
+            except ValueError:
+                pass
+        elif len(parts) == 1:
+            try:
+                fallback_width = int(parts[0])
+                fallback_height = int(parts[0])
+            except ValueError:
+                pass
+    elif isinstance(resolution, (int, float)):
+        fallback_width = int(resolution)
+        fallback_height = int(resolution)
+
+    resolved_width = width if width > 0 else fallback_width
+    resolved_height = height if height > 0 else fallback_height
+    return resolved_width, resolved_height
+
+
 def _sample_image_inference(
     accelerator,
     args,
@@ -486,7 +537,9 @@ def _sample_image_inference(
     height = prompt_dict.get("height", 512)
     scale = prompt_dict.get("scale", 7.5)
     seed = prompt_dict.get("seed")
-    flow_shift = prompt_dict.get("flow_shift", 3.0)
+    flow_shift = prompt_dict.get("flow_shift", getattr(args, "discrete_flow_shift", 3.0) or 3.0)
+    sample_sampler = prompt_dict.get("sample_sampler", getattr(args, "sample_sampler", "euler"))
+    sample_scheduler = getattr(args, "sample_scheduler", "simple")
 
     if prompt_replacement is not None:
         prompt = prompt.replace(prompt_replacement[0], prompt_replacement[1])
@@ -497,11 +550,12 @@ def _sample_image_inference(
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)  # seed all CUDA devices for multi-GPU
 
+    width, height = resolve_preview_size(args, int(width), int(height))
     height = max(64, height - height % 16)
     width = max(64, width - width % 16)
 
     logger.info(
-        f"  prompt: {prompt}, size: {width}x{height}, steps: {sample_steps}, scale: {scale}, flow_shift: {flow_shift}, seed: {seed}"
+        f"  prompt: {prompt}, size: {width}x{height}, steps: {sample_steps}, scale: {scale}, flow_shift: {flow_shift}, seed: {seed}, sampler: {sample_sampler}, scheduler: {sample_scheduler}"
     )
 
     # Encode prompt
@@ -576,7 +630,19 @@ def _sample_image_inference(
     # Generate sample
     clean_memory_on_device(accelerator.device)
     latents = do_sample(
-        height, width, seed, dit, crossattn_emb, sample_steps, dit.dtype, accelerator.device, scale, flow_shift, neg_crossattn_emb
+        height,
+        width,
+        seed,
+        dit,
+        crossattn_emb,
+        sample_steps,
+        dit.dtype,
+        accelerator.device,
+        scale,
+        flow_shift,
+        neg_crossattn_emb,
+        sample_sampler=sample_sampler,
+        sample_scheduler=sample_scheduler,
     )
 
     # Decode latents

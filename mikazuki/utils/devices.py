@@ -19,12 +19,14 @@ xformers_status = {
 
 
 def _infer_attention_runtime_mode() -> str:
-    if os.environ.get("MIKAZUKI_SAGEATTENTION_STARTUP") == "1":
+    if os.environ.get("MIKAZUKI_SAGEATTENTION_STARTUP") == "1" or os.environ.get("MIKAZUKI_SAGEATTENTION2_STARTUP") == "1":
         return "sageattention"
     if os.environ.get("MIKAZUKI_BLACKWELL_STARTUP") == "1":
         return "blackwell"
 
     executable = sys.executable.replace("\\", "/").lower()
+    if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
+        return "sageattention"
     if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
         return "sageattention"
     if "/python-sageattention/" in executable or "/python_sageattention/" in executable:

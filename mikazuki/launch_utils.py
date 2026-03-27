@@ -61,7 +61,7 @@ def prepare_submodules():
         if not prepare_git():
             log.error("git not found, please install git first")
             sys.exit(1)
-        subprocess.run(["git", "submodule", "update", "--init", "--recursive"], check=False)
+        subprocess.run(["git", "submodule", "update", "--init", "--recursive"], check=False, cwd=base_dir_path())
 
 
 def git_tag(path: str) -> str:
@@ -73,8 +73,11 @@ def git_tag(path: str) -> str:
 
 def check_dirs(dirs: List):
     for d in dirs:
-        if not os.path.exists(d):
-            os.makedirs(d)
+        target = Path(d)
+        if not target.is_absolute():
+            target = base_dir_path() / target
+        if not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
 
 
 def run(command,
@@ -82,7 +85,8 @@ def run(command,
         errdesc: Optional[str] = None,
         custom_env: Optional[list] = None,
         live: Optional[bool] = True,
-        shell: Optional[bool] = None):
+        shell: Optional[bool] = None,
+        cwd: Optional[str] = None):
 
     if shell is None:
         shell = False if sys.platform == "win32" else True
@@ -91,7 +95,7 @@ def run(command,
         print(desc)
 
     if live:
-        result = subprocess.run(command, shell=shell, env=os.environ if custom_env is None else custom_env)
+        result = subprocess.run(command, shell=shell, env=os.environ if custom_env is None else custom_env, cwd=cwd)
         if result.returncode != 0:
             raise RuntimeError(f"""{errdesc or 'Error running command'}.
 Command: {command}
@@ -100,7 +104,7 @@ Error code: {result.returncode}""")
         return ""
 
     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            shell=shell, env=os.environ if custom_env is None else custom_env)
+                            shell=shell, env=os.environ if custom_env is None else custom_env, cwd=cwd)
 
     if result.returncode != 0:
         message = f"""{errdesc or 'Error running command'}.
@@ -254,7 +258,10 @@ def pip_install(package: str, version: Optional[str] = None, index_url: Optional
 
 
 def check_run(file: str) -> bool:
-    result = subprocess.run([python_bin, file], capture_output=True, shell=False)
+    target_path = Path(file)
+    if not target_path.is_absolute():
+        target_path = base_dir_path() / target_path
+    result = subprocess.run([python_bin, str(target_path.resolve())], capture_output=True, shell=False, cwd=base_dir_path())
     log.info(result.stdout.decode("utf-8").strip())
     return result.returncode == 0
 
@@ -304,7 +311,7 @@ def prepare_environment(disable_auto_mirror: bool = True, prepare_onnxruntime: b
     if skip_requirements_validation:
         log.info("Launcher already validated the main runtime. Skipping redundant requirements revalidation.")
     else:
-        validate_requirements("requirements.txt")
+        validate_requirements(str(base_dir_path() / "requirements.txt"))
     setup_windows_bitsandbytes()
 
     if prepare_onnxruntime:

@@ -48,7 +48,7 @@ Schema.intersect([
 
     Schema.object({
         max_train_epochs: Schema.number().min(1).default(10).description("最大训练 epoch（轮数）"),
-        train_batch_size: Schema.number().min(1).default(1).description("批量大小"),
+        train_batch_size: Schema.number().min(1).default(1).description("批量大小。单卡/单进程时就是实际 batch；多卡/分布式时按全局 batch 解释，启动时会自动换算成每卡。"),
         stop_text_encoder_training: Schema.number().min(-1).description("仅 sd-dreambooth 可用。在第 N 步时，停止训练文本编码器。设置为 -1 不训练文本编码器"),
         gradient_checkpointing: Schema.boolean().default(false).description("梯度检查点"),
         gradient_accumulation_steps: Schema.number().min(1).description("梯度累加步数"),
@@ -235,7 +235,27 @@ Schema.intersect([
     ]).description("速度优化选项"),
 
     Schema.object({
+        enable_distributed_training: Schema.boolean().default(false).description("启用分布式启动。当前为最小实现，支持多进程 / 多机拉起，以及 worker 最小配置与缺失资源同步"),
+        num_processes: Schema.number().min(1).description("每台机器启动的训练进程数。留空时会优先按所选 GPU 数量自动推断"),
+        num_machines: Schema.number().min(1).default(1).description("参与训练的机器总数"),
+        machine_rank: Schema.number().min(0).default(0).description("当前机器编号，从 0 开始；主节点为 0"),
+        main_process_ip: Schema.string().description("主节点 IP 地址。多机训练时必填"),
+        main_process_port: Schema.number().min(1).max(65535).default(29500).description("主节点 rendezvous 端口"),
+        nccl_socket_ifname: Schema.string().description("可选。NCCL 使用的网卡名，例如 Ethernet"),
+        gloo_socket_ifname: Schema.string().description("可选。Gloo 使用的网卡名，例如 Ethernet"),
+        sync_config_from_main: Schema.boolean().default(true).description("仅 worker 使用。从主节点同步训练配置"),
+        sync_config_keys_from_main: Schema.string().default("*").description("要从主节点同步的顶层配置键，逗号分隔。填写 * 表示尽可能同步全部训练配置；worker 本地分布式字段会自动跳过"),
+        sync_missing_assets_from_main: Schema.boolean().default(true).description("仅 worker 使用。按需从主节点补齐缺失模型、数据集、resume 等路径"),
+        sync_asset_keys: Schema.string().default("pretrained_model_name_or_path,train_data_dir,reg_data_dir,vae,resume").description("要从主节点补齐的资源键，逗号分隔"),
+        sync_main_repo_dir: Schema.string().description("主节点项目根目录。优先填写 worker 可直接访问的共享路径 / UNC 路径"),
+        sync_main_toml: Schema.string().default("./config/autosave/distributed-main-latest.toml").description("主节点用于同步的 TOML 路径"),
+        sync_ssh_user: Schema.string().description("远程同步时使用的 SSH 用户名。留空则直接使用 main_process_ip"),
+        sync_ssh_port: Schema.number().min(1).max(65535).default(22).description("远程同步使用的 SSH 端口"),
+        sync_use_password_auth: Schema.boolean().default(false).description("远程同步时启用密码认证。若开启且未走共享路径，需要本机可用 sshpass"),
+        sync_ssh_password: Schema.string().description("远程同步密码。更推荐改用环境变量或共享路径"),
+        clear_dataset_npz_before_train: Schema.boolean().default(false).description("worker 在启动训练前清空 train/reg 数据集中的 .npz 缓存。多机共享数据集发生变化时可开启"),
         ddp_timeout: Schema.number().min(0).description("分布式训练超时时间"),
         ddp_gradient_as_bucket_view: Schema.boolean(),
+        ddp_static_graph: Schema.boolean().description("启用 DDP static_graph 优化"),
     }).description("分布式训练"),
 ]);

@@ -36,7 +36,7 @@ Schema.intersect([
 
     Schema.object({
         max_train_epochs: Schema.number().min(1).default(10).description("最大训练 epoch（轮数）"),
-        train_batch_size: Schema.number().min(1).default(1).description("批量大小, 越高显存占用越高"),
+        train_batch_size: Schema.number().min(1).default(1).description("批量大小。单卡/单进程时就是实际 batch；多卡/分布式时按全局 batch 解释，启动时会自动换算成每卡。数值越高显存占用越高。"),
         gradient_checkpointing: Schema.boolean().default(true).description("梯度检查点"),
         gradient_accumulation_steps: Schema.number().min(1).default(1).description("梯度累加步数"),
         network_train_unet_only: Schema.boolean().default(true).description("仅训练 DiT / U-Net"),

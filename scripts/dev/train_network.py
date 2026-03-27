@@ -944,8 +944,18 @@ class NetworkTrainer:
             train_state_file = os.path.join(output_dir, "train_state.json")
             # +1 is needed because the state is saved before current_step is set from global_step
             logger.info(f"save train state to {train_state_file} at epoch {current_epoch.value} step {current_step.value+1}")
+            state_payload = {
+                "current_epoch": current_epoch.value,
+                "current_step": current_step.value + 1,
+            }
+            logging_run_dir = str(getattr(args, "logging_run_dir", "") or "").strip()
+            if not logging_run_dir:
+                logging_run_dir = str(getattr(accelerator, "project_dir", "") or "").strip()
+            if logging_run_dir:
+                state_payload["logging_run_dir"] = logging_run_dir
+                state_payload["logging_dir"] = logging_run_dir
             with open(train_state_file, "w", encoding="utf-8") as f:
-                json.dump({"current_epoch": current_epoch.value, "current_step": current_step.value + 1}, f)
+                json.dump(state_payload, f)
 
         steps_from_state = None
 

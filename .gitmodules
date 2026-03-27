@@ -1,0 +1,3 @@
+[submodule "plugin/lora-scripts-ui-main"]
+	path = plugin/lora-scripts-ui-main
+	url = https://github.com/LichiTI/lora-scripts-ui

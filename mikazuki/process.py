@@ -1,7 +1,10 @@
 
 import asyncio
 import os
+import shutil
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +14,29 @@ from mikazuki.app.models import APIResponse
 from mikazuki.launch_utils import base_dir_path
 from mikazuki.log import log
 from mikazuki.tasks import tm
+from mikazuki.utils.distributed import pick_training_mesh_iface, resolve_distributed_runtime
+from mikazuki.utils.batch_semantics import resolve_per_device_batch_from_global
+from mikazuki.utils.distributed_sync import (
+    apply_worker_sync_from_main,
+    clear_dataset_npz_cache,
+    resolve_trainer_file_from_runtime_config,
+    resolve_worker_sync_runtime,
+)
+from mikazuki.utils.resume_guard import validate_resume_launch_guard
+from mikazuki.utils.tensorboard_runs import (
+    apply_tensorboard_runtime_config,
+    cleanup_tensorboard_records_without_checkpoint,
+    has_new_checkpoint_since,
+    snapshot_tensorboard_event_files,
+)
+
+
+def ensure_repo_on_pythonpath(customize_env: dict):
+    repo_root = str(base_dir_path())
+    existing = customize_env.get("PYTHONPATH", "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if repo_root not in parts:
+        customize_env["PYTHONPATH"] = os.pathsep.join([repo_root, *parts]) if parts else repo_root
 
 
 def prepare_python_script(script_path, environ=None):
@@ -20,6 +46,7 @@ def prepare_python_script(script_path, environ=None):
     resolved_path = resolved_path.resolve()
 
     customize_env = (environ or os.environ).copy()
+    ensure_repo_on_pythonpath(customize_env)
     return resolved_path, customize_env
 
 
@@ -33,6 +60,31 @@ def apply_windows_accelerate_env(customize_env: dict):
         customize_env["USE_LIBUV"] = "0"
 
 
+def ensure_main_distributed_autosave(toml_path: str, distributed_runtime: Optional[dict]) -> tuple[bool, str]:
+    runtime = distributed_runtime if isinstance(distributed_runtime, dict) else {}
+    if not runtime.get("is_multi_machine") or int(runtime.get("machine_rank", 0) or 0) != 0:
+        return True, ""
+
+    src = Path(toml_path)
+    if not src.exists():
+        return False, f"主节点分布式 autosave 源文件不存在: {src}"
+
+    autosave_dir = base_dir_path() / "config" / "autosave"
+    autosave_dir.mkdir(parents=True, exist_ok=True)
+    latest_file = autosave_dir / "distributed-main-latest.toml"
+    timestamp_file = autosave_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-distributed-main.toml"
+
+    try:
+        shutil.copy2(src, latest_file)
+        shutil.copy2(src, timestamp_file)
+    except Exception as exc:
+        return False, f"主节点分布式 autosave 写入失败: {exc}"
+
+    log.info(f"[distributed] main autosave updated: {latest_file}")
+    log.info(f"[distributed] main autosave snapshot: {timestamp_file}")
+    return True, ""
+
+
 def build_accelerate_launch_args(
     script_runner: Path,
     trainer_path: Path,
@@ -41,7 +93,16 @@ def build_accelerate_launch_args(
     *,
     quiet: bool = True,
     num_processes: int = 1,
+    distributed_runtime: Optional[dict] = None,
+    trainer_cli_args: Optional[list[str]] = None,
 ):
+    runtime = distributed_runtime if isinstance(distributed_runtime, dict) else {}
+    total_num_processes = int(runtime.get("total_num_processes", num_processes) or num_processes or 1)
+    num_machines = int(runtime.get("num_machines", 1) or 1)
+    machine_rank = int(runtime.get("machine_rank", 0) or 0)
+    main_process_ip = str(runtime.get("main_process_ip", "") or "").strip()
+    main_process_port = int(runtime.get("main_process_port", 29500) or 29500)
+
     args = [
         sys.executable,
         "-m",
@@ -50,8 +111,21 @@ def build_accelerate_launch_args(
         str(cpu_threads),
     ]
 
-    if num_processes > 1:
-        args.extend(["--multi_gpu", "--num_processes", str(num_processes)])
+    if total_num_processes > 1 or num_machines > 1:
+        args.extend(["--multi_gpu", "--num_processes", str(total_num_processes)])
+        if num_machines > 1:
+            args.extend(
+                [
+                    "--num_machines",
+                    str(num_machines),
+                    "--machine_rank",
+                    str(machine_rank),
+                    "--main_process_ip",
+                    str(main_process_ip),
+                    "--main_process_port",
+                    str(main_process_port),
+                ]
+            )
         if sys.platform == "win32":
             args.extend(["--rdzv_backend", "c10d"])
 
@@ -66,6 +140,8 @@ def build_accelerate_launch_args(
             toml_path,
         ]
     )
+    if trainer_cli_args:
+        args.extend([str(arg) for arg in trainer_cli_args if str(arg).strip() != ""])
     return args
 
 
@@ -77,7 +153,15 @@ def build_staged_resolution_runner_args(
     *,
     quiet: bool = True,
     num_processes: int = 1,
+    distributed_runtime: Optional[dict] = None,
 ):
+    runtime = distributed_runtime if isinstance(distributed_runtime, dict) else {}
+    total_num_processes = int(runtime.get("total_num_processes", num_processes) or num_processes or 1)
+    num_machines = int(runtime.get("num_machines", 1) or 1)
+    machine_rank = int(runtime.get("machine_rank", 0) or 0)
+    main_process_ip = str(runtime.get("main_process_ip", "") or "").strip()
+    main_process_port = int(runtime.get("main_process_port", 29500) or 29500)
+
     args = [
         sys.executable,
         str(runner_path),
@@ -88,7 +172,15 @@ def build_staged_resolution_runner_args(
         "--num_cpu_threads_per_process",
         str(cpu_threads),
         "--num_processes",
-        str(num_processes),
+        str(total_num_processes),
+        "--num_machines",
+        str(num_machines),
+        "--machine_rank",
+        str(machine_rank),
+        "--main_process_ip",
+        str(main_process_ip),
+        "--main_process_port",
+        str(main_process_port),
     ]
     if quiet:
         args.append("--quiet")
@@ -102,7 +194,7 @@ def run_train(
     cpu_threads: Optional[int] = 2,
 ):
     log.info(f"Training started with config file / 训练开始，使用配置文件: {toml_path}")
-    trainer_path, customize_env = prepare_python_script(trainer_file)
+    customize_env = os.environ.copy()
 
     try:
         config_data = toml.load(toml_path)
@@ -112,13 +204,117 @@ def run_train(
     customize_env["ACCELERATE_DISABLE_RICH"] = "1"
     customize_env["PYTHONUNBUFFERED"] = "1"
     customize_env["PYTHONWARNINGS"] = "ignore::FutureWarning,ignore::UserWarning"
+    ensure_repo_on_pythonpath(customize_env)
     apply_windows_accelerate_env(customize_env)
 
-    num_processes = 1
+    try:
+        distributed_runtime = resolve_distributed_runtime(config_data, gpu_ids)
+    except ValueError as exc:
+        log.warning(f"[distributed] {exc}")
+        return APIResponse(status="error", message=str(exc))
+    except Exception as exc:
+        log.error(f"[distributed] failed to resolve distributed runtime: {exc}")
+        return APIResponse(status="error", message="分布式运行时解析失败，请检查日志。")
+
+    customize_env.update(distributed_runtime.get("env_overrides", {}))
+    for warning in distributed_runtime.get("warnings", []):
+        log.warning(f"[distributed] {warning}")
+    for note in distributed_runtime.get("notes", []):
+        log.info(f"[distributed] {note}")
+
+    try:
+        worker_sync_runtime = resolve_worker_sync_runtime(config_data, distributed_runtime, base_dir_path())
+    except ValueError as exc:
+        log.warning(f"[distributed-sync] {exc}")
+        return APIResponse(status="error", message=str(exc))
+    except Exception as exc:
+        log.error(f"[distributed-sync] failed to resolve worker sync runtime: {exc}")
+        return APIResponse(status="error", message="分布式同步运行时解析失败，请检查日志。")
+
+    for warning in worker_sync_runtime.get("warnings", []):
+        log.warning(f"[distributed-sync] {warning}")
+    for note in worker_sync_runtime.get("notes", []):
+        log.info(f"[distributed-sync] {note}")
+
+    if worker_sync_runtime.get("enabled"):
+        sync_ok, sync_message = apply_worker_sync_from_main(toml_path, worker_sync_runtime, base_dir_path())
+        if not sync_ok:
+            log.warning(f"[distributed-sync] {sync_message}")
+            return APIResponse(status="error", message=sync_message)
+        try:
+            config_data = toml.load(toml_path)
+        except Exception as exc:
+            return APIResponse(status="error", message=f"同步后重新读取训练配置失败: {exc}")
+
+    if bool(config_data.get("clear_dataset_npz_before_train")) and not worker_sync_runtime.get("is_worker"):
+        cache_ok, cache_message = clear_dataset_npz_cache(toml_path, base_dir_path())
+        if not cache_ok:
+            log.warning(f"[cache-reset] {cache_message}")
+            return APIResponse(status="error", message=cache_message)
+
+    guard_ok, guard_message = validate_resume_launch_guard(config_data, base_dir_path())
+    if not guard_ok:
+        log.warning(f"[resume-guard] {guard_message}")
+        return APIResponse(status="error", message=guard_message)
+
+    tensorboard_runtime = apply_tensorboard_runtime_config(config_data, base_dir_path())
+    tensorboard_run_dir = tensorboard_runtime.get("run_dir") if tensorboard_runtime.get("enabled") else None
+    tensorboard_run_dir_existed_before = bool(tensorboard_run_dir and Path(tensorboard_run_dir).exists())
+    tensorboard_event_snapshot = snapshot_tensorboard_event_files(tensorboard_run_dir)
+    if tensorboard_runtime.get("changed"):
+        with open(toml_path, "w", encoding="utf-8") as f:
+            toml.dump(config_data, f)
+        config_data = toml.load(toml_path)
+    if tensorboard_runtime.get("enabled"):
+        log.info(
+            f"[tensorboard] resolved run dir: {tensorboard_run_dir} "
+            f"(resume_merge={'yes' if tensorboard_runtime.get('resume_merge') else 'no'}, "
+            f"from_state={'yes' if tensorboard_runtime.get('reused_from_state') else 'no'})"
+        )
+
+    autosave_ok, autosave_message = ensure_main_distributed_autosave(toml_path, distributed_runtime)
+    if not autosave_ok:
+        log.warning(f"[distributed] {autosave_message}")
+        return APIResponse(status="error", message=autosave_message)
+
+    resolved_trainer_file = resolve_trainer_file_from_runtime_config(config_data, trainer_file)
+    if resolved_trainer_file != trainer_file:
+        log.info(f"[distributed-sync] trainer file updated from synced config: {trainer_file} -> {resolved_trainer_file}")
+    trainer_path, _ = prepare_python_script(resolved_trainer_file, customize_env)
+
+    world_size_for_batch = max(1, int(distributed_runtime.get("total_num_processes", 1) or 1))
+    launch_train_batch_override = None
+    try:
+        configured_global_batch = int(config_data.get("train_batch_size", 1) or 1)
+    except (TypeError, ValueError):
+        configured_global_batch = 0
+    ok_batch, per_device_batch, batch_error = resolve_per_device_batch_from_global(
+        configured_global_batch, world_size_for_batch
+    )
+    if not ok_batch:
+        return APIResponse(status="error", message=f"训练批大小配置错误: {batch_error}")
+    launch_train_batch_override = int(per_device_batch)
+
+    try:
+        grad_accum_steps = int(config_data.get("gradient_accumulation_steps", 1) or 1)
+    except (TypeError, ValueError):
+        grad_accum_steps = 1
+    if grad_accum_steps <= 0:
+        grad_accum_steps = 1
+    world_effective_batch = int(configured_global_batch) * int(grad_accum_steps)
+    if world_size_for_batch > 1:
+        log.info(
+            "[batch-semantics] user_global_batch=%s world_size=%s per_device_batch=%s grad_accum=%s world_effective_batch=%s",
+            int(configured_global_batch),
+            int(world_size_for_batch),
+            int(per_device_batch),
+            int(grad_accum_steps),
+            int(world_effective_batch),
+        )
+
     if gpu_ids:
         customize_env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
         log.info(f"Using GPU(s) / 使用 GPU: {gpu_ids}")
-        num_processes = len(gpu_ids)
         log.info(f"Final training GPU selection / 最终参与训练的 GPU: {', '.join(gpu_ids)}")
     else:
         log.info("Final training GPU selection / 最终参与训练的 GPU: default visible CUDA device")
@@ -131,7 +327,8 @@ def run_train(
             toml_path,
             int(cpu_threads),
             quiet=True,
-            num_processes=num_processes,
+            num_processes=int(distributed_runtime.get("total_num_processes", 1) or 1),
+            distributed_runtime=distributed_runtime,
         )
     else:
         script_runner = get_script_runner_path()
@@ -141,16 +338,41 @@ def run_train(
             toml_path,
             int(cpu_threads),
             quiet=True,
-            num_processes=num_processes,
+            num_processes=int(distributed_runtime.get("total_num_processes", 1) or 1),
+            distributed_runtime=distributed_runtime,
+            trainer_cli_args=["--train_batch_size", str(int(launch_train_batch_override))],
         )
 
-    if not (task := tm.create_task(args, customize_env)):
+    if distributed_runtime.get("is_multi_machine"):
+        mesh_iface = pick_training_mesh_iface(
+            str(distributed_runtime.get("nccl_socket_ifname", "") or ""),
+            str(distributed_runtime.get("gloo_socket_ifname", "") or ""),
+            str(distributed_runtime.get("main_process_ip", "") or ""),
+        )
+        if mesh_iface:
+            customize_env["MIKAZUKI_MESH_NET_IFACE"] = mesh_iface
+            log.info(f"[mesh-net] selected local training interface: {mesh_iface}")
+        else:
+            log.warning("[mesh-net] distributed training detected but unable to resolve local training interface")
+
+    if not (task := tm.create_task(args, customize_env, cwd=base_dir_path())):
         return APIResponse(status="error", message="Failed to create task / 无法创建训练任务")
 
     def _run():
         try:
+            run_started_at = time.time()
             task.execute()
             result = task.communicate()
+            checkpoint_generated = has_new_checkpoint_since(config_data, base_dir_path(), run_started_at)
+            if tensorboard_run_dir is not None and not checkpoint_generated:
+                cleanup_tensorboard_records_without_checkpoint(
+                    tensorboard_run_dir,
+                    tensorboard_run_dir_existed_before,
+                    tensorboard_event_snapshot,
+                )
+                log.info(f"[tensorboard] cleaned run dir without checkpoint: {tensorboard_run_dir}")
+            elif tensorboard_run_dir is not None:
+                log.info(f"[tensorboard] checkpoint detected, keep run dir: {tensorboard_run_dir}")
             if result.returncode != 0:
                 log.error("Training failed / 训练失败")
             else:
@@ -164,5 +386,13 @@ def run_train(
     return APIResponse(
         status="success",
         message=f"Training started / 训练开始 ID: {task.task_id}",
-        data={"task_id": task.task_id},
+        data={
+            "task_id": task.task_id,
+            "tensorboard_run_dir": str(tensorboard_run_dir) if tensorboard_run_dir is not None else "",
+            "tensorboard_resume_merge": bool(tensorboard_runtime.get("resume_merge")),
+            "tensorboard_reused_from_state": bool(tensorboard_runtime.get("reused_from_state")),
+            "distributed_summary": str(distributed_runtime.get("summary", "") or ""),
+            "distributed_active": bool(int(distributed_runtime.get("total_num_processes", 1) or 1) > 1),
+            "distributed_is_multi_machine": bool(distributed_runtime.get("is_multi_machine")),
+        },
     )

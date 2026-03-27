@@ -34,8 +34,10 @@ from mikazuki.utils.caption_backup import (create_caption_backup,
                                            NO_CAPTIONS_TO_BACKUP_MESSAGE,
                                            restore_caption_backup)
 from mikazuki.utils.caption_cleanup import (apply_caption_cleanup,
-                                            preview_caption_cleanup)
+                                             preview_caption_cleanup)
 from mikazuki.utils.dataset_cache_preflight import analyze_dataset_cache_preflight
+from mikazuki.utils.distributed import resolve_distributed_runtime
+from mikazuki.utils.distributed_sync import resolve_worker_sync_runtime
 from mikazuki.utils.mixed_resolution import (
     build_mixed_resolution_plan,
     build_mixed_resolution_summary_text,
@@ -53,8 +55,17 @@ from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
 )
+from mikazuki.utils.frontend_profiles import (
+    PLUGIN_ROOT,
+    install_github_frontend_plugin,
+    list_frontend_profiles,
+    parse_github_repo_url,
+    resolve_frontend_profile,
+    resolve_frontend_profile_id,
+    uninstall_frontend_plugin,
+)
 from mikazuki.utils.tk_window import (open_directory_selector,
-                                      open_file_selector)
+                                       open_file_selector)
 
 router = APIRouter()
 
@@ -123,7 +134,7 @@ trainer_mapping = {
 async def load_schemas():
     avaliable_schemas.clear()
 
-    schema_dir = Path(os.getcwd()) / "mikazuki" / "schema"
+    schema_dir = launch_utils.base_dir_path() / "mikazuki" / "schema"
     schemas = sorted(p for p in schema_dir.iterdir() if p.is_file() and p.suffix == ".ts")
 
     def lambda_hash(x):
@@ -142,7 +153,7 @@ async def load_schemas():
 async def load_presets():
     avaliable_presets.clear()
 
-    preset_dir = Path(os.getcwd()) / "config" / "presets"
+    preset_dir = launch_utils.base_dir_path() / "config" / "presets"
     if not preset_dir.exists():
         return
     presets = sorted(p for p in preset_dir.iterdir() if p.is_file() and p.suffix == ".toml")
@@ -237,6 +248,35 @@ def parse_boolish(value) -> bool:
     return bool(value)
 
 
+def apply_anima_ui_overrides(config: dict) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if not model_train_type.startswith("anima"):
+        return
+
+    lora_type = str(config.pop("lora_type", "")).strip().lower()
+    if model_train_type == "anima-lora" and lora_type:
+        if lora_type == "lokr":
+            config["network_module"] = "lycoris.kohya"
+            config["lycoris_algo"] = "lokr"
+            config.pop("network_dropout", None)
+        else:
+            config["network_module"] = "networks.lora_anima"
+            config.pop("lycoris_algo", None)
+            for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout", "train_norm"):
+                config.pop(key, None)
+
+    if "prefer_json_caption" in config:
+        custom_attributes = config.get("custom_attributes")
+        if not isinstance(custom_attributes, dict):
+            custom_attributes = {}
+        custom_attributes["prefer_json_caption"] = parse_boolish(config.pop("prefer_json_caption"))
+        config["custom_attributes"] = custom_attributes
+
+    sample_scheduler = str(config.get("sample_scheduler", "") or "").strip()
+    if sample_scheduler == "":
+        config["sample_scheduler"] = "simple"
+
+
 def apply_sageattention_runtime_override(config: dict) -> Optional[str]:
     if get_attention_runtime_mode() != "sageattention":
         return None
@@ -328,33 +368,35 @@ def build_sample_prompt_record(config: dict) -> Optional[dict]:
         }
 
     legacy_sample_prompts = str(config.get("sample_prompts", "")).strip()
-    if legacy_sample_prompts and "positive_prompts" not in config:
+    if legacy_sample_prompts:
+        if str(config.get("positive_prompts", "")).strip():
+            notes.append("多提示词轮换已启用，单提示词输入框会被忽略。")
         if os.path.isfile(legacy_sample_prompts):
             content = read_prompt_text_file(legacy_sample_prompts)
             preview, line_count = build_prompt_preview_text(content)
             return {
                 "enabled": enable_preview,
-                "source": "legacy_sample_prompts_file",
+                "source": "sample_prompts_file",
                 "detail": legacy_sample_prompts,
                 "preview": preview,
                 "content": content,
                 "line_count": line_count,
                 "suggested_file_name": Path(legacy_sample_prompts).name or build_sample_prompt_file_name(config),
                 "warnings": warnings,
-                "notes": notes + ["Using imported legacy sample_prompts file."],
+                "notes": notes + ["Using sample_prompts file."],
             }
 
         preview, line_count = build_prompt_preview_text(legacy_sample_prompts)
         return {
             "enabled": enable_preview,
-            "source": "legacy_sample_prompts_inline",
-            "detail": "Imported legacy sample_prompts value",
+            "source": "sample_prompts_inline",
+            "detail": "Inline multi-prompt rotation",
             "preview": preview,
             "content": legacy_sample_prompts,
             "line_count": line_count,
             "suggested_file_name": build_sample_prompt_file_name(config),
             "warnings": warnings,
-            "notes": notes + ["Using imported legacy sample_prompts text."],
+            "notes": notes + ["Using inline sample_prompts text."],
         }
 
     config_copy = dict(config)
@@ -548,7 +590,9 @@ def build_sample_prompt_preview(config: dict) -> Optional[dict]:
 @router.post("/run")
 async def create_toml_file(request: Request):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    toml_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}.toml")
+    autosave_dir = launch_utils.base_dir_path() / "config" / "autosave"
+    autosave_dir.mkdir(parents=True, exist_ok=True)
+    toml_file = str(autosave_dir / f"{timestamp}.toml")
     json_data = await request.body()
 
     config: dict = json.loads(json_data.decode("utf-8"))
@@ -556,6 +600,8 @@ async def create_toml_file(request: Request):
         train_utils.fix_config_types(config)
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
+
+    apply_anima_ui_overrides(config)
 
     raw_gpu_ids = config.pop("gpu_ids", None)
     gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
@@ -566,6 +612,28 @@ async def create_toml_file(request: Request):
         start_warnings.append(f"本次训练将使用 GPU: {', '.join(gpu_ids)}")
     else:
         start_warnings.append("本次训练未显式指定 GPU，默认使用当前 PyTorch 可见的主训练显卡。")
+    try:
+        distributed_runtime = resolve_distributed_runtime(config, gpu_ids)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Distributed runtime resolution failed unexpectedly")
+        return APIResponseFail(message="分布式运行时解析失败，请查看日志。")
+    start_warnings.extend(distributed_runtime.get("warnings", []))
+    start_warnings.extend(distributed_runtime.get("notes", []))
+    if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
+        start_warnings.append(
+            "当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。"
+        )
+    try:
+        worker_sync_runtime = resolve_worker_sync_runtime(config, distributed_runtime, launch_utils.base_dir_path())
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Worker sync runtime resolution failed unexpectedly")
+        return APIResponseFail(message="分布式同步运行时解析失败，请查看日志。")
+    start_warnings.extend(worker_sync_runtime.get("warnings", []))
+    start_warnings.extend(worker_sync_runtime.get("notes", []))
 
     suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     model_train_type = config.pop("model_train_type", "sd-lora")
@@ -584,7 +652,7 @@ async def create_toml_file(request: Request):
 
     try:
         planning_config = dict(config)
-        planning_config["num_processes"] = max(1, len(gpu_ids))
+        planning_config["num_processes"] = int(distributed_runtime.get("total_num_processes", 1) or 1)
         mixed_resolution_plan = build_mixed_resolution_plan(planning_config, training_type=model_train_type)
     except ValueError as exc:
         return APIResponseFail(message=str(exc))
@@ -634,17 +702,29 @@ async def create_toml_file(request: Request):
             message="Required runtime dependencies are missing or broken: " + " | ".join(missing_details)
         )
 
-    if "prompt_file" in config and config["prompt_file"].strip() != "":
-        prompt_file = config["prompt_file"].strip()
+    prompt_file = str(config.get("prompt_file", "") or "").strip()
+    inline_sample_prompts = str(config.get("sample_prompts", "") or "").strip()
+
+    if prompt_file:
         if not os.path.exists(prompt_file):
             return APIResponseFail(message=f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
         config["sample_prompts"] = prompt_file
+    elif inline_sample_prompts:
+        if os.path.isfile(inline_sample_prompts):
+            config["sample_prompts"] = inline_sample_prompts
+        else:
+            sample_prompts_file = str(autosave_dir / build_sample_prompt_file_name(config))
+            with open(sample_prompts_file, "w", encoding="utf-8") as f:
+                normalized = "\n".join(line.strip() for line in inline_sample_prompts.splitlines() if line.strip())
+                f.write(normalized)
+            config["sample_prompts"] = sample_prompts_file
+            log.info(f"Wrote inline sample_prompts to file {sample_prompts_file}")
     else:
         try:
             positive_prompt, sample_prompts_arg = get_sample_prompts(config=config)
 
             if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
-                sample_prompts_file = os.path.join(os.getcwd(), f"config", "autosave", f"{timestamp}-prompt.txt")
+                sample_prompts_file = str(autosave_dir / f"{timestamp}-prompt.txt")
                 with open(sample_prompts_file, "w", encoding="utf-8") as f:
                     f.write(sample_prompts_arg)
                 config["sample_prompts"] = sample_prompts_file
@@ -654,6 +734,8 @@ async def create_toml_file(request: Request):
             log.error(f"Error while processing prompts: {e}")
             return APIResponseFail(message=str(e))
 
+    config.pop("prompt_file", None)
+
     with open(toml_file, "w", encoding="utf-8") as f:
         f.write(toml.dumps(config))
 
@@ -662,6 +744,24 @@ async def create_toml_file(request: Request):
     if mixed_resolution_payload is not None:
         result.data = result.data or {}
         result.data["mixed_resolution"] = mixed_resolution_payload
+
+    tensorboard_run_dir = ""
+    tensorboard_resume_merge = False
+    tensorboard_reused_from_state = False
+    if result.data:
+        tensorboard_run_dir = str(result.data.get("tensorboard_run_dir", "") or "").strip()
+        tensorboard_resume_merge = bool(result.data.get("tensorboard_resume_merge"))
+        tensorboard_reused_from_state = bool(result.data.get("tensorboard_reused_from_state"))
+        distributed_active = bool(result.data.get("distributed_active"))
+        distributed_summary = str(result.data.get("distributed_summary", "") or "").strip()
+        if distributed_active and distributed_summary and distributed_summary not in start_warnings:
+            start_warnings.append(f"分布式摘要：{distributed_summary}")
+    if tensorboard_run_dir:
+        start_warnings.append(f"TensorBoard 日志目录：{tensorboard_run_dir}")
+        if tensorboard_reused_from_state:
+            start_warnings.append("TensorBoard 将继续写入 resume state 中记录的原日志目录。")
+        elif tensorboard_resume_merge:
+            start_warnings.append("TensorBoard 将复用当前模型最近一次已有的日志目录。")
 
     if start_warnings:
         result.data = result.data or {}
@@ -683,14 +783,14 @@ async def training_preflight(request: Request) -> APIResponse:
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
+    apply_anima_ui_overrides(config)
+
     raw_gpu_ids = config.get("gpu_ids")
     gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
     if gpu_ids:
         config["gpu_ids"] = gpu_ids
-        config["num_processes"] = len(gpu_ids)
     else:
         config.pop("gpu_ids", None)
-        config["num_processes"] = 1
     training_type = str(config.get("model_train_type", "sd-lora"))
 
     result = analyze_training_preflight(
@@ -717,6 +817,8 @@ async def training_sample_prompt(request: Request) -> APIResponse:
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
+    apply_anima_ui_overrides(config)
+
     try:
         result = build_sample_prompt_record(config)
         if not result:
@@ -739,10 +841,11 @@ async def run_script(request: Request, background_tasks: BackgroundTasks):
         return APIResponseFail(message="Script not found")
     del j["script_name"]
 
-    script_path = Path(os.getcwd()) / "scripts" / script_name
+    repo_root = launch_utils.base_dir_path()
+    script_path = repo_root / "scripts" / script_name
     if not script_path.exists():
         for candidate_root in ["stable", "dev"]:
-            candidate = Path(os.getcwd()) / "scripts" / candidate_root / script_name
+            candidate = repo_root / "scripts" / candidate_root / script_name
             if candidate.exists():
                 script_path = candidate
                 break
@@ -772,7 +875,7 @@ async def run_script(request: Request, background_tasks: BackgroundTasks):
                 continue
             cmd.append(f"--{k}")
             cmd.append(str(v))
-    background_tasks.add_task(launch_utils.run, cmd, custom_env=script_env)
+    background_tasks.add_task(launch_utils.run, cmd, custom_env=script_env, cwd=str(repo_root), shell=False)
     return APIResponseSuccess()
 
 
@@ -1156,8 +1259,130 @@ async def get_config_summary() -> APIResponse:
         "last_path": app_config["last_path"] or "",
         "saved_param_keys": sorted((app_config["saved_params"] or {}).keys()),
         "saved_param_count": len(app_config["saved_params"] or {}),
+        "active_ui_profile": resolve_frontend_profile_id(app_config["active_ui_profile"]),
         "config_path": str(app_config.path),
     })
+
+
+@router.get("/ui_profiles")
+async def get_ui_profiles() -> APIResponse:
+    requested_profile_id = app_config["active_ui_profile"]
+    active_profile = resolve_frontend_profile(requested_profile_id)
+    return APIResponseSuccess(data={
+        "profiles": [
+            {
+                "id": profile["id"],
+                "kind": profile["kind"],
+                "name": profile["name"],
+                "version": profile["version"],
+                "source_path": profile["source_path"],
+                "plugin_path": profile["plugin_path"],
+                "source_url": profile["source_url"],
+                "available": profile["available"],
+                "removable": profile["removable"],
+                "remove_block_reason": profile["remove_block_reason"],
+            }
+            for profile in list_frontend_profiles()
+        ],
+        "active_profile_id": active_profile["id"],
+        "plugin_root": str(PLUGIN_ROOT),
+        "config_path": str(app_config.path),
+    })
+
+
+@router.post("/ui_profiles/activate")
+async def activate_ui_profile(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    profile_id = str(payload.get("profile_id", "")).strip()
+    if not profile_id:
+        return APIResponseFail(message="profile_id is required")
+
+    profile = resolve_frontend_profile(profile_id)
+    if profile["id"] != profile_id:
+        return APIResponseFail(message=f"UI not found: {profile_id}")
+    if not profile.get("available", False):
+        return APIResponseFail(message=f"UI is not ready yet: {profile_id}")
+
+    app_config["active_ui_profile"] = profile["id"]
+    app_config.save_config()
+
+    return APIResponseSuccess(
+        message=f"Switched active UI to {profile['name']}",
+        data={
+            "active_profile_id": profile["id"],
+            "reload_required": True,
+        },
+    )
+
+
+@router.post("/ui_profiles/install")
+async def install_ui_profile(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    repo_url = str(payload.get("repo_url", "")).strip()
+    replace_existing = bool(payload.get("replace_existing", False))
+
+    if not repo_url:
+        return APIResponseFail(message="repo_url is required")
+
+    parsed_repo = parse_github_repo_url(repo_url)
+    if parsed_repo is None:
+        return APIResponseFail(message="Only standard GitHub repository URLs are supported right now.")
+
+    try:
+        profile = await asyncio.to_thread(
+            install_github_frontend_plugin,
+            repo_url,
+            replace_existing=replace_existing,
+        )
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Failed to install community UI from GitHub")
+        return APIResponseFail(message="Failed to download or install the GitHub community UI. Check the logs for details.")
+
+    return APIResponseSuccess(
+        message=f"Installed community UI {profile['name']}",
+        data={
+            "installed_profile": {
+                "id": profile["id"],
+                "name": profile["name"],
+                "kind": profile["kind"],
+                "version": profile["version"],
+                "plugin_path": profile["plugin_path"],
+                "source_path": profile["source_path"],
+            },
+            "plugin_root": str(PLUGIN_ROOT),
+        },
+    )
+
+
+@router.post("/ui_profiles/uninstall")
+async def uninstall_ui_profile(request: Request) -> APIResponse:
+    payload = json.loads((await request.body()).decode("utf-8"))
+    profile_id = str(payload.get("profile_id", "")).strip()
+    if not profile_id:
+        return APIResponseFail(message="profile_id is required")
+
+    try:
+        removed_profile = await asyncio.to_thread(uninstall_frontend_plugin, profile_id)
+    except ValueError as exc:
+        return APIResponseFail(message=str(exc))
+    except Exception:
+        log.exception("Failed to uninstall community UI")
+        return APIResponseFail(message="Failed to uninstall the selected community UI. Check the logs for details.")
+
+    if app_config["active_ui_profile"] == removed_profile["id"]:
+        app_config["active_ui_profile"] = resolve_frontend_profile_id(None)
+        app_config.save_config()
+
+    return APIResponseSuccess(
+        message=f"Removed community UI {removed_profile['name']}",
+        data={
+            "removed_profile_id": removed_profile["id"],
+            "active_profile_id": resolve_frontend_profile_id(app_config["active_ui_profile"]),
+            "reload_required": True,
+        },
+    )
 
 
 @router.get("/scripts")

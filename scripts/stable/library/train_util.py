@@ -60,7 +60,7 @@ from diffusers import (
     KDPM2AncestralDiscreteScheduler,
     AutoencoderKL,
 )
-from library import custom_train_functions, sd3_utils
+from library import anima_caption_util, custom_train_functions, sd3_utils
 from library.original_unet import UNet2DConditionModel
 from huggingface_hub import hf_hub_download
 import numpy as np
@@ -834,6 +834,15 @@ class BaseDataset(torch.utils.data.Dataset):
         frequency_for_dir = self.tag_frequency.get(dir_name, {})
         self.tag_frequency[dir_name] = frequency_for_dir
         for caption in captions:
+            payload = anima_caption_util.decode_special_caption_payload(caption)
+            if payload is not None:
+                caption = anima_caption_util.build_caption_from_payload(
+                    payload,
+                    shuffle_appearance=False,
+                    shuffle_tags=False,
+                    shuffle_environment=False,
+                    tag_dropout=0.0,
+                )
             for tag in caption.split(","):
                 tag = tag.strip()
                 if tag:
@@ -852,6 +861,17 @@ class BaseDataset(torch.utils.data.Dataset):
         self.replacements[str_from] = str_to
 
     def process_caption(self, subset: BaseSubset, caption):
+        structured_caption_payload = anima_caption_util.decode_special_caption_payload(caption)
+        structured_caption_rendered = structured_caption_payload is not None
+        if structured_caption_payload is not None:
+            caption = anima_caption_util.build_caption_from_payload(
+                structured_caption_payload,
+                shuffle_appearance=subset.shuffle_caption,
+                shuffle_tags=subset.shuffle_caption,
+                shuffle_environment=subset.shuffle_caption,
+                tag_dropout=subset.caption_tag_dropout_rate,
+            )
+
         # caption に prefix/suffix を付ける
         if subset.caption_prefix:
             caption = subset.caption_prefix + " " + caption
@@ -897,7 +917,9 @@ class BaseDataset(torch.utils.data.Dataset):
                 # if caption is multiline, use the first line
                 caption = caption.split("\n")[0]
 
-            if subset.shuffle_caption or subset.token_warmup_step > 0 or subset.caption_tag_dropout_rate > 0:
+            if not structured_caption_rendered and (
+                subset.shuffle_caption or subset.token_warmup_step > 0 or subset.caption_tag_dropout_rate > 0
+            ):
                 fixed_tokens = []
                 flex_tokens = []
                 fixed_suffix_tokens = []
@@ -1999,14 +2021,32 @@ class DreamBoothDataset(BaseDataset):
             self.bucket_reso_steps = None  # この情報は使われない
             self.bucket_no_upscale = False
 
-        def read_caption(img_path, caption_extension, enable_wildcard):
+        def read_caption(img_path, subset: DreamBoothSubset):
             # captionの候補ファイル名を作る
             base_name = os.path.splitext(img_path)[0]
             base_name_face_det = base_name
             tokens = base_name.split("_")
             if len(tokens) >= 5:
                 base_name_face_det = "_".join(tokens[:-4])
+
+            custom_attributes = subset.custom_attributes if isinstance(subset.custom_attributes, dict) else {}
+            prefer_json_caption = custom_attributes.get("prefer_json_caption", custom_attributes.get("prefer_json", False))
+            if isinstance(prefer_json_caption, str):
+                prefer_json_caption = prefer_json_caption.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                prefer_json_caption = bool(prefer_json_caption)
+
+            caption_extension = subset.caption_extension
             cap_paths = [base_name + caption_extension, base_name_face_det + caption_extension]
+
+            if prefer_json_caption or str(caption_extension).lower() == ".json":
+                json_paths = [base_name + ".json", base_name_face_det + ".json"]
+                for json_path in json_paths:
+                    if not os.path.isfile(json_path):
+                        continue
+                    special_caption = anima_caption_util.load_special_caption_from_json_path(json_path)
+                    if special_caption is not None:
+                        return special_caption
 
             caption = None
             for cap_path in cap_paths:
@@ -2020,7 +2060,7 @@ class DreamBoothDataset(BaseDataset):
                             )
                             raise e
                         assert len(lines) > 0, f"caption file is empty / キャプションファイルが空です: {cap_path} / caption 文件为空: {cap_path}"
-                        if enable_wildcard:
+                        if subset.enable_wildcard:
                             caption = "\n".join([line.strip() for line in lines if line.strip() != ""])  # 空行を除く、改行で連結
                         else:
                             caption = lines[0].strip()
@@ -2125,7 +2165,7 @@ class DreamBoothDataset(BaseDataset):
                 captions = []
                 missing_captions = []
                 for img_path in tqdm(img_paths, desc="read caption"):
-                    cap_for_img = read_caption(img_path, subset.caption_extension, subset.enable_wildcard)
+                    cap_for_img = read_caption(img_path, subset)
                     if cap_for_img is None and subset.class_tokens is None:
                         logger.warning(
                             f"neither caption file nor class tokens are found. use empty caption for {img_path} / キャプションファイルもclass tokenも見つかりませんでした。空のキャプションを使用します: {img_path} / 未找到 caption 文件和 class token，将使用空 caption: {img_path}"
@@ -4131,6 +4171,12 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="enable logging and output TensorBoard log to this directory / ログ出力を有効にしてこのディレクトリにTensorBoard用のログを出力する",
     )
     parser.add_argument(
+        "--logging_run_dir",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--log_with",
         type=str,
         default=None,
@@ -4438,6 +4484,7 @@ def get_sanitized_config_or_none(args: argparse.Namespace):
         "reg_data_dir",
         "output_dir",
         "logging_dir",
+        "logging_run_dir",
     ]
     filtered_args = {}
     for k, v in vars(args).items():
@@ -4479,6 +4526,7 @@ def verify_command_line_training_args(args: argparse.Namespace):
         "reg_data_dir",
         "output_dir",
         "logging_dir",
+        "logging_run_dir",
     ]
 
     for arg in sensitive_args:
@@ -4862,6 +4910,10 @@ def read_config_from_file(args: argparse.Namespace, parser: argparse.ArgumentPar
     for section_name, section_dict in config_dict.items():
         # if value is not dict, save key and value as is
         if not isinstance(section_dict, dict):
+            ignore_nesting_dict[section_name] = section_dict
+            continue
+
+        if section_name == "custom_attributes":
             ignore_nesting_dict[section_name] = section_dict
             continue
 
@@ -5550,7 +5602,10 @@ def prepare_accelerator(args: argparse.Namespace):
     this function also prepares deepspeed plugin
     """
 
-    if args.logging_dir is None:
+    fixed_logging_dir = getattr(args, "logging_run_dir", None)
+    if fixed_logging_dir is not None and str(fixed_logging_dir).strip() != "":
+        logging_dir = str(fixed_logging_dir).strip()
+    elif args.logging_dir is None:
         logging_dir = None
     else:
         log_prefix = "" if args.log_prefix is None else args.log_prefix

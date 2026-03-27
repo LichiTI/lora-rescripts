@@ -17,7 +17,7 @@ Schema.intersect([
 
     Schema.object({
         max_train_epochs: Schema.number().min(1).default(10).description("最大训练 epoch（轮数）"),
-        train_batch_size: Schema.number().min(1).default(1).description("批量大小"),
+        train_batch_size: Schema.number().min(1).default(1).description("批量大小。单卡/单进程时就是实际 batch；多卡/分布式时按全局 batch 解释，启动时会自动换算成每卡。"),
     }).description("训练相关参数"),
 
     Schema.intersect([

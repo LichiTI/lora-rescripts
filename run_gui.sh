@@ -12,9 +12,31 @@ portable_python="$script_dir/python/bin/python"
 venv_python="$script_dir/venv/bin/python"
 portable_marker="$script_dir/python/.deps_installed"
 venv_marker="$script_dir/venv/.deps_installed"
+sage_runtime_dir_name="python-sageattention"
+if [[ ! -d "$script_dir/$sage_runtime_dir_name" && -d "$script_dir/python_sageattention" ]]; then
+    sage_runtime_dir_name="python_sageattention"
+fi
+sage_runtime_dir="$script_dir/$sage_runtime_dir_name"
+sage_python="$sage_runtime_dir/bin/python"
+sage_marker="$sage_runtime_dir/.deps_installed"
+sage2_runtime_dir_name="python-sageattention-latest"
+if [[ ! -d "$script_dir/$sage2_runtime_dir_name" && -d "$script_dir/python_sageattention_latest" ]]; then
+    sage2_runtime_dir_name="python_sageattention_latest"
+fi
+sage2_runtime_dir="$script_dir/$sage2_runtime_dir_name"
+sage2_python="$sage2_runtime_dir/bin/python"
+sage2_marker="$sage2_runtime_dir/.deps_installed"
 tageditor_portable_python="$script_dir/python_tageditor/bin/python"
 tageditor_venv_python="$script_dir/venv-tageditor/bin/python"
 allow_external_python="${MIKAZUKI_ALLOW_SYSTEM_PYTHON:-0}"
+preferred_runtime="${MIKAZUKI_PREFERRED_RUNTIME:-}"
+prefer_sageattention_runtime=0
+prefer_sageattention2_runtime=0
+if [[ "$preferred_runtime" == "sageattention" ]]; then
+    prefer_sageattention_runtime=1
+elif [[ "$preferred_runtime" == "sageattention2" ]]; then
+    prefer_sageattention2_runtime=1
+fi
 main_modules=(accelerate torch fastapi toml transformers diffusers lion_pytorch dadaptation schedulefree prodigyopt prodigyplus pytorch_optimizer)
 
 python_exe=""
@@ -22,6 +44,7 @@ deps_marker=""
 tageditor_python=""
 tageditor_marker=""
 disable_tageditor=0
+runtime_name="standard"
 
 find_system_python() {
     if [[ -n "${PYTHON:-}" ]]; then
@@ -52,6 +75,44 @@ find_system_python() {
 test_pip_ready() {
     local python_bin="$1"
     "$python_bin" -m pip --version >/dev/null 2>&1
+}
+
+test_sageattention_runtime_ready() {
+    local python_bin="$1"
+
+    "$python_bin" -c "import importlib.metadata as md; import torch
+try:
+    import triton  # noqa: F401
+    from sageattention import sageattn, sageattn_varlen
+    ok = callable(sageattn) and callable(sageattn_varlen) and torch.cuda.is_available()
+except Exception:
+    ok = False
+raise SystemExit(0 if ok else 1)" >/dev/null 2>&1
+}
+
+set_dedicated_runtime_caches() {
+    local current_runtime_name="$1"
+    local python_bin="$2"
+
+    if [[ "$current_runtime_name" != "sageattention" && "$current_runtime_name" != "sageattention2" ]]; then
+        return 0
+    fi
+
+    local runtime_root
+    runtime_root="$(cd "$(dirname "$python_bin")/.." >/dev/null 2>&1 && pwd)"
+    local cache_root="$runtime_root/.cache"
+    local triton_cache_dir="${TRITON_CACHE_DIR:-$cache_root/triton}"
+    local torchinductor_cache_dir="${TORCHINDUCTOR_CACHE_DIR:-$cache_root/torchinductor}"
+
+    mkdir -p "$cache_root" "$triton_cache_dir" "$torchinductor_cache_dir"
+
+    export TRITON_CACHE_DIR="$triton_cache_dir"
+    export TORCHINDUCTOR_CACHE_DIR="$torchinductor_cache_dir"
+    export TRITON_HOME="${TRITON_HOME:-$cache_root}"
+
+    echo "Persistent compile cache enabled for $current_runtime_name runtime:"
+    echo "- TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
+    echo "- TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR"
 }
 
 test_modules_ready() {
@@ -98,6 +159,60 @@ get_python_minor_version() {
 }
 
 select_main_python() {
+    if [[ "$prefer_sageattention_runtime" -eq 1 ]]; then
+        if [[ -x "$sage_python" ]]; then
+            echo "Using SageAttention experimental Python..."
+            if ! test_pip_ready "$sage_python"; then
+                echo "SageAttention runtime is incomplete: pip is not available. Repair or recreate ./$sage_runtime_dir_name first." >&2
+                exit 1
+            fi
+            python_exe="$sage_python"
+            deps_marker="$sage_marker"
+            runtime_name="sageattention"
+            return 0
+        fi
+
+        echo "SageAttention startup was requested, but the dedicated runtime is missing. Running install_sageattention.sh..." >&2
+        bash "$script_dir/install_sageattention.sh"
+        if [[ -x "$sage_python" ]] && test_pip_ready "$sage_python"; then
+            echo "Using SageAttention experimental Python..."
+            python_exe="$sage_python"
+            deps_marker="$sage_marker"
+            runtime_name="sageattention"
+            return 0
+        fi
+
+        echo "SageAttention runtime bootstrap failed. Expected: $sage_python" >&2
+        exit 1
+    fi
+
+    if [[ "$prefer_sageattention2_runtime" -eq 1 ]]; then
+        if [[ -x "$sage2_python" ]]; then
+            echo "Using SageAttention2 experimental Python..."
+            if ! test_pip_ready "$sage2_python"; then
+                echo "SageAttention2 runtime is incomplete: pip is not available. Repair or recreate ./$sage2_runtime_dir_name first." >&2
+                exit 1
+            fi
+            python_exe="$sage2_python"
+            deps_marker="$sage2_marker"
+            runtime_name="sageattention2"
+            return 0
+        fi
+
+        echo "SageAttention2 startup was requested, but the dedicated runtime is missing or incomplete. Running install_sageattention2.sh..." >&2
+        bash "$script_dir/install_sageattention2.sh"
+        if [[ -x "$sage2_python" ]] && test_pip_ready "$sage2_python"; then
+            echo "Using SageAttention2 experimental Python..."
+            python_exe="$sage2_python"
+            deps_marker="$sage2_marker"
+            runtime_name="sageattention2"
+            return 0
+        fi
+
+        echo "SageAttention2 runtime bootstrap failed. Expected: $sage2_python" >&2
+        exit 1
+    fi
+
     if [[ -x "$portable_python" ]]; then
         echo "Using portable Python..."
         if ! test_pip_ready "$portable_python"; then
@@ -106,6 +221,7 @@ select_main_python() {
         fi
         python_exe="$portable_python"
         deps_marker="$portable_marker"
+        runtime_name="portable"
         return 0
     fi
 
@@ -113,6 +229,7 @@ select_main_python() {
         echo "Using virtual environment..."
         python_exe="$venv_python"
         deps_marker="$venv_marker"
+        runtime_name="venv"
         return 0
     fi
 
@@ -122,11 +239,13 @@ select_main_python() {
         if [[ -x "$portable_python" ]]; then
             python_exe="$portable_python"
             deps_marker="$portable_marker"
+            runtime_name="portable"
             return 0
         fi
         if [[ -x "$venv_python" ]]; then
             python_exe="$venv_python"
             deps_marker="$venv_marker"
+            runtime_name="venv"
             return 0
         fi
         echo "install.bash finished, but no project-local Python environment was created." >&2
@@ -185,6 +304,7 @@ for arg in "$@"; do
 done
 
 select_main_python
+set_dedicated_runtime_caches "$runtime_name" "$python_exe"
 
 main_install_needed=0
 
@@ -196,16 +316,33 @@ if [[ "$main_install_needed" -eq 0 && -n "$deps_marker" && ! -f "$deps_marker" ]
     main_install_needed=1
 fi
 
+if [[ "$main_install_needed" -eq 0 && ( "$runtime_name" == "sageattention" || "$runtime_name" == "sageattention2" ) ]] && ! test_sageattention_runtime_ready "$python_exe"; then
+    main_install_needed=1
+fi
+
 if [[ "$main_install_needed" -eq 1 ]]; then
-    echo "Dependencies are not installed yet. Running install.bash..."
-    bash "$script_dir/install.bash"
+    if [[ "$runtime_name" == "sageattention" || "$prefer_sageattention_runtime" -eq 1 ]]; then
+        echo "SageAttention experimental dependencies are not installed yet. Running install_sageattention.sh..."
+        bash "$script_dir/install_sageattention.sh"
+    elif [[ "$runtime_name" == "sageattention2" || "$prefer_sageattention2_runtime" -eq 1 ]]; then
+        echo "SageAttention2 experimental dependencies are not installed yet. Running install_sageattention2.sh..."
+        bash "$script_dir/install_sageattention2.sh"
+    else
+        echo "Dependencies are not installed yet. Running install.bash..."
+        bash "$script_dir/install.bash"
+    fi
     select_main_python
+    set_dedicated_runtime_caches "$runtime_name" "$python_exe"
     if ! test_modules_ready "$python_exe" "${main_modules[@]}"; then
         echo "Dependency installation failed." >&2
         exit 1
     fi
     if [[ -n "$deps_marker" && ! -f "$deps_marker" ]]; then
         echo "Dependency installation failed." >&2
+        exit 1
+    fi
+    if [[ ( "$runtime_name" == "sageattention" || "$runtime_name" == "sageattention2" ) ]] && ! test_sageattention_runtime_ready "$python_exe"; then
+        echo "SageAttention dependency installation failed." >&2
         exit 1
     fi
 fi

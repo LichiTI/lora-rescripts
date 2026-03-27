@@ -4029,6 +4029,12 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="enable logging and output TensorBoard log to this directory / ログ出力を有効にしてこのディレクトリにTensorBoard用のログを出力する",
     )
     parser.add_argument(
+        "--logging_run_dir",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--log_with",
         type=str,
         default=None,
@@ -4332,6 +4338,7 @@ def get_sanitized_config_or_none(args: argparse.Namespace):
         "reg_data_dir",
         "output_dir",
         "logging_dir",
+        "logging_run_dir",
     ]
     filtered_args = {}
     for k, v in vars(args).items():
@@ -4373,6 +4380,7 @@ def verify_command_line_training_args(args: argparse.Namespace):
         "reg_data_dir",
         "output_dir",
         "logging_dir",
+        "logging_run_dir",
     ]
 
     for arg in sensitive_args:
@@ -5434,7 +5442,10 @@ def prepare_accelerator(args: argparse.Namespace):
     this function also prepares deepspeed plugin
     """
 
-    if args.logging_dir is None:
+    fixed_logging_dir = getattr(args, "logging_run_dir", None)
+    if fixed_logging_dir is not None and str(fixed_logging_dir).strip() != "":
+        logging_dir = str(fixed_logging_dir).strip()
+    elif args.logging_dir is None:
         logging_dir = None
     else:
         log_prefix = "" if args.log_prefix is None else args.log_prefix

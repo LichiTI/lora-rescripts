@@ -9,6 +9,10 @@ $sageAttentionRuntimeDirName = if (Test-Path (Join-Path $repoRoot "python-sageat
 $sageAttentionRuntimeDir = Join-Path $repoRoot $sageAttentionRuntimeDirName
 $sageAttentionPython = Join-Path $sageAttentionRuntimeDir "python.exe"
 $sageAttentionDepsMarker = Join-Path $sageAttentionRuntimeDir ".deps_installed"
+$sageAttention2RuntimeDirName = if (Test-Path (Join-Path $repoRoot "python-sageattention-latest")) { "python-sageattention-latest" } else { "python_sageattention_latest" }
+$sageAttention2RuntimeDir = Join-Path $repoRoot $sageAttention2RuntimeDirName
+$sageAttention2Python = Join-Path $sageAttention2RuntimeDir "python.exe"
+$sageAttention2DepsMarker = Join-Path $sageAttention2RuntimeDir ".deps_installed"
 $sageAttentionBlackwellRuntimeDirName = if (Test-Path (Join-Path $repoRoot "python-sageattention-blackwell")) { "python-sageattention-blackwell" } else { "python_sageattention_blackwell" }
 $sageAttentionBlackwellRuntimeDir = Join-Path $repoRoot $sageAttentionBlackwellRuntimeDirName
 $sageAttentionBlackwellPython = Join-Path $sageAttentionBlackwellRuntimeDir "python.exe"
@@ -22,14 +26,16 @@ $venvTagEditorPython = Join-Path $repoRoot "venv-tageditor\Scripts\python.exe"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 $preferBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "blackwell"
 $preferSageAttentionRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention"
+$preferSageAttention2Runtime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention2"
 $preferSageAttentionBlackwellRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "sageattention-blackwell"
 $mainRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 $blackwellPreferredProfile = "czmahi-20250502"
 $sageAttentionPreferredProfile = "triton-v1"
+$sageAttention2PreferredProfile = "triton-v2"
 $sageAttentionBlackwellPreferredProfile = "triton-v1"
 
-if ((@($preferBlackwellRuntime, $preferSageAttentionRuntime, $preferSageAttentionBlackwellRuntime) | Where-Object { $_ }).Count -gt 1) {
-    throw "Only one dedicated runtime can be preferred at a time. Clear MIKAZUKI_PREFERRED_RUNTIME or choose blackwell / sageattention / sageattention-blackwell."
+if ((@($preferBlackwellRuntime, $preferSageAttentionRuntime, $preferSageAttention2Runtime, $preferSageAttentionBlackwellRuntime) | Where-Object { $_ }).Count -gt 1) {
+    throw "Only one dedicated runtime can be preferred at a time. Clear MIKAZUKI_PREFERRED_RUNTIME or choose blackwell / sageattention / sageattention2 / sageattention-blackwell."
 }
 
 function Test-PipReady {
@@ -139,7 +145,7 @@ function Set-DedicatedRuntimeCaches {
         [string]$PythonExe
     )
 
-    if ($RuntimeName -notin @("blackwell", "sageattention", "sageattention-blackwell")) {
+    if ($RuntimeName -notin @("blackwell", "sageattention", "sageattention2", "sageattention-blackwell")) {
         return
     }
 
@@ -220,6 +226,15 @@ function Get-SageAttentionExpectedPackageVersions {
                 TorchVision = "0.25.0+cu128"
                 SageAttention = ""
                 Triton = ""
+            }
+        }
+        "triton-v2" {
+            return @{
+                PythonMinor = "3.12"
+                Torch = "2.10.0+cu128"
+                TorchVision = "0.25.0+cu128"
+                SageAttention = "2.2.0"
+                Triton = "3.5.1.post24"
             }
         }
         default {
@@ -476,12 +491,13 @@ function Test-SageAttentionRuntimeReady {
     param (
         [string]$PythonExe,
         [hashtable]$Expected,
+        [string]$RuntimeDirName = $sageAttentionRuntimeDirName,
         [ref]$Message
     )
 
     $probe = Get-SageAttentionRuntimeProbe -PythonExe $PythonExe
     if (-not $probe) {
-        $Message.Value = "could not probe $sageAttentionRuntimeDirName runtime details"
+        $Message.Value = "could not probe $RuntimeDirName runtime details"
         return $false
     }
 
@@ -551,6 +567,19 @@ Recommended fix:
 "@
     }
 
+    if ($preferSageAttention2Runtime -and -not (Test-Path $sageAttention2Python)) {
+        throw @"
+SageAttention2 startup was requested, but the dedicated runtime is missing.
+
+Expected:
+- $sageAttention2Python
+
+Recommended fix:
+1. Extract a Python 3.12 embeddable package into .\$sageAttention2RuntimeDirName
+2. Run run_For_SageAttention2_Experimental.bat again
+"@
+    }
+
     if ($preferSageAttentionBlackwellRuntime -and -not (Test-Path $sageAttentionBlackwellPython)) {
         throw @"
 Blackwell SageAttention startup was requested, but the dedicated runtime is missing.
@@ -593,6 +622,22 @@ Recommended fix:
             PythonExe = $sageAttentionPython
             DepsMarker = $sageAttentionDepsMarker
             Runtime = "sageattention"
+        }
+    }
+
+    if ($preferSageAttention2Runtime -and (Test-Path $sageAttention2Python)) {
+        Write-Host -ForegroundColor Green "Using SageAttention2 experimental Python..."
+        if (-not (Test-PipReady -PythonExe $sageAttention2Python)) {
+            Write-Host -ForegroundColor Yellow "$sageAttention2RuntimeDirName is not initialized yet. Running setup_embeddable_python.bat..."
+            & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $sageAttention2RuntimeDirName
+            if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $sageAttention2Python)) {
+                throw "SageAttention2 experimental Python is incomplete: pip is not available."
+            }
+        }
+        return @{
+            PythonExe = $sageAttention2Python
+            DepsMarker = $sageAttention2DepsMarker
+            Runtime = "sageattention2"
         }
     }
 
@@ -682,6 +727,7 @@ Developer override:
 
 $blackwellExpectedPackages = Get-BlackwellExpectedPackageVersions -Profile $blackwellPreferredProfile
 $sageAttentionExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $sageAttentionPreferredProfile
+$sageAttention2ExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $sageAttention2PreferredProfile
 $sageAttentionBlackwellExpectedPackages = Get-SageAttentionExpectedPackageVersions -Profile $sageAttentionBlackwellPreferredProfile
 $mainPython = Get-MainPythonSelection
 $pythonExe = $mainPython.PythonExe
@@ -700,13 +746,19 @@ if ($runtimeName -eq "blackwell") {
     }
 }
 elseif ($runtimeName -eq "sageattention") {
-    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionExpectedPackages -RuntimeDirName $sageAttentionRuntimeDirName -Message ([ref]$sageAttentionRuntimeMessage)
     if (-not $sageAttentionRuntimeReady -and $sageAttentionRuntimeMessage) {
         Write-Host -ForegroundColor Yellow "SageAttention runtime is not ready yet: $sageAttentionRuntimeMessage"
     }
 }
+elseif ($runtimeName -eq "sageattention2") {
+    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttention2ExpectedPackages -RuntimeDirName $sageAttention2RuntimeDirName -Message ([ref]$sageAttentionRuntimeMessage)
+    if (-not $sageAttentionRuntimeReady -and $sageAttentionRuntimeMessage) {
+        Write-Host -ForegroundColor Yellow "SageAttention2 runtime is not ready yet: $sageAttentionRuntimeMessage"
+    }
+}
 elseif ($runtimeName -eq "sageattention-blackwell") {
-    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionBlackwellExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+    $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionBlackwellExpectedPackages -RuntimeDirName $sageAttentionBlackwellRuntimeDirName -Message ([ref]$sageAttentionRuntimeMessage)
     if (-not $sageAttentionRuntimeReady -and $sageAttentionRuntimeMessage) {
         Write-Host -ForegroundColor Yellow "Blackwell SageAttention runtime is not ready yet: $sageAttentionRuntimeMessage"
     }
@@ -719,6 +771,10 @@ if (-not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellX
     elseif ($runtimeName -eq "sageattention") {
         Write-Host -ForegroundColor Yellow "SageAttention experimental dependencies are not installed yet. Running install_sageattention.ps1..."
         & (Join-Path $repoRoot "install_sageattention.ps1") -Profile $sageAttentionPreferredProfile -RuntimeTarget general
+    }
+    elseif ($runtimeName -eq "sageattention2") {
+        Write-Host -ForegroundColor Yellow "SageAttention2 experimental dependencies are not installed yet. Running install_sageattention2.ps1..."
+        & (Join-Path $repoRoot "install_sageattention2.ps1")
     }
     elseif ($runtimeName -eq "sageattention-blackwell") {
         Write-Host -ForegroundColor Yellow "Blackwell SageAttention experimental dependencies are not installed yet. Running install_sageattention.ps1..."
@@ -742,16 +798,19 @@ if (-not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellX
         $blackwellXformersReady = Test-BlackwellRuntimeReady -PythonExe $pythonExe -Expected $blackwellExpectedPackages -Message ([ref]$blackwellRuntimeMessage)
     }
     elseif ($runtimeName -eq "sageattention") {
-        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionExpectedPackages -RuntimeDirName $sageAttentionRuntimeDirName -Message ([ref]$sageAttentionRuntimeMessage)
+    }
+    elseif ($runtimeName -eq "sageattention2") {
+        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttention2ExpectedPackages -RuntimeDirName $sageAttention2RuntimeDirName -Message ([ref]$sageAttentionRuntimeMessage)
     }
     elseif ($runtimeName -eq "sageattention-blackwell") {
-        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionBlackwellExpectedPackages -Message ([ref]$sageAttentionRuntimeMessage)
+        $sageAttentionRuntimeReady = Test-SageAttentionRuntimeReady -PythonExe $pythonExe -Expected $sageAttentionBlackwellExpectedPackages -RuntimeDirName $sageAttentionBlackwellRuntimeDirName -Message ([ref]$sageAttentionRuntimeMessage)
     }
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $depsMarker) -or -not $mainModulesReady -or -not $blackwellXformersReady -or -not $sageAttentionRuntimeReady) {
         if ($runtimeName -eq "blackwell" -and $blackwellRuntimeMessage) {
             throw "Dependency installation failed. Blackwell runtime is still not ready: $blackwellRuntimeMessage"
         }
-        if ($runtimeName -in @("sageattention", "sageattention-blackwell") -and $sageAttentionRuntimeMessage) {
+        if ($runtimeName -in @("sageattention", "sageattention2", "sageattention-blackwell") -and $sageAttentionRuntimeMessage) {
             throw "Dependency installation failed. SageAttention runtime is still not ready: $sageAttentionRuntimeMessage"
         }
         throw "Dependency installation failed."
@@ -763,6 +822,9 @@ if ($runtimeName -eq "blackwell" -and $blackwellRuntimeMessage) {
 }
 elseif ($runtimeName -eq "sageattention" -and $sageAttentionRuntimeMessage) {
     Write-Host -ForegroundColor Green "SageAttention runtime check passed: $sageAttentionRuntimeMessage"
+}
+elseif ($runtimeName -eq "sageattention2" -and $sageAttentionRuntimeMessage) {
+    Write-Host -ForegroundColor Green "SageAttention2 runtime check passed: $sageAttentionRuntimeMessage"
 }
 elseif ($runtimeName -eq "sageattention-blackwell" -and $sageAttentionRuntimeMessage) {
     Write-Host -ForegroundColor Green "Blackwell SageAttention runtime check passed: $sageAttentionRuntimeMessage"
@@ -780,7 +842,10 @@ if ($Env:MIKAZUKI_BLACKWELL_STARTUP -eq "1") {
 }
 
 if ($Env:MIKAZUKI_SAGEATTENTION_STARTUP -eq "1") {
-    if ($runtimeName -eq "sageattention-blackwell") {
+    if ($Env:MIKAZUKI_SAGEATTENTION2_STARTUP -eq "1" -or $runtimeName -eq "sageattention2") {
+        Write-Host -ForegroundColor Yellow "SageAttention2 startup mode enabled. This runtime prepares the dedicated SageAttention 2.x environment; enable sageattn manually on supported routes."
+    }
+    elseif ($runtimeName -eq "sageattention-blackwell") {
         Write-Host -ForegroundColor Yellow "Blackwell SageAttention startup mode enabled. This runtime prepares the dedicated Blackwell SageAttention environment; enable sageattn manually on supported routes."
     }
     else {
@@ -802,7 +867,7 @@ if (-not ($args -contains "--disable-tageditor")) {
     }
     else {
         $fallbackMainPython = $null
-        if ($runtimeName -in @("blackwell", "sageattention", "sageattention-blackwell")) {
+        if ($runtimeName -in @("blackwell", "sageattention", "sageattention2", "sageattention-blackwell")) {
             if (Test-Path $portablePython) {
                 $fallbackMainPython = $portablePython
                 $tagEditorMarker = Join-Path $repoRoot "python\.tageditor_installed"
