@@ -267,6 +267,8 @@ def train(args):
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
+    train_util.apply_opt_channels_last(args, ("U-Net", unet), ("VAE", vae))
+
     # 学習を準備する
     if cache_latents:
         vae.to(accelerator.device, dtype=vae_dtype)
@@ -519,6 +521,15 @@ def train(args):
 
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(
+        args,
+        [
+            *([("unet", accelerator.unwrap_model(unet))] if train_unet else []),
+            *([("text_encoder1", accelerator.unwrap_model(text_encoder1))] if train_text_encoder1 else []),
+            *([("text_encoder2", accelerator.unwrap_model(text_encoder2))] if train_text_encoder2 else []),
+        ],
+    )
 
     if args.fused_backward_pass:
         # use fused optimizer for backward pass: other optimizers will be supported in the future
@@ -699,6 +710,7 @@ def train(args):
                 noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
 
                 noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype
+                noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
                 # Predict the noise residual
                 with accelerator.autocast():
@@ -737,6 +749,17 @@ def train(args):
                 else:
                     loss = train_util.conditional_loss(noise_pred.float(), target.float(), args.loss_type, "mean", huber_c)
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 accelerator.backward(loss)
 
                 if not (args.fused_backward_pass or args.fused_optimizer_groups):
@@ -760,6 +783,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 sdxl_train_util.sample_images(
                     accelerator,
@@ -778,7 +803,9 @@ def train(args):
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                        sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                        train_util.call_with_ema(
+                            ema_model,
+                            sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise,
                             args,
                             False,
                             accelerator,
@@ -797,7 +824,8 @@ def train(args):
                             ckpt_info,
                         )
 
-            current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
                 if block_lrs is None:
@@ -824,7 +852,9 @@ def train(args):
         if args.save_every_n_epochs is not None:
             if accelerator.is_main_process:
                 src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise(
+                train_util.call_with_ema(
+                    ema_model,
+                    sdxl_train_util.save_sd_model_on_epoch_end_or_stepwise,
                     args,
                     True,
                     accelerator,
@@ -870,7 +900,9 @@ def train(args):
 
     if is_main_process:
         src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-        sdxl_train_util.save_sd_model_on_train_end(
+        train_util.call_with_ema(
+            ema_model,
+            sdxl_train_util.save_sd_model_on_train_end,
             args,
             src_path,
             save_stable_diffusion_format,

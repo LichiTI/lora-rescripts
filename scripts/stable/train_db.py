@@ -151,6 +151,7 @@ def train(args):
 
     # モデルに xformers とか memory efficient attention を組み込む
     train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
+    train_util.apply_opt_channels_last(args, ("U-Net", unet), ("VAE", vae))
 
     # 学習を準備する
     if cache_latents:
@@ -272,6 +273,14 @@ def train(args):
 
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(
+        args,
+        [
+            ("unet", accelerator.unwrap_model(unet)),
+            *((("text_encoder", accelerator.unwrap_model(text_encoder)),) if train_text_encoder else ()),
+        ],
+    )
 
     # epoch数を計算する
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -373,6 +382,7 @@ def train(args):
                 # Sample noise, sample a random timestep for each image, and add noise to the latents,
                 # with noise offset and/or multires noise if specified
                 noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+                noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
                 # Predict the noise residual
                 with accelerator.autocast():
@@ -402,6 +412,17 @@ def train(args):
 
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 accelerator.backward(loss)
                 if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                     if train_text_encoder:
@@ -418,6 +439,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 train_util.sample_images(
                     accelerator, args, None, global_step, accelerator.device, vae, tokenize_strategy.tokenizer, text_encoder, unet
@@ -428,7 +451,9 @@ def train(args):
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                        train_util.save_sd_model_on_epoch_end_or_stepwise(
+                        train_util.call_with_ema(
+                            ema_model,
+                            train_util.save_sd_model_on_epoch_end_or_stepwise,
                             args,
                             False,
                             accelerator,
@@ -444,7 +469,8 @@ def train(args):
                             vae,
                         )
 
-            current_loss = loss.detach().item()
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
                 train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
@@ -468,7 +494,9 @@ def train(args):
             if accelerator.is_main_process:
                 # checking for saving is in util
                 src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                train_util.save_sd_model_on_epoch_end_or_stepwise(
+                train_util.call_with_ema(
+                    ema_model,
+                    train_util.save_sd_model_on_epoch_end_or_stepwise,
                     args,
                     True,
                     accelerator,
@@ -502,8 +530,19 @@ def train(args):
 
     if is_main_process:
         src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-        train_util.save_sd_model_on_train_end(
-            args, src_path, save_stable_diffusion_format, use_safetensors, save_dtype, epoch, global_step, text_encoder, unet, vae
+        train_util.call_with_ema(
+            ema_model,
+            train_util.save_sd_model_on_train_end,
+            args,
+            src_path,
+            save_stable_diffusion_format,
+            use_safetensors,
+            save_dtype,
+            epoch,
+            global_step,
+            text_encoder,
+            unet,
+            vae,
         )
         logger.info("model saved.")
 

@@ -247,6 +247,8 @@ def train(args):
         unet.set_use_sdpa(True)
         control_net.set_use_sdpa(True)
 
+    train_util.apply_opt_channels_last(args, ("U-Net", unet), ("ControlNet", control_net), ("VAE", vae))
+
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         control_net.enable_gradient_checkpointing()
@@ -369,6 +371,8 @@ def train(args):
 
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(args, [("sdxl_controlnet", control_net)])
 
     # epoch数を計算する
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -423,7 +427,11 @@ def train(args):
         accelerator.print(f"\nsaving checkpoint: {ckpt_file}")
         sai_metadata = train_util.get_sai_model_spec(None, args, True, True, False)
         sai_metadata["modelspec.architecture"] = sai_model_spec.ARCH_SD_XL_V1_BASE + "/controlnet"
-        state_dict = model.state_dict()
+        if ema_model is not None:
+            with ema_model.apply_to_models():
+                state_dict = model.state_dict()
+        else:
+            state_dict = model.state_dict()
 
         if save_dtype is not None:
             for key in list(state_dict.keys()):
@@ -517,11 +525,13 @@ def train(args):
                 # Sample noise, sample a random timestep for each image, and add noise to the latents,
                 # with noise offset and/or multires noise if specified
                 noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+                noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
                 controlnet_image = batch["conditioning_images"].to(dtype=weight_dtype)
 
                 # '-1 to +1' to '0 to 1'
                 controlnet_image = (controlnet_image + 1) / 2
+                controlnet_image = train_util.maybe_apply_channels_last_to_tensor(args, controlnet_image)
 
                 with accelerator.autocast():
                     input_resi_add, mid_add = control_net(
@@ -553,6 +563,17 @@ def train(args):
 
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 accelerator.backward(loss)
                 if not args.fused_backward_pass:
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:
@@ -570,6 +591,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 sdxl_train_util.sample_images(
                     accelerator,
@@ -599,7 +622,8 @@ def train(args):
                             remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                             remove_model(remove_ckpt_name)
 
-            current_loss = loss.detach().item()
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
             avr_loss: float = loss_recorder.moving_average
             logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}

@@ -370,6 +370,8 @@ def train(args):
 
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(args, [("text_encoder_xti", accelerator.unwrap_model(text_encoder))])
 
     # epoch数を計算する
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -420,7 +422,12 @@ def train(args):
 
         logger.info("")
         logger.info(f"saving checkpoint: {ckpt_file}")
-        save_weights(ckpt_file, embs, save_dtype)
+        if ema_model is not None:
+            with ema_model.apply_to_models():
+                ema_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[token_ids_XTI].data.detach().clone()
+                save_weights(ckpt_file, ema_embs, save_dtype)
+        else:
+            save_weights(ckpt_file, embs, save_dtype)
         if args.huggingface_repo_id is not None:
             huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -494,6 +501,17 @@ def train(args):
 
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 accelerator.backward(loss)
                 if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                     params_to_clip = text_encoder.get_input_embeddings().parameters()
@@ -513,6 +531,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
                 # TODO: fix sample_images
                 # train_util.sample_images(
                 #     accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
@@ -541,7 +561,8 @@ def train(args):
                             remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                             remove_model(remove_ckpt_name)
 
-            current_loss = loss.detach().item()
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
                 if (

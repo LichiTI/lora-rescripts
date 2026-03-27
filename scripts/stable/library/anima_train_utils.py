@@ -144,6 +144,25 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
     )
 
 
+def resolve_required_anima_vae_path(args: argparse.Namespace, training_type: str) -> str:
+    """Resolve and validate the external Qwen Image VAE path required by Anima trainers."""
+
+    raw_path = getattr(args, "vae", None)
+    vae_path = os.path.expandvars(os.path.expanduser(str(raw_path or "").strip()))
+
+    if not vae_path:
+        raise ValueError(
+            f"{training_type} requires a Qwen Image VAE path. "
+            "Please fill the VAE field in the UI or set `vae = \"...\"` in the config."
+        )
+    if not os.path.exists(vae_path):
+        raise ValueError(f"Anima VAE path does not exist: {vae_path}")
+    if not os.path.isfile(vae_path):
+        raise ValueError(f"Anima VAE path must point to a model file, not a directory: {vae_path}")
+
+    return vae_path
+
+
 # Loss weighting
 
 

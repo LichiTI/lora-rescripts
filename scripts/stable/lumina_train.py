@@ -671,6 +671,9 @@ def train(args):
         # log empty object to commit the sample images to wandb
         accelerator.log({}, step=0)
 
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(args, [("lumina_nextdit", accelerator.unwrap_model(nextdit))])
+
     loss_recorder = train_util.LossRecorder()
     epoch = 0  # avoid error when max_train_steps is 0
     for epoch in range(num_train_epochs):
@@ -782,6 +785,17 @@ def train(args):
                 loss = loss * loss_weights
                 loss = loss.mean()
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 # backward
                 accelerator.backward(loss)
 
@@ -806,6 +820,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 optimizer_eval_fn()
                 lumina_train_util.sample_images(
@@ -826,7 +842,9 @@ def train(args):
                 ):
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        lumina_train_util.save_lumina_model_on_epoch_end_or_stepwise(
+                        train_util.call_with_ema(
+                            ema_model,
+                            lumina_train_util.save_lumina_model_on_epoch_end_or_stepwise,
                             args,
                             False,
                             accelerator,
@@ -838,7 +856,8 @@ def train(args):
                         )
                 optimizer_train_fn()
 
-            current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
                 train_util.append_lr_to_logs(
@@ -864,7 +883,9 @@ def train(args):
         optimizer_eval_fn()
         if args.save_every_n_epochs is not None:
             if accelerator.is_main_process:
-                lumina_train_util.save_lumina_model_on_epoch_end_or_stepwise(
+                train_util.call_with_ema(
+                    ema_model,
+                    lumina_train_util.save_lumina_model_on_epoch_end_or_stepwise,
                     args,
                     True,
                     accelerator,
@@ -900,8 +921,14 @@ def train(args):
     del accelerator  # この後メモリを使うのでこれは消す
 
     if is_main_process:
-        lumina_train_util.save_lumina_model_on_train_end(
-            args, save_dtype, epoch, global_step, nextdit
+        train_util.call_with_ema(
+            ema_model,
+            lumina_train_util.save_lumina_model_on_train_end,
+            args,
+            save_dtype,
+            epoch,
+            global_step,
+            nextdit,
         )
         logger.info("model saved.")
 

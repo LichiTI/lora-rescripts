@@ -243,6 +243,7 @@ def train(args):
 
     # モデルに xformers とか memory efficient attention を組み込む
     train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
+    train_util.apply_opt_channels_last(args, ("U-Net", unet), ("ControlNet", controlnet), ("VAE", vae))
 
     # 学習を準備する
     if cache_latents:
@@ -346,6 +347,8 @@ def train(args):
 
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(args, [("controlnet", controlnet)])
 
     # epoch数を計算する
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -404,7 +407,11 @@ def train(args):
 
         accelerator.print(f"\nsaving checkpoint: {ckpt_file}")
 
-        state_dict = model_util.convert_controlnet_state_dict_to_sd(model.state_dict())
+        if ema_model is not None:
+            with ema_model.apply_to_models():
+                state_dict = model_util.convert_controlnet_state_dict_to_sd(model.state_dict())
+        else:
+            state_dict = model_util.convert_controlnet_state_dict_to_sd(model.state_dict())
 
         if save_dtype is not None:
             for key in list(state_dict.keys()):
@@ -475,8 +482,10 @@ def train(args):
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
                 controlnet_image = batch["conditioning_images"].to(dtype=weight_dtype)
+                controlnet_image = train_util.maybe_apply_channels_last_to_tensor(args, controlnet_image)
 
                 with accelerator.autocast():
                     down_block_res_samples, mid_block_res_sample = controlnet(
@@ -514,6 +523,17 @@ def train(args):
 
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 accelerator.backward(loss)
                 if not args.fused_backward_pass:
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:
@@ -531,6 +551,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 train_util.sample_images(
                     accelerator,
@@ -563,7 +585,8 @@ def train(args):
                             remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                             remove_model(remove_ckpt_name)
 
-            current_loss = loss.detach().item()
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
             avr_loss: float = loss_recorder.moving_average
             logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}

@@ -221,9 +221,10 @@ def train(args):
         clean_memory_on_device(accelerator.device)
 
     # Load VAE and cache latents
+    vae_path = anima_train_utils.resolve_required_anima_vae_path(args, "anima-finetune")
     logger.info("Loading Anima VAE...")
     vae = qwen_image_autoencoder_kl.load_vae(
-        args.vae, device="cpu", disable_mmap=True, spatial_chunk_size=args.vae_chunk_size, disable_cache=args.vae_disable_cache
+        vae_path, device="cpu", disable_mmap=True, spatial_chunk_size=args.vae_chunk_size, disable_cache=args.vae_disable_cache
     )
 
     if cache_latents:
@@ -379,6 +380,8 @@ def train(args):
 
     # resume
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(args, [("anima_dit", accelerator.unwrap_model(dit))])
 
     if args.fused_backward_pass:
         # use fused optimizer for backward pass: other optimizers will be supported in the future
@@ -583,6 +586,17 @@ def train(args):
                 loss = loss * loss_weights
                 loss = loss.mean()
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 accelerator.backward(loss)
 
                 if not args.fused_backward_pass:
@@ -603,6 +617,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 optimizer_eval_fn()
                 anima_train_utils.sample_images(
@@ -622,7 +638,9 @@ def train(args):
                 if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        anima_train_utils.save_anima_model_on_epoch_end_or_stepwise(
+                        train_util.call_with_ema(
+                            ema_model,
+                            anima_train_utils.save_anima_model_on_epoch_end_or_stepwise,
                             args,
                             False,
                             accelerator,
@@ -634,7 +652,8 @@ def train(args):
                         )
                 optimizer_train_fn()
 
-            current_loss = loss.detach().item()
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
                 train_util.append_lr_to_logs_with_names(
@@ -662,7 +681,9 @@ def train(args):
         optimizer_eval_fn()
         if args.save_every_n_epochs is not None:
             if accelerator.is_main_process:
-                anima_train_utils.save_anima_model_on_epoch_end_or_stepwise(
+                train_util.call_with_ema(
+                    ema_model,
+                    anima_train_utils.save_anima_model_on_epoch_end_or_stepwise,
                     args,
                     True,
                     accelerator,
@@ -699,7 +720,9 @@ def train(args):
     del accelerator
 
     if is_main_process and train_dit:
-        anima_train_utils.save_anima_model_on_train_end(
+        train_util.call_with_ema(
+            ema_model,
+            anima_train_utils.save_anima_model_on_train_end,
             args,
             save_dtype,
             epoch,

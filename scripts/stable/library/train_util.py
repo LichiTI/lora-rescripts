@@ -3,7 +3,9 @@
 import argparse
 import ast
 import asyncio
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 import datetime
 import importlib
 import json
@@ -3507,6 +3509,60 @@ def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdp
         unet.set_use_sdpa(True)
 
 
+def _module_has_channels_last_candidate(module: torch.nn.Module) -> bool:
+    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+        if tensor is not None and tensor.is_floating_point() and tensor.ndim == 4:
+            return True
+    return False
+
+
+def apply_opt_channels_last(args, *named_models):
+    if not getattr(args, "opt_channels_last", False):
+        return []
+
+    applied = []
+    skipped = []
+
+    for item in named_models:
+        if isinstance(item, tuple):
+            display_name, model = item
+        else:
+            display_name, model = type(item).__name__, item
+
+        if model is None:
+            continue
+
+        if not _module_has_channels_last_candidate(model):
+            skipped.append(display_name)
+            continue
+
+        try:
+            model.to(memory_format=torch.channels_last)
+            applied.append(display_name)
+        except Exception as exc:
+            logger.warning(f"Failed to enable channels_last for {display_name}: {exc}")
+
+    if applied:
+        logger.info("Enable channels_last memory format")
+        logger.info(f"channels_last applied to: {', '.join(applied)}")
+        logger.info(f"当前已启用 channels_last 内存格式：{', '.join(applied)}")
+    elif skipped:
+        logger.info(
+            "channels_last was requested, but no 4D convolution-style weights were found in the selected training models."
+        )
+        logger.info("当前已请求 channels_last，但当前训练主模型中未检测到适合切换的 4D 卷积权重。")
+
+    return applied
+
+
+def maybe_apply_channels_last_to_tensor(args, tensor: Optional[torch.Tensor]):
+    if not getattr(args, "opt_channels_last", False):
+        return tensor
+    if tensor is None or not isinstance(tensor, torch.Tensor) or tensor.ndim != 4:
+        return tensor
+    return tensor.contiguous(memory_format=torch.channels_last)
+
+
 """
 def replace_vae_modules(vae: diffusers.models.AutoencoderKL, mem_eff_attn, xformers):
     # vae is not used currently, but it is here for future use
@@ -4073,6 +4129,12 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         ],
         help="dynamo backend type (default is inductor) / dynamoのbackendの種類（デフォルトは inductor）",
     )
+    parser.add_argument(
+        "--opt_channels_last",
+        action="store_true",
+        help="set channels last memory format for convolution-heavy training models / "
+        "畳み込み系モデルでchannels lastメモリ形式を使う / 为卷积型训练模型启用 channels_last 内存格式",
+    )
     parser.add_argument("--xformers", action="store_true", help="use xformers for CrossAttention / CrossAttentionにxformersを使う")
     parser.add_argument(
         "--sdpa",
@@ -4110,6 +4172,86 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="persistent DataLoader workers (useful for reduce time gap between epoch, but may use more memory) / DataLoader のワーカーを持続させる (エポック間の時間差を少なくするのに有効だが、より多くのメモリを消費する可能性がある)",
     )
     parser.add_argument("--seed", type=int, default=None, help="random seed for training / 学習時の乱数のseed")
+    parser.add_argument(
+        "--ema_enabled",
+        action="store_true",
+        help="enable EMA (Exponential Moving Average) over trainable model weights during training / 学習中に学習対象重みのEMAを有効化する",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.999,
+        help="EMA decay ratio / EMA の減衰率",
+    )
+    parser.add_argument(
+        "--ema_update_every",
+        type=int,
+        default=1,
+        help="update EMA every N optimizer steps / N ステップごとに EMA を更新する",
+    )
+    parser.add_argument(
+        "--ema_update_after_step",
+        type=int,
+        default=0,
+        help="start EMA updates after this optimizer step / この step 以降で EMA 更新を開始する",
+    )
+    parser.add_argument(
+        "--ema_use_warmup",
+        action="store_true",
+        help="use warmup schedule for EMA decay / EMA の減衰率にウォームアップを使う",
+    )
+    parser.add_argument(
+        "--ema_inv_gamma",
+        type=float,
+        default=1.0,
+        help="EMA warmup inverse gamma / EMA ウォームアップの inverse gamma",
+    )
+    parser.add_argument(
+        "--ema_power",
+        type=float,
+        default=0.75,
+        help="EMA warmup power / EMA ウォームアップの power",
+    )
+    parser.add_argument(
+        "--safeguard_enabled",
+        action="store_true",
+        help="enable lightweight training safeguard / 軽量版トレーニング SafeGuard を有効化する",
+    )
+    parser.add_argument(
+        "--safeguard_nan_check_interval",
+        type=int,
+        default=1,
+        help="check non-finite loss every N optimizer steps / N ステップごとに NaN・Inf loss をチェックする",
+    )
+    parser.add_argument(
+        "--safeguard_max_nan_count",
+        type=int,
+        default=3,
+        help="stop training after this many non-finite losses / この回数だけ NaN・Inf loss が続いたら停止する",
+    )
+    parser.add_argument(
+        "--safeguard_loss_spike_threshold",
+        type=float,
+        default=5.0,
+        help="skip a step if current loss is this multiple of the rolling average / 現在 loss が移動平均のこの倍数を超えたらその step をスキップする",
+    )
+    parser.add_argument(
+        "--safeguard_loss_window_size",
+        type=int,
+        default=20,
+        help="rolling window size used for loss spike detection / loss スパイク判定に使う移動窓サイズ",
+    )
+    parser.add_argument(
+        "--safeguard_auto_reduce_lr",
+        action="store_true",
+        help="automatically reduce LR when SafeGuard triggers / SafeGuard 発動時に自動で学習率を下げる",
+    )
+    parser.add_argument(
+        "--safeguard_lr_reduction_factor",
+        type=float,
+        default=0.5,
+        help="learning-rate multiplier used when SafeGuard reduces LR / SafeGuard が学習率を下げるときの倍率",
+    )
     parser.add_argument(
         "--gradient_checkpointing", action="store_true", help="enable gradient checkpointing / gradient checkpointingを有効にする"
     )
@@ -5638,6 +5780,8 @@ def prepare_accelerator(args: argparse.Namespace):
     dynamo_backend = "NO"
     if args.torch_compile:
         dynamo_backend = args.dynamo_backend
+        logger.info(f"Enable torch.compile for training (dynamo backend: {dynamo_backend})")
+        logger.info(f"当前已启用 torch.compile（dynamo 后端：{dynamo_backend}）")
 
     kwargs_handlers = [
         (
@@ -6857,3 +7001,265 @@ class LossRecorder:
         if losses == 0:
             return 0
         return self.loss_total / losses
+
+
+class SafeGuardDecision(NamedTuple):
+    skip_step: bool
+    stop_training: bool
+    reason: Optional[str] = None
+
+
+class TrainingSafeGuard:
+    def __init__(
+        self,
+        *,
+        nan_check_interval: int = 1,
+        max_nan_count: int = 3,
+        loss_spike_threshold: float = 5.0,
+        loss_window_size: int = 20,
+        auto_reduce_lr: bool = False,
+        lr_reduction_factor: float = 0.5,
+    ):
+        self.nan_check_interval = max(1, int(nan_check_interval))
+        self.max_nan_count = max(1, int(max_nan_count))
+        self.loss_spike_threshold = max(1.0, float(loss_spike_threshold))
+        self.loss_window_size = max(2, int(loss_window_size))
+        self.auto_reduce_lr = bool(auto_reduce_lr)
+        self.lr_reduction_factor = float(lr_reduction_factor)
+        self.loss_window: deque[float] = deque(maxlen=self.loss_window_size)
+        self.nan_count = 0
+        self.skipped_steps = 0
+        self.lr_reduction_count = 0
+
+    def inspect_loss(self, loss_value: float, global_step: int, optimizer: Optional[Optimizer] = None) -> SafeGuardDecision:
+        check_step = max(1, int(global_step))
+        if check_step % self.nan_check_interval != 0:
+            return SafeGuardDecision(False, False, None)
+
+        if not math.isfinite(loss_value):
+            self.nan_count += 1
+            self.skipped_steps += 1
+            message = (
+                f"SafeGuard detected non-finite loss at step {global_step}. "
+                f"Current consecutive bad count: {self.nan_count}/{self.max_nan_count}."
+            )
+            self._maybe_reduce_lr(optimizer, reason="non-finite loss")
+            if self.nan_count >= self.max_nan_count:
+                return SafeGuardDecision(True, True, message)
+            return SafeGuardDecision(True, False, message)
+
+        baseline = self.get_loss_baseline()
+        if baseline is not None and baseline > 1e-12:
+            threshold_value = baseline * self.loss_spike_threshold
+            if loss_value > threshold_value:
+                self.skipped_steps += 1
+                message = (
+                    f"SafeGuard skipped step {global_step} because loss spiked to {loss_value:.6f} "
+                    f"(rolling avg {baseline:.6f}, threshold x{self.loss_spike_threshold:.2f})."
+                )
+                self._maybe_reduce_lr(optimizer, reason="loss spike")
+                return SafeGuardDecision(True, False, message)
+
+        return SafeGuardDecision(False, False, None)
+
+    def record_loss(self, loss_value: float) -> None:
+        if not math.isfinite(loss_value):
+            return
+        self.nan_count = 0
+        self.loss_window.append(float(loss_value))
+
+    def get_loss_baseline(self) -> Optional[float]:
+        if len(self.loss_window) < self.loss_window_size:
+            return None
+        return float(sum(self.loss_window) / len(self.loss_window))
+
+    def _maybe_reduce_lr(self, optimizer: Optional[Optimizer], *, reason: str) -> None:
+        if optimizer is None or not self.auto_reduce_lr:
+            return
+
+        reduced = False
+        for param_group in optimizer.param_groups:
+            current_lr = param_group.get("lr")
+            if current_lr is None:
+                continue
+            new_lr = max(float(current_lr) * self.lr_reduction_factor, 0.0)
+            if new_lr != current_lr:
+                param_group["lr"] = new_lr
+                reduced = True
+
+        if reduced:
+            self.lr_reduction_count += 1
+            logger.warning(
+                f"SafeGuard reduced learning rates by factor {self.lr_reduction_factor:.4f} due to {reason}. "
+                f"Total LR reductions: {self.lr_reduction_count}"
+            )
+
+
+class ModelEMA:
+    def __init__(
+        self,
+        named_models: Sequence[Tuple[str, torch.nn.Module]],
+        *,
+        decay: float = 0.999,
+        update_every: int = 1,
+        update_after_step: int = 0,
+        use_warmup: bool = False,
+        inv_gamma: float = 1.0,
+        power: float = 0.75,
+    ):
+        self.decay = min(max(float(decay), 0.0), 0.99999)
+        self.update_every = max(1, int(update_every))
+        self.update_after_step = max(0, int(update_after_step))
+        self.use_warmup = bool(use_warmup)
+        self.inv_gamma = max(float(inv_gamma), 1e-6)
+        self.power = max(float(power), 1e-6)
+        self.num_updates = 0
+        self.entries: list[dict[str, Any]] = []
+
+        for display_name, module in named_models:
+            if module is None:
+                continue
+            shadow_params = {}
+            for name, param in module.named_parameters():
+                if not param.requires_grad or not param.dtype.is_floating_point:
+                    continue
+                shadow_params[name] = param.detach().clone()
+
+            if shadow_params:
+                self.entries.append(
+                    {
+                        "name": display_name,
+                        "module": module,
+                        "shadow_params": shadow_params,
+                    }
+                )
+
+    @property
+    def enabled(self) -> bool:
+        return len(self.entries) > 0
+
+    @property
+    def tracked_model_names(self) -> list[str]:
+        return [entry["name"] for entry in self.entries]
+
+    def _current_decay(self) -> float:
+        if not self.use_warmup:
+            return self.decay
+
+        warmup_step = max(0, self.num_updates - self.update_after_step)
+        if warmup_step <= 0:
+            return 0.0
+
+        warmup_decay = 1.0 - (1.0 + warmup_step / self.inv_gamma) ** (-self.power)
+        return min(self.decay, max(0.0, warmup_decay))
+
+    def should_update(self, global_step: int) -> bool:
+        if not self.enabled:
+            return False
+        if global_step <= self.update_after_step:
+            return False
+        return global_step % self.update_every == 0
+
+    def update(self, global_step: int) -> bool:
+        if not self.should_update(global_step):
+            return False
+
+        decay = self._current_decay()
+        for entry in self.entries:
+            named_params = dict(entry["module"].named_parameters())
+            shadow_params = entry["shadow_params"]
+            for name, shadow in shadow_params.items():
+                param = named_params.get(name)
+                if param is None:
+                    continue
+                target = param.detach()
+                if shadow.device != target.device:
+                    shadow = shadow.to(device=target.device, dtype=target.dtype)
+                    shadow_params[name] = shadow
+                elif shadow.dtype != target.dtype:
+                    shadow = shadow.to(dtype=target.dtype)
+                    shadow_params[name] = shadow
+
+                shadow.mul_(decay).add_(target, alpha=1.0 - decay)
+
+        self.num_updates += 1
+        return True
+
+    @contextmanager
+    def apply_to_models(self):
+        if not self.enabled:
+            yield
+            return
+
+        backups: list[Tuple[torch.nn.Parameter, torch.Tensor]] = []
+        try:
+            for entry in self.entries:
+                named_params = dict(entry["module"].named_parameters())
+                shadow_params = entry["shadow_params"]
+                for name, shadow in shadow_params.items():
+                    param = named_params.get(name)
+                    if param is None:
+                        continue
+                    backups.append((param, param.detach().clone()))
+                    source = shadow
+                    if source.device != param.device or source.dtype != param.dtype:
+                        source = source.to(device=param.device, dtype=param.dtype)
+                    param.data.copy_(source)
+            yield
+        finally:
+            for param, backup in backups:
+                param.data.copy_(backup)
+
+
+def create_training_safeguard(args: argparse.Namespace) -> Optional[TrainingSafeGuard]:
+    if not getattr(args, "safeguard_enabled", False):
+        return None
+
+    safeguard = TrainingSafeGuard(
+        nan_check_interval=getattr(args, "safeguard_nan_check_interval", 1),
+        max_nan_count=getattr(args, "safeguard_max_nan_count", 3),
+        loss_spike_threshold=getattr(args, "safeguard_loss_spike_threshold", 5.0),
+        loss_window_size=getattr(args, "safeguard_loss_window_size", 20),
+        auto_reduce_lr=getattr(args, "safeguard_auto_reduce_lr", False),
+        lr_reduction_factor=getattr(args, "safeguard_lr_reduction_factor", 0.5),
+    )
+    logger.info(
+        "SafeGuard enabled: "
+        f"window={safeguard.loss_window_size}, spike_threshold={safeguard.loss_spike_threshold:.2f}, "
+        f"nan_check_interval={safeguard.nan_check_interval}, max_nan_count={safeguard.max_nan_count}, "
+        f"auto_reduce_lr={safeguard.auto_reduce_lr}"
+    )
+    return safeguard
+
+
+def create_model_ema(args: argparse.Namespace, named_models: Sequence[Tuple[str, torch.nn.Module]]) -> Optional[ModelEMA]:
+    if not getattr(args, "ema_enabled", False):
+        return None
+
+    ema = ModelEMA(
+        named_models,
+        decay=getattr(args, "ema_decay", 0.999),
+        update_every=getattr(args, "ema_update_every", 1),
+        update_after_step=getattr(args, "ema_update_after_step", 0),
+        use_warmup=getattr(args, "ema_use_warmup", False),
+        inv_gamma=getattr(args, "ema_inv_gamma", 1.0),
+        power=getattr(args, "ema_power", 0.75),
+    )
+
+    if not ema.enabled:
+        logger.warning("EMA was requested but no floating-point trainable parameters were found. EMA is disabled for this run.")
+        return None
+
+    logger.info(
+        "EMA enabled: "
+        f"models={', '.join(ema.tracked_model_names)}, decay={ema.decay:.5f}, update_every={ema.update_every}, "
+        f"update_after_step={ema.update_after_step}, warmup={ema.use_warmup}"
+    )
+    return ema
+
+
+def call_with_ema(ema: Optional[ModelEMA], callback: Callable, *args, **kwargs):
+    if ema is None:
+        return callback(*args, **kwargs)
+    with ema.apply_to_models():
+        return callback(*args, **kwargs)

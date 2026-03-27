@@ -479,6 +479,11 @@ class TextualInversionTrainer:
 
         # resumeする
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+        safeguard = train_util.create_training_safeguard(args)
+        ema_model = train_util.create_model_ema(
+            args,
+            [(f"text_encoder_{i}", accelerator.unwrap_model(text_encoder)) for i, text_encoder in enumerate(text_encoders)],
+        )
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -531,7 +536,17 @@ class TextualInversionTrainer:
 
             sai_metadata = train_util.get_sai_model_spec(None, args, self.is_sdxl, False, True)
 
-            self.save_weights(ckpt_file, embs_list, save_dtype, sai_metadata)
+            if ema_model is not None:
+                with ema_model.apply_to_models():
+                    ema_embs_list = []
+                    for text_encoder, token_ids in zip(text_encoders, token_ids_list):
+                        updated_embs = (
+                            accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[token_ids].data.detach().clone()
+                        )
+                        ema_embs_list.append(updated_embs)
+                    self.save_weights(ckpt_file, ema_embs_list, save_dtype, sai_metadata)
+            else:
+                self.save_weights(ckpt_file, embs_list, save_dtype, sai_metadata)
             if args.huggingface_repo_id is not None:
                 huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -625,6 +640,17 @@ class TextualInversionTrainer:
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
+                    current_loss = loss.detach().item()
+                    if safeguard is not None:
+                        safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                        if safeguard_decision.reason:
+                            logger.warning(safeguard_decision.reason)
+                        if safeguard_decision.stop_training:
+                            raise RuntimeError(safeguard_decision.reason)
+                        if safeguard_decision.skip_step:
+                            optimizer.zero_grad(set_to_none=True)
+                            continue
+
                     accelerator.backward(loss)
                     if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                         params_to_clip = accelerator.unwrap_model(text_encoder).get_input_embeddings().parameters()
@@ -649,6 +675,8 @@ class TextualInversionTrainer:
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
+                    if ema_model is not None:
+                        ema_model.update(global_step)
 
                     self.sample_images(
                         accelerator,
@@ -689,7 +717,8 @@ class TextualInversionTrainer:
                                 remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                 remove_model(remove_ckpt_name)
 
-                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard.record_loss(current_loss)
                 if len(accelerator.trackers) > 0:
                     logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
                     if (

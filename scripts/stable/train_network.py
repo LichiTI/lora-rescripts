@@ -181,6 +181,7 @@ class NetworkTrainer:
 
         # モデルに xformers とか memory efficient attention を組み込む
         train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
+        train_util.apply_opt_channels_last(args, ("U-Net", unet), ("VAE", vae))
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(args.xformers)
 
@@ -274,6 +275,7 @@ class NetworkTrainer:
         # Sample noise, sample a random timestep for each image, and add noise to the latents,
         # with noise offset and/or multires noise if specified
         noise, noisy_latents, timesteps = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+        noisy_latents = train_util.maybe_apply_channels_last_to_tensor(args, noisy_latents)
 
         # ensure the hidden state will require grad
         if args.gradient_checkpointing:
@@ -1001,6 +1003,8 @@ class NetworkTrainer:
 
         # resumeする
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+        safeguard = train_util.create_training_safeguard(args)
+        ema_model = train_util.create_model_ema(args, [("network", accelerator.unwrap_model(network))])
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1352,7 +1356,11 @@ class NetworkTrainer:
             sai_metadata = self.get_sai_model_spec(args)
             metadata_to_save.update(sai_metadata)
 
-            unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
+            if ema_model is not None:
+                with ema_model.apply_to_models():
+                    unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
+            else:
+                unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
             if args.huggingface_repo_id is not None:
                 huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -1492,6 +1500,17 @@ class NetworkTrainer:
                         train_unet=train_unet,
                     )
 
+                    current_loss = loss.detach().item()
+                    if safeguard is not None:
+                        safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                        if safeguard_decision.reason:
+                            logger.warning(safeguard_decision.reason)
+                        if safeguard_decision.stop_training:
+                            raise RuntimeError(safeguard_decision.reason)
+                        if safeguard_decision.skip_step:
+                            optimizer.zero_grad(set_to_none=True)
+                            continue
+
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually
@@ -1536,6 +1555,8 @@ class NetworkTrainer:
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
+                    if ema_model is not None:
+                        ema_model.update(global_step)
 
                     optimizer_eval_fn()
                     self.sample_images(
@@ -1559,7 +1580,8 @@ class NetworkTrainer:
                                 remove_model(remove_ckpt_name)
                     optimizer_train_fn()
 
-                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard.record_loss(current_loss)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}

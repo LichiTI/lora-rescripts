@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.0.8 Beta3**
+**v1.0.9**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -53,6 +53,13 @@ SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trai
 LoRA & Dreambooth training GUI & scripts preset & one key training environment for [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
 
 ## Recent Updates
+
+### v1.0.9
+
+- added SafeGuard and EMA training options across the main training routes, with save-time EMA checkpoint export support
+- fixed Anima startup failures caused by missing VAE paths by aligning the UI field, preflight validation, and backend runtime checks
+- improved save / training stability consistency across SD / SDXL / Flux / SD3 / Lumina / Anima / ControlNet / Textual Inversion workflows
+- refreshed homepage copy, version metadata, and release documentation for the current build
 
 ### v1.0.8 Beta3
 

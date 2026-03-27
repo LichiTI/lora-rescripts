@@ -88,9 +88,10 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         qwen3_text_encoder.eval()
 
         # Load VAE
+        vae_path = anima_train_utils.resolve_required_anima_vae_path(args, "anima-lora")
         logger.info("Loading Anima VAE...")
         vae = qwen_image_autoencoder_kl.load_vae(
-            args.vae, device="cpu", disable_mmap=True, spatial_chunk_size=args.vae_chunk_size, disable_cache=args.vae_disable_cache
+            vae_path, device="cpu", disable_mmap=True, spatial_chunk_size=args.vae_chunk_size, disable_cache=args.vae_disable_cache
         )
         vae.to(weight_dtype)
         vae.eval()

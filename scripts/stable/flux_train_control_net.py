@@ -479,6 +479,8 @@ def train(args):
 
     # resumeする
     train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+    safeguard = train_util.create_training_safeguard(args)
+    ema_model = train_util.create_model_ema(args, [("flux_controlnet", accelerator.unwrap_model(controlnet))])
 
     if args.fused_backward_pass:
         # use fused optimizer for backward pass: other optimizers will be supported in the future
@@ -705,6 +707,17 @@ def train(args):
                 loss = loss * loss_weights
                 loss = loss.mean()
 
+                current_loss = loss.detach().item()
+                if safeguard is not None:
+                    safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
+                    if safeguard_decision.reason:
+                        logger.warning(safeguard_decision.reason)
+                    if safeguard_decision.stop_training:
+                        raise RuntimeError(safeguard_decision.reason)
+                    if safeguard_decision.skip_step:
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                 # backward
                 accelerator.backward(loss)
 
@@ -729,6 +742,8 @@ def train(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                if ema_model is not None:
+                    ema_model.update(global_step)
 
                 optimizer_eval_fn()
                 flux_train_utils.sample_images(
@@ -747,7 +762,9 @@ def train(args):
                 if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        flux_train_utils.save_flux_model_on_epoch_end_or_stepwise(
+                        train_util.call_with_ema(
+                            ema_model,
+                            flux_train_utils.save_flux_model_on_epoch_end_or_stepwise,
                             args,
                             False,
                             accelerator,
@@ -759,7 +776,8 @@ def train(args):
                         )
                 optimizer_train_fn()
 
-            current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+            if safeguard is not None:
+                safeguard.record_loss(current_loss)
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
                 train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
@@ -783,7 +801,9 @@ def train(args):
         optimizer_eval_fn()
         if args.save_every_n_epochs is not None:
             if accelerator.is_main_process:
-                flux_train_utils.save_flux_model_on_epoch_end_or_stepwise(
+                train_util.call_with_ema(
+                    ema_model,
+                    flux_train_utils.save_flux_model_on_epoch_end_or_stepwise,
                     args,
                     True,
                     accelerator,
@@ -812,7 +832,15 @@ def train(args):
     del accelerator  # この後メモリを使うのでこれは消す
 
     if is_main_process:
-        flux_train_utils.save_flux_model_on_train_end(args, save_dtype, epoch, global_step, controlnet)
+        train_util.call_with_ema(
+            ema_model,
+            flux_train_utils.save_flux_model_on_train_end,
+            args,
+            save_dtype,
+            epoch,
+            global_step,
+            controlnet,
+        )
         logger.info("model saved.")
 
 

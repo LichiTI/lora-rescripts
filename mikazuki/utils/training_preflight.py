@@ -53,18 +53,14 @@ def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list
         notes.append("Qwen3 resource: using a single checkpoint file with bundled local configs.")
 
     vae_path = str(payload.get("vae", "")).strip()
-    if training_type == "anima-finetune":
-        if not vae_path:
-            errors.append("vae is required for anima-finetune. / anima-finetune 必须填写 VAE 路径。")
-        elif not os.path.exists(vae_path):
-            errors.append(f"VAE path does not exist: {vae_path}")
-        else:
-            notes.append("Anima VAE path detected.")
-    elif vae_path:
-        if not os.path.exists(vae_path):
-            errors.append(f"VAE path does not exist: {vae_path}")
-        else:
-            notes.append("External VAE path detected.")
+    if not vae_path:
+        errors.append(f"vae is required for {training_type}. / {training_type} 必须填写 VAE 路径。")
+    elif not os.path.exists(vae_path):
+        errors.append(f"VAE path does not exist: {vae_path}")
+    elif not os.path.isfile(vae_path):
+        errors.append(f"VAE path must point to a model file, not a directory: {vae_path}")
+    else:
+        notes.append("Anima VAE path detected.")
 
     llm_adapter_path = str(payload.get("llm_adapter_path", "")).strip()
     if llm_adapter_path:
@@ -215,6 +211,20 @@ def analyze_training_preflight(
             "SDXL SageAttention is experimental in this build and requires the SageAttention runtime. / "
             "当前构建中的 SDXL SageAttention 仍属实验功能，并且需要 SageAttention 专用环境。"
         )
+
+    if bool(payload.get("torch_compile")):
+        backend = str(payload.get("dynamo_backend", "inductor") or "inductor").strip() or "inductor"
+        notes.append(
+            f"torch.compile enabled with backend '{backend}'. The first launch and first few steps may be slower while graphs compile."
+        )
+
+    if bool(payload.get("opt_channels_last")):
+        notes.append("channels_last optimization is enabled.")
+        if training_type.startswith(("flux", "sd3", "anima", "lumina", "hunyuan")):
+            warnings.append(
+                "channels_last mainly helps convolution-heavy U-Net routes such as SD1.5 / SDXL / ControlNet. "
+                "The current trainer is more transformer-heavy, so the speed gain may be limited."
+            )
 
     add_anima_preflight_guidance(payload, training_type, errors, warnings, notes)
 

@@ -2,6 +2,7 @@ Schema.intersect([
     Schema.object({
         model_train_type: Schema.string().default("anima-lora").disabled().description("训练种类"),
         pretrained_model_name_or_path: Schema.string().role('filepicker', { type: "model-file" }).default("./sd-models/model.safetensors").description("Anima 主 DiT / transformer 权重路径（例如 `anima-preview.safetensors`）"),
+        vae: Schema.string().role('filepicker', { type: "model-file" }).description("Qwen Image VAE 模型路径（Anima 训练必填，LoRA 与完整训练都需要）"),
         qwen3: Schema.string().role('filepicker', { type: "model-file" }).description("Qwen3 文本模型路径。可填写单个 safetensors / pt 文件，或完整本地模型目录"),
         llm_adapter_path: Schema.string().role('filepicker', { type: "model-file" }).description("单独的 LLM Adapter 权重路径（可选）。填写后会覆盖 Anima 主模型内置的 Adapter"),
         t5_tokenizer_path: Schema.string().role('filepicker', { type: "folder" }).description("T5 tokenizer 目录路径（可选）。留空时回退到项目内置 `configs/t5_old`"),
