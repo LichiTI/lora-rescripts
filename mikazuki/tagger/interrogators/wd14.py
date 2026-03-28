@@ -73,6 +73,46 @@ class WaifuDiffusionInterrogator(Interrogator):
 
         self.tags = pd.read_csv(tags_path)
 
+    @staticmethod
+    def _to_static_dim(dim) -> int | None:
+        if isinstance(dim, (int, np.integer)) and dim > 0:
+            return int(dim)
+        return None
+
+    def _get_input_layout_and_size(self) -> Tuple[str, int]:
+        input_shape = list(self.model.get_inputs()[0].shape)
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"{self.name} expects a 4D ONNX input tensor, but got shape: {input_shape}"
+            )
+
+        dims = [self._to_static_dim(dim) for dim in input_shape]
+
+        def is_channel_dim(dim: int | None) -> bool:
+            return dim in (1, 3, 4)
+
+        if is_channel_dim(dims[1]) and not is_channel_dim(dims[3]):
+            layout = 'NCHW'
+            spatial_dims = [dims[2], dims[3]]
+        elif is_channel_dim(dims[3]) and not is_channel_dim(dims[1]):
+            layout = 'NHWC'
+            spatial_dims = [dims[1], dims[2]]
+        elif is_channel_dim(dims[1]) and dims[2] == dims[3]:
+            layout = 'NCHW'
+            spatial_dims = [dims[2], dims[3]]
+        elif is_channel_dim(dims[3]) and dims[1] == dims[2]:
+            layout = 'NHWC'
+            spatial_dims = [dims[1], dims[2]]
+        else:
+            layout = 'NHWC'
+            spatial_dims = [dims[1], dims[2]]
+
+        target_size = next((dim for dim in spatial_dims if dim and dim > 4), None)
+        if target_size is None:
+            target_size = next((dim for dim in dims[1:] if dim and dim > 4), 448)
+
+        return layout, target_size
+
     def interrogate(
             self,
             image: Image
@@ -86,7 +126,7 @@ class WaifuDiffusionInterrogator(Interrogator):
         # https://huggingface.co/spaces/SmilingWolf/wd-v1-4-tags/blob/main/app.py
 
         # convert an image to fit the model
-        _, height, _, _ = self.model.get_inputs()[0].shape
+        layout, target_size = self._get_input_layout_and_size()
 
         # alpha to white
         image = image.convert('RGBA')
@@ -98,10 +138,12 @@ class WaifuDiffusionInterrogator(Interrogator):
         # PIL RGB to OpenCV BGR
         image = image[:, :, ::-1]
 
-        image = dbimutils.make_square(image, height)
-        image = dbimutils.smart_resize(image, height)
+        image = dbimutils.make_square(image, target_size)
+        image = dbimutils.smart_resize(image, target_size)
         image = image.astype(np.float32)
-        image = np.expand_dims(image, 0)
+        if layout == 'NCHW':
+            image = image.transpose(2, 0, 1)
+        image = np.expand_dims(np.ascontiguousarray(image), 0)
 
         # evaluate model
         input_name = self.model.get_inputs()[0].name

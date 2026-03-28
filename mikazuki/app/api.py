@@ -248,6 +248,34 @@ def parse_boolish(value) -> bool:
     return bool(value)
 
 
+def normalize_conflicting_network_target_flags(config: dict) -> list[str]:
+    if "network_train_unet_only" not in config or "network_train_text_encoder_only" not in config:
+        return []
+
+    train_unet_only = parse_boolish(config.get("network_train_unet_only"))
+    train_text_encoder_only = parse_boolish(config.get("network_train_text_encoder_only"))
+    if not train_unet_only or not train_text_encoder_only:
+        return []
+
+    config["network_train_unet_only"] = False
+    config["network_train_text_encoder_only"] = False
+
+    warnings = [
+        "检测到“仅训练 DiT/U-Net”和“仅训练文本编码器”被同时勾选。"
+        "这通常表示你想训练两者，因此本次已自动改为“同时训练 DiT/U-Net 和文本编码器”。"
+    ]
+
+    if parse_boolish(config.get("cache_text_encoder_outputs")):
+        config["cache_text_encoder_outputs"] = False
+        if "cache_text_encoder_outputs_to_disk" in config:
+            config["cache_text_encoder_outputs_to_disk"] = False
+        warnings.append(
+            "由于已自动切换为同时训练文本编码器，文本编码器输出缓存也已自动关闭。"
+        )
+
+    return warnings
+
+
 def apply_anima_ui_overrides(config: dict) -> None:
     model_train_type = str(config.get("model_train_type", "")).strip().lower()
     if not model_train_type.startswith("anima"):
@@ -275,6 +303,37 @@ def apply_anima_ui_overrides(config: dict) -> None:
     sample_scheduler = str(config.get("sample_scheduler", "") or "").strip()
     if sample_scheduler == "":
         config["sample_scheduler"] = "simple"
+
+
+def resolve_anima_runtime_attention_backend(gpu_ids=None) -> str:
+    runtime_mode = get_attention_runtime_mode()
+    if runtime_mode == "sageattention":
+        return "sageattn"
+    if runtime_mode == "blackwell":
+        return "torch"
+
+    xformers_info = get_xformers_status(gpu_ids)
+    if xformers_info.get("selected_supported", xformers_info.get("supported", False)):
+        return "xformers"
+    return "torch"
+
+
+def apply_anima_runtime_attention_backend(config: dict, gpu_ids=None) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if not model_train_type.startswith("anima"):
+        return
+
+    resolved_backend = resolve_anima_runtime_attention_backend(gpu_ids)
+    config["attn_mode"] = resolved_backend
+
+    if "xformers" in config:
+        config["xformers"] = resolved_backend == "xformers"
+    if "sdpa" in config:
+        config["sdpa"] = resolved_backend == "torch"
+    if "sageattn" in config:
+        config["sageattn"] = resolved_backend == "sageattn"
+    if "use_sage_attn" in config:
+        config["use_sage_attn"] = resolved_backend == "sageattn"
 
 
 def apply_sageattention_runtime_override(config: dict) -> Optional[str]:
@@ -602,10 +661,11 @@ async def create_toml_file(request: Request):
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     apply_anima_ui_overrides(config)
+    start_warnings = []
+    start_warnings.extend(normalize_conflicting_network_target_flags(config))
 
     raw_gpu_ids = config.pop("gpu_ids", None)
     gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
-    start_warnings = []
     if gpu_filter_warning:
         start_warnings.append(gpu_filter_warning)
     if gpu_ids:
@@ -634,12 +694,19 @@ async def create_toml_file(request: Request):
         return APIResponseFail(message="分布式同步运行时解析失败，请查看日志。")
     start_warnings.extend(worker_sync_runtime.get("warnings", []))
     start_warnings.extend(worker_sync_runtime.get("notes", []))
+    apply_anima_runtime_attention_backend(config, gpu_ids)
 
     suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
     model_train_type = config.pop("model_train_type", "sd-lora")
     if model_train_type not in trainer_mapping:
         return APIResponseFail(message=f"Unsupported trainer type: {model_train_type}")
     trainer_file = trainer_mapping[model_train_type]
+
+    # Windows + multiprocessing dataloader is more fragile on Anima routes.
+    # If the user did not choose these explicitly, default to safer single-process loading.
+    if model_train_type in {"anima-lora", "anima-finetune"}:
+        config.setdefault("max_data_loader_n_workers", 0)
+        config.setdefault("persistent_data_loader_workers", False)
 
     if model_train_type != "sdxl-finetune":
         if not train_utils.validate_data_dir(config["train_data_dir"]):
@@ -784,6 +851,7 @@ async def training_preflight(request: Request) -> APIResponse:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     apply_anima_ui_overrides(config)
+    normalize_conflicting_network_target_flags(config)
 
     raw_gpu_ids = config.get("gpu_ids")
     gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
@@ -791,6 +859,7 @@ async def training_preflight(request: Request) -> APIResponse:
         config["gpu_ids"] = gpu_ids
     else:
         config.pop("gpu_ids", None)
+    apply_anima_runtime_attention_backend(config, gpu_ids)
     training_type = str(config.get("model_train_type", "sd-lora"))
 
     result = analyze_training_preflight(
@@ -818,6 +887,7 @@ async def training_sample_prompt(request: Request) -> APIResponse:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     apply_anima_ui_overrides(config)
+    normalize_conflicting_network_target_flags(config)
 
     try:
         result = build_sample_prompt_record(config)

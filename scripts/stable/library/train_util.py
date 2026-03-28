@@ -5128,8 +5128,54 @@ def resume_from_local_or_hf_if_specified(accelerator, args):
     accelerator.load_state(dirname)
 
 
+def _materialize_optimizer_params(trainable_params):
+    """
+    Normalize optimizer params into concrete lists so we can validate them before
+    handing them to torch / bitsandbytes optimizers.
+    """
+
+    if isinstance(trainable_params, dict):
+        trainable_params = [trainable_params]
+
+    items = list(trainable_params)
+    if len(items) == 0:
+        return [], 0, 0
+
+    if all(isinstance(item, dict) for item in items):
+        normalized_groups = []
+        tensor_count = 0
+        element_count = 0
+
+        for group in items:
+            normalized_group = dict(group)
+            params = list(normalized_group.get("params", []))
+            if len(params) == 0:
+                continue
+            normalized_group["params"] = params
+            normalized_groups.append(normalized_group)
+            tensor_count += len(params)
+            element_count += sum(p.numel() for p in params if getattr(p, "requires_grad", True))
+
+        return normalized_groups, tensor_count, element_count
+
+    params = list(items)
+    tensor_count = len(params)
+    element_count = sum(p.numel() for p in params if getattr(p, "requires_grad", True))
+    return params, tensor_count, element_count
+
+
 def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
     # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, AdEMAMix8bit, PagedAdEMAMix8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
+
+    trainable_params, optimizer_tensor_count, optimizer_element_count = _materialize_optimizer_params(trainable_params)
+    if optimizer_tensor_count == 0 or optimizer_element_count == 0:
+        raise ValueError(
+            "No trainable parameters were collected for the optimizer. "
+            "This usually means the selected training targets cancel each other out "
+            "(for example both network_train_unet_only and network_train_text_encoder_only are enabled), "
+            "or all candidate modules were filtered/frozen by the current network settings, "
+            "or every active learning rate resolved to 0."
+        )
 
     optimizer_type = args.optimizer_type
     if args.use_8bit_adam:

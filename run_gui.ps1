@@ -528,6 +528,9 @@ function Test-SageAttentionRuntimeReady {
         if ([string]::IsNullOrWhiteSpace($errorMessage)) {
             $errorMessage = "sageattention import or symbol check failed"
         }
+        elseif ($errorMessage -match "_fused|DLL load failed") {
+            $errorMessage = "sageattention native extension failed to load (_fused). This usually means the installed SageAttention wheel does not match the current Torch/CUDA runtime stack, or the Microsoft Visual C++ x64 runtime is missing. On Windows this is commonly a binary compatibility issue, especially for SageAttention 2.x wheels."
+        }
         $issues.Add($errorMessage) | Out-Null
     }
 

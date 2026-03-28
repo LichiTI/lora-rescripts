@@ -2,8 +2,10 @@
 
 import argparse
 import gc
+import importlib
 import math
 import os
+import sys
 import time
 from typing import Optional
 
@@ -27,6 +29,174 @@ logger = logging.getLogger(__name__)
 
 
 # Anima-specific training arguments
+ANIMA_SUPPORTED_ATTN_MODES = ("torch", "xformers", "sageattn")
+
+
+def _infer_anima_runtime_mode() -> str:
+    if os.environ.get("MIKAZUKI_SAGEATTENTION_STARTUP") == "1" or os.environ.get("MIKAZUKI_SAGEATTENTION2_STARTUP") == "1":
+        return "sageattention"
+    if os.environ.get("MIKAZUKI_BLACKWELL_STARTUP") == "1":
+        return "blackwell"
+
+    executable = sys.executable.replace("\\", "/").lower()
+    if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
+        return "sageattention"
+    if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
+        return "sageattention"
+    if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
+        return "sageattention"
+    if "/python_blackwell/" in executable:
+        return "blackwell"
+    return "standard"
+
+
+def _has_working_sageattention() -> bool:
+    if not torch.cuda.is_available():
+        return False
+
+    try:
+        importlib.import_module("triton")
+        sage_module = importlib.import_module("sageattention")
+    except Exception:
+        return False
+
+    return callable(getattr(sage_module, "sageattn", None)) and callable(getattr(sage_module, "sageattn_varlen", None))
+
+
+def _has_importable_xformers() -> bool:
+    if not torch.cuda.is_available():
+        return False
+
+    try:
+        importlib.import_module("xformers")
+        importlib.import_module("xformers.ops")
+    except Exception:
+        return False
+    return True
+
+
+def resolve_default_anima_attn_mode() -> str:
+    runtime_mode = _infer_anima_runtime_mode()
+    if runtime_mode == "sageattention" and _has_working_sageattention():
+        return "sageattn"
+    if runtime_mode == "blackwell":
+        return "torch"
+    if _has_importable_xformers():
+        return "xformers"
+    return "torch"
+
+
+def _expand_local_path(raw_path: Optional[str]) -> str:
+    return os.path.expandvars(os.path.expanduser(str(raw_path or "").strip()))
+
+
+def _normalize_local_path(raw_path: Optional[str]) -> str:
+    normalized = _expand_local_path(raw_path)
+    if not normalized:
+        return ""
+    return os.path.abspath(normalized)
+
+
+def _get_anima_path_bases(args: argparse.Namespace) -> list[str]:
+    bases = [os.getcwd()]
+
+    raw_config_path = getattr(args, "config_file", None)
+    if raw_config_path:
+        config_path = _normalize_local_path(raw_config_path)
+        if config_path and not config_path.lower().endswith(".toml"):
+            config_path = config_path + ".toml"
+        config_dir = os.path.dirname(config_path)
+        if config_dir:
+            bases.append(config_dir)
+            parent_dir = os.path.dirname(config_dir)
+            if parent_dir:
+                bases.append(parent_dir)
+
+    stable_root = os.path.dirname(os.path.dirname(__file__))
+    bases.append(stable_root)
+    bases.append(os.path.dirname(stable_root))
+
+    deduped: list[str] = []
+    seen = set()
+    for base in bases:
+        normalized = _normalize_local_path(base)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _resolve_local_path_candidates(raw_path: Optional[str], *, base_dirs: Optional[list[str]] = None) -> list[str]:
+    normalized = _expand_local_path(raw_path)
+    if not normalized:
+        return []
+
+    if os.path.isabs(normalized):
+        return [os.path.abspath(normalized)]
+
+    candidates = [os.path.abspath(normalized)]
+    for base_dir in base_dirs or []:
+        candidates.append(os.path.abspath(os.path.join(base_dir, normalized)))
+
+    deduped: list[str] = []
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
+def _resolve_anima_path(
+    raw_path: Optional[str],
+    *,
+    label: str,
+    required_message: str,
+    allow_file: bool,
+    allow_directory: bool,
+    base_dirs: Optional[list[str]] = None,
+) -> str:
+    candidates = _resolve_local_path_candidates(raw_path, base_dirs=base_dirs)
+
+    if not candidates:
+        raise ValueError(required_message)
+
+    path = next((candidate for candidate in candidates if os.path.exists(candidate)), candidates[0])
+    if not os.path.exists(path):
+        raise ValueError(f"{label} path does not exist: {path}")
+    if os.path.isfile(path):
+        if not allow_file:
+            raise ValueError(f"{label} path must point to a directory, not a file: {path}")
+        return path
+    if os.path.isdir(path):
+        if not allow_directory:
+            raise ValueError(f"{label} path must point to a model file, not a directory: {path}")
+        return path
+
+    raise ValueError(f"{label} path is neither a regular file nor a directory: {path}")
+
+
+def resolve_optional_anima_path(
+    raw_path: Optional[str],
+    *,
+    label: str,
+    allow_file: bool,
+    allow_directory: bool,
+    base_dirs: Optional[list[str]] = None,
+) -> Optional[str]:
+    candidates = _resolve_local_path_candidates(raw_path, base_dirs=base_dirs)
+    if not candidates:
+        return None
+    return _resolve_anima_path(
+        candidates[0],
+        label=label,
+        required_message=f"{label} path is required.",
+        allow_file=allow_file,
+        allow_directory=allow_directory,
+        base_dirs=base_dirs,
+    )
 
 
 def add_anima_training_arguments(parser: argparse.ArgumentParser):
@@ -94,15 +264,15 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--discrete_flow_shift",
         type=float,
-        default=1.0,
-        help="Timestep distribution shift for rectified flow training (default: 1.0)",
+        default=3.0,
+        help="Timestep distribution shift for rectified flow training (default: 3.0, matches the official Anima trainer)",
     )
     parser.add_argument(
         "--timestep_sampling",
         type=str,
-        default="sigmoid",
+        default="shift",
         choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift"],
-        help="Timestep sampling method (default: sigmoid (logit normal))",
+        help="Timestep sampling method (default: shift, matches the official Anima trainer)",
     )
     parser.add_argument(
         "--sigmoid_scale",
@@ -112,10 +282,10 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--attn_mode",
-        choices=["torch", "xformers", "flash", "sageattn", "sdpa"],  # "sdpa" is for backward compatibility
+        choices=["torch", "xformers", "sageattn", "sdpa", "flash"],  # "sdpa" and "flash" are legacy compatibility values
         default=None,
-        help="Attention implementation to use. Default is None (torch). xformers requires --split_attn. sageattn can be used when the active runtime has SageAttention installed. This option overrides --xformers or --sdpa."
-        " / 使用するAttentionの実装。デフォルトはNone（torch）です。xformersは--split_attnの指定が必要です。sageattn は、現在の运行时已安装 SageAttention 时可用于训练。这个选项会覆盖 --xformers 或 --sdpa。",
+        help="Attention implementation to use. Default is None (auto-resolve from the active runtime/startup script). xformers requires --split_attn. sageattn can be used when the active runtime has SageAttention installed. Legacy 'flash' values will automatically fall back to the runtime default backend. This option overrides --xformers or --sdpa."
+        " / 使用するAttentionの実装。デフォルトは None（当前运行时 / 启动脚本自动决定）です。xformersは--split_attnの指定が必要です。sageattn は、現在の运行时已安装 SageAttention 时可用于训练。旧版の flash 値は自動的に当前运行时默认后端へ回退します。この选项会覆盖 --xformers 或 --sdpa。",
     )
     parser.add_argument(
         "--split_attn",
@@ -147,20 +317,169 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
 def resolve_required_anima_vae_path(args: argparse.Namespace, training_type: str) -> str:
     """Resolve and validate the external Qwen Image VAE path required by Anima trainers."""
 
-    raw_path = getattr(args, "vae", None)
-    vae_path = os.path.expandvars(os.path.expanduser(str(raw_path or "").strip()))
-
-    if not vae_path:
-        raise ValueError(
+    return _resolve_anima_path(
+        getattr(args, "vae", None),
+        label="Anima VAE",
+        required_message=(
             f"{training_type} requires a Qwen Image VAE path. "
             "Please fill the VAE field in the UI or set `vae = \"...\"` in the config."
-        )
-    if not os.path.exists(vae_path):
-        raise ValueError(f"Anima VAE path does not exist: {vae_path}")
-    if not os.path.isfile(vae_path):
-        raise ValueError(f"Anima VAE path must point to a model file, not a directory: {vae_path}")
+        ),
+        allow_file=True,
+        allow_directory=False,
+        base_dirs=_get_anima_path_bases(args),
+    )
 
-    return vae_path
+
+def resolve_required_anima_transformer_path(args: argparse.Namespace, training_type: str) -> str:
+    return _resolve_anima_path(
+        getattr(args, "pretrained_model_name_or_path", None),
+        label="Anima DiT / transformer",
+        required_message=(
+            f"{training_type} requires an Anima DiT / transformer checkpoint path. "
+            "Please fill the main model field in the UI or set `pretrained_model_name_or_path = \"...\"` in the config."
+        ),
+        allow_file=True,
+        allow_directory=False,
+        base_dirs=_get_anima_path_bases(args),
+    )
+
+
+def resolve_required_anima_qwen3_path(args: argparse.Namespace, training_type: str) -> str:
+    return _resolve_anima_path(
+        getattr(args, "qwen3", None),
+        label="Anima Qwen3 text model",
+        required_message=(
+            f"{training_type} requires a Qwen3 text model path. "
+            "Please fill the Qwen3 field in the UI or set `qwen3 = \"...\"` in the config."
+        ),
+        allow_file=True,
+        allow_directory=True,
+        base_dirs=_get_anima_path_bases(args),
+    )
+
+
+def validate_anima_resolution_settings(args: argparse.Namespace) -> None:
+    raw_resolution = getattr(args, "resolution", None)
+    if raw_resolution is None:
+        return
+
+    if isinstance(raw_resolution, str):
+        values = [segment.strip() for segment in raw_resolution.split(",") if segment.strip()]
+    elif isinstance(raw_resolution, (tuple, list)):
+        values = list(raw_resolution)
+    else:
+        values = [raw_resolution]
+
+    if not values:
+        return
+
+    try:
+        parsed = [int(value) for value in values]
+    except Exception:
+        return
+
+    invalid = [value for value in parsed if value <= 0 or value % 64 != 0]
+    if invalid:
+        raise ValueError(
+            "Anima training expects the configured resolution to be a positive multiple of 64. "
+            f"Got: {raw_resolution}"
+        )
+
+
+def normalize_anima_attn_mode(attn_mode: Optional[str], fallback: Optional[str] = None) -> str:
+    """Normalize Anima attention mode values coming from UI/config files."""
+
+    normalized_fallback = str(fallback or resolve_default_anima_attn_mode()).strip().lower() or "torch"
+    if normalized_fallback == "sdpa":
+        normalized_fallback = "torch"
+    if normalized_fallback == "flash":
+        normalized_fallback = resolve_default_anima_attn_mode()
+    if normalized_fallback not in ANIMA_SUPPORTED_ATTN_MODES:
+        raise ValueError(f"Unsupported Anima attention fallback: {fallback}")
+
+    normalized = str(attn_mode or "").strip().lower()
+    if normalized in {"", "none", "null"}:
+        return normalized_fallback
+    if normalized == "sdpa":
+        return "torch"
+    if normalized == "flash":
+        return normalized_fallback
+    if normalized not in ANIMA_SUPPORTED_ATTN_MODES:
+        raise ValueError(
+            f"Unsupported Anima attention mode: {attn_mode}. "
+            f"Supported modes: {', '.join(ANIMA_SUPPORTED_ATTN_MODES)}"
+        )
+    return normalized
+
+
+def maybe_apply_anima_channels_last(args: argparse.Namespace, tensor: Optional[torch.Tensor]):
+    if not getattr(args, "opt_channels_last", False):
+        return tensor
+    if tensor is None or not isinstance(tensor, torch.Tensor):
+        return tensor
+    if tensor.ndim == 5:
+        return tensor.contiguous(memory_format=torch.channels_last_3d)
+    if tensor.ndim == 4:
+        return tensor.contiguous(memory_format=torch.channels_last)
+    return tensor
+
+
+def _iter_named_floating_tensors(module: torch.nn.Module):
+    for name, param in module.named_parameters(recurse=True):
+        if param is not None and param.is_floating_point() and param.ndim in (4, 5):
+            yield name, param
+    for name, buf in module.named_buffers(recurse=True):
+        if buf is not None and buf.is_floating_point() and buf.ndim in (4, 5):
+            yield name, buf
+
+
+def apply_opt_channels_last_for_anima(args: argparse.Namespace, *named_models):
+    if not getattr(args, "opt_channels_last", False):
+        return []
+
+    applied: list[str] = []
+    skipped: list[str] = []
+
+    for item in named_models:
+        if isinstance(item, tuple):
+            display_name, model = item
+        else:
+            display_name, model = type(item).__name__, item
+
+        if model is None:
+            continue
+
+        tensor_count = 0
+        converted_4d = 0
+        converted_5d = 0
+
+        with torch.no_grad():
+            for _, tensor in _iter_named_floating_tensors(model):
+                tensor_count += 1
+                if tensor.ndim == 5:
+                    tensor.data = tensor.data.contiguous(memory_format=torch.channels_last_3d)
+                    converted_5d += 1
+                elif tensor.ndim == 4:
+                    tensor.data = tensor.data.contiguous(memory_format=torch.channels_last)
+                    converted_4d += 1
+
+        if tensor_count == 0:
+            skipped.append(display_name)
+            continue
+
+        applied.append(display_name)
+        logger.info(
+            f"channels_last applied to {display_name}: 4D tensors={converted_4d}, 5D tensors={converted_5d}"
+        )
+
+    if applied:
+        logger.info("Enable channels_last memory format for Anima training")
+        logger.info(f"当前已为 Anima 路线启用 channels_last：{', '.join(applied)}")
+    elif skipped:
+        logger.info("channels_last was requested for Anima, but no 4D/5D floating tensors were found in the selected models.")
+        logger.info("当前已请求为 Anima 启用 channels_last，但未在当前模型中检测到可切换的 4D/5D 浮点张量。")
+
+    return applied
 
 
 # Loss weighting
@@ -228,6 +547,7 @@ def get_anima_param_groups(
     for name, p in dit.named_parameters():
         # Store original name for debugging
         p.original_name = name
+        p.requires_grad_(False)
 
         if "llm_adapter" in name:
             llm_adapter_params.append(p)
@@ -260,10 +580,10 @@ def get_anima_param_groups(
         (llm_adapter_lr, llm_adapter_params, "llm_adapter"),
     ]:
         if lr == 0:
-            for p in params:
-                p.requires_grad_(False)
             logger.info(f"  Frozen {name} params ({len(params)} parameters)")
         elif len(params) > 0:
+            for p in params:
+                p.requires_grad_(True)
             param_groups.append({"params": params, "lr": lr})
 
     total_trainable = sum(p.numel() for group in param_groups for p in group["params"] if p.requires_grad)
@@ -503,6 +823,68 @@ def sample_images(
     clean_memory_on_device(accelerator.device)
 
 
+def _decoded_tensor_to_pil_image(decoded: torch.Tensor) -> Image.Image:
+    image = decoded.float()
+    image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
+    if image.ndim == 4:
+        image = image[:, 0, :, :]
+    decoded_np = 255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)
+    decoded_np = decoded_np.astype(np.uint8)
+    return Image.fromarray(decoded_np)
+
+
+def run_vae_roundtrip_self_check(
+    args: argparse.Namespace,
+    accelerator: Accelerator,
+    vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
+    train_dataset_group,
+    vae_dtype: torch.dtype,
+) -> None:
+    if not accelerator.is_main_process:
+        accelerator.wait_for_everyone()
+        return
+
+    try:
+        if len(train_dataset_group) == 0:
+            return
+
+        example = train_dataset_group[0]
+        images = example.get("images") if isinstance(example, dict) else None
+        if images is None or len(images) == 0:
+            logger.warning("VAE roundtrip self-check skipped because the dataset did not provide decoded image tensors.")
+            return
+
+        pixels = images[:1].to(accelerator.device, dtype=vae_dtype)
+        org_vae_device = vae.device
+        org_vae_dtype = vae.dtype
+
+        with torch.no_grad():
+            vae.to(accelerator.device, dtype=vae_dtype)
+            latents = vae.encode_pixels_to_latents(pixels)
+            if not torch.isfinite(latents).all():
+                raise RuntimeError("VAE roundtrip produced non-finite latents")
+
+            recon = vae.decode_to_pixels(latents)
+            if not torch.isfinite(recon).all():
+                raise RuntimeError("VAE roundtrip produced non-finite decoded pixels")
+
+        mse = torch.mean((recon.float() - pixels.float()) ** 2).item()
+        save_dir = os.path.join(args.output_dir, "sample")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, "vae_roundtrip.png")
+        _decoded_tensor_to_pil_image(recon).save(save_path)
+        logger.info(f"VAE roundtrip self-check saved: {save_path} (mse={mse:.6f})")
+    except Exception as e:
+        logger.warning(f"VAE roundtrip self-check failed. If training previews or samples look corrupted, please check the VAE first: {e}")
+    finally:
+        try:
+            vae.to(org_vae_device, dtype=org_vae_dtype)
+        except Exception:
+            pass
+        clean_memory_on_device(accelerator.device)
+        accelerator.wait_for_everyone()
+
+
 def resolve_preview_size(args: argparse.Namespace, width: int, height: int) -> tuple[int, int]:
     if width > 0 and height > 0:
         return width, height
@@ -675,15 +1057,7 @@ def _sample_image_inference(
     clean_memory_on_device(accelerator.device)
 
     # Convert to image
-    image = decoded.float()
-    image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
-    # Remove temporal dim if present
-    if image.ndim == 4:
-        image = image[:, 0, :, :]
-    decoded_np = 255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)
-    decoded_np = decoded_np.astype(np.uint8)
-
-    image = Image.fromarray(decoded_np)
+    image = _decoded_tensor_to_pil_image(decoded)
 
     ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
     num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"

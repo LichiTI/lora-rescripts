@@ -449,6 +449,9 @@ function Assert-SageAttentionRuntimeReady {
         elseif ($errorMessage -match "Python\\.h|Failed to find Python libs|lpython3\d+|python3\d+\\.lib") {
             $errorMessage = "sageattention runtime probe failed because the embeddable runtime is missing Python development headers or import libraries. Embeddable Python usually does not ship Include\\Python.h or python311.lib / python312.lib, so Triton cannot build its runtime helper."
         }
+        elseif ($errorMessage -match "_fused|DLL load failed") {
+            $errorMessage = "sageattention native extension failed to load (_fused). This usually means the installed SageAttention wheel does not match the current Torch/CUDA runtime stack, or the Microsoft Visual C++ x64 runtime is missing. On Windows this is commonly a binary compatibility issue, especially for SageAttention 2.x wheels."
+        }
         $issues.Add($errorMessage) | Out-Null
     }
 

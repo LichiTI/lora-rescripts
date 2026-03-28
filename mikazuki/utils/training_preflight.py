@@ -38,6 +38,25 @@ def parse_boolish(value) -> bool:
     return bool(value)
 
 
+def parse_optional_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return float(stripped)
+    if isinstance(value, (list, tuple)):
+        if len(value) == 0:
+            return None
+        return parse_optional_float(value[0])
+    return None
+
+
 def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list[str], warnings: list[str], notes: list[str]) -> None:
     if not training_type.startswith("anima"):
         return
@@ -102,6 +121,123 @@ def add_anima_preflight_guidance(payload: dict, training_type: str, errors: list
             notes.append("Anima adapter mode: LoKr / LyCORIS.")
         else:
             notes.append("Anima adapter mode: LoRA.")
+
+
+def add_network_target_preflight_guidance(payload: dict, errors: list[str], warnings: list[str], notes: list[str]) -> None:
+    if "network_train_unet_only" not in payload and "network_train_text_encoder_only" not in payload:
+        return
+
+    train_unet_only = parse_boolish(payload.get("network_train_unet_only"))
+    train_text_encoder_only = parse_boolish(payload.get("network_train_text_encoder_only"))
+
+    if train_unet_only and train_text_encoder_only:
+        payload["network_train_unet_only"] = False
+        payload["network_train_text_encoder_only"] = False
+        warnings.append(
+            "Both 'train DiT/U-Net only' and 'train text encoder only' were enabled. "
+            "This build will automatically treat that combination as training both targets. "
+            "/ 检测到同时勾选“仅训练 DiT/U-Net”和“仅训练文本编码器”，当前版本会自动按“两者都训练”处理。"
+        )
+        if parse_boolish(payload.get("cache_text_encoder_outputs")):
+            payload["cache_text_encoder_outputs"] = False
+            if "cache_text_encoder_outputs_to_disk" in payload:
+                payload["cache_text_encoder_outputs_to_disk"] = False
+            warnings.append(
+                "Text encoder output caching was also disabled automatically because text encoder training is now active. "
+                "/ 由于已自动改为训练文本编码器，文本编码器输出缓存也已自动关闭。"
+            )
+        train_unet_only = False
+        train_text_encoder_only = False
+
+    cache_text_encoder_outputs = parse_boolish(payload.get("cache_text_encoder_outputs"))
+
+    if train_text_encoder_only:
+        notes.append("Text encoder only training is enabled.")
+
+    if cache_text_encoder_outputs and not train_unet_only:
+        errors.append(
+            "Text encoder training cannot be combined with cache_text_encoder_outputs. "
+            "Disable text encoder output caching before training text encoder LoRA. "
+            "/ 训练文本编码器时不能同时启用文本编码器输出缓存，请先关闭该缓存选项。"
+        )
+
+
+def add_learning_rate_preflight_guidance(payload: dict, errors: list[str], warnings: list[str], notes: list[str]) -> None:
+    if not any(
+        key in payload
+        for key in (
+            "learning_rate",
+            "unet_lr",
+            "text_encoder_lr",
+            "self_attn_lr",
+            "cross_attn_lr",
+            "mlp_lr",
+            "mod_lr",
+            "llm_adapter_lr",
+        )
+    ):
+        return
+
+    model_train_type = str(payload.get("model_train_type", "")).strip().lower()
+    if model_train_type == "anima-finetune":
+        base_lr = parse_optional_float(payload.get("learning_rate"))
+        anima_group_specs = [
+            ("learning_rate", "base"),
+            ("self_attn_lr", "self_attn"),
+            ("cross_attn_lr", "cross_attn"),
+            ("mlp_lr", "mlp"),
+            ("mod_lr", "mod"),
+            ("llm_adapter_lr", "llm_adapter"),
+        ]
+
+        active_groups: list[str] = []
+        for key, label in anima_group_specs:
+            raw_value = parse_optional_float(payload.get(key))
+            effective_lr = raw_value if key == "learning_rate" else (raw_value if raw_value is not None else base_lr)
+            if effective_lr not in (None, 0):
+                active_groups.append(label)
+
+        if not active_groups:
+            errors.append(
+                "All active Anima component learning rates resolve to 0, so the optimizer would receive no trainable parameters. "
+                "Please set learning_rate or at least one of self_attn_lr / cross_attn_lr / mlp_lr / mod_lr / llm_adapter_lr "
+                "to a non-zero value. "
+                "/ 当前所有生效的 Anima 分组学习率都为 0，会导致没有可训练参数，请将 learning_rate 或上述任一分组学习率设为非 0。"
+            )
+        else:
+            notes.append(f"Anima finetune active LR groups: {', '.join(active_groups)}.")
+        return
+
+    train_unet_only = parse_boolish(payload.get("network_train_unet_only"))
+    train_text_encoder_only = parse_boolish(payload.get("network_train_text_encoder_only"))
+    train_unet = not train_text_encoder_only
+    train_text_encoder = not train_unet_only
+
+    base_lr = parse_optional_float(payload.get("learning_rate"))
+    unet_lr = parse_optional_float(payload.get("unet_lr"))
+    text_encoder_lr = parse_optional_float(payload.get("text_encoder_lr"))
+
+    effective_unet_lr = unet_lr if unet_lr is not None else base_lr
+    effective_text_encoder_lr = text_encoder_lr if text_encoder_lr is not None else base_lr
+
+    if train_unet and not train_text_encoder and effective_unet_lr == 0:
+        errors.append(
+            "The active DiT / U-Net learning rate resolves to 0, so the optimizer would receive no trainable parameters. "
+            "Please set learning_rate or unet_lr to a non-zero value. "
+            "/ 当前生效的 DiT / U-Net 学习率为 0，会导致没有可训练参数，请将 learning_rate 或 unet_lr 设为非 0。"
+        )
+    elif train_text_encoder and not train_unet and effective_text_encoder_lr == 0:
+        errors.append(
+            "The active text encoder learning rate resolves to 0, so the optimizer would receive no trainable parameters. "
+            "Please set text_encoder_lr or learning_rate to a non-zero value. "
+            "/ 当前生效的文本编码器学习率为 0，会导致没有可训练参数，请将 text_encoder_lr 或 learning_rate 设为非 0。"
+        )
+    elif train_unet and train_text_encoder and effective_unet_lr == 0 and effective_text_encoder_lr == 0:
+        errors.append(
+            "Both active learning rates resolve to 0, so the optimizer would receive no trainable parameters. "
+            "Please set at least one active target learning rate to a non-zero value. "
+            "/ 当前所有生效学习率都为 0，会导致没有可训练参数，请至少为一个训练目标设置非 0 学习率。"
+        )
 
 
 def analyze_training_preflight(
@@ -226,6 +362,8 @@ def analyze_training_preflight(
                 "The current trainer is more transformer-heavy, so the speed gain may be limited."
             )
 
+    add_network_target_preflight_guidance(payload, errors, warnings, notes)
+    add_learning_rate_preflight_guidance(payload, errors, warnings, notes)
     add_anima_preflight_guidance(payload, training_type, errors, warnings, notes)
 
     if bool(payload.get("masked_loss")):

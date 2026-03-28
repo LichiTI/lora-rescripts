@@ -222,6 +222,44 @@ class NetworkTrainer:
     def is_train_text_encoder(self, args):
         return not args.network_train_unet_only
 
+    def get_network_target_module_counts(self, network) -> dict[str, int]:
+        counts: dict[str, int] = {}
+
+        text_encoder_loras = getattr(network, "text_encoder_loras", None)
+        if text_encoder_loras is not None:
+            counts["text_encoder"] = len(text_encoder_loras)
+
+        unet_loras = getattr(network, "unet_loras", None)
+        if unet_loras is not None:
+            counts["unet"] = len(unet_loras)
+
+        return counts
+
+    def validate_network_target_modules(self, args, network, train_text_encoder: bool, train_unet: bool):
+        counts = self.get_network_target_module_counts(network)
+        if not counts:
+            return
+
+        missing_targets: list[str] = []
+        if train_text_encoder and counts.get("text_encoder", 0) == 0:
+            missing_targets.append("text encoder")
+        if train_unet and counts.get("unet", 0) == 0:
+            missing_targets.append("DiT / U-Net")
+
+        if not missing_targets:
+            return
+
+        raise ValueError(
+            "The selected network route did not attach any trainable modules to the active training target(s): "
+            + ", ".join(missing_targets)
+            + ". "
+            + "This usually means the current base checkpoint is not compatible with the selected network module, "
+            + "or custom include/exclude patterns filtered every candidate module. "
+            + f"(network_module={getattr(args, 'network_module', 'unknown')}) "
+            + "/ 当前选择的训练目标没有挂载到任何可训练模块，通常表示底模与网络模块不匹配，"
+            + "或自定义 include/exclude 规则把所有候选层都过滤掉了。"
+        )
+
     def cache_text_encoder_outputs_if_needed(self, args, accelerator, unet, vae, text_encoders, dataset, weight_dtype):
         for t_enc in text_encoders:
             t_enc.to(accelerator.device, dtype=weight_dtype)
@@ -490,6 +528,27 @@ class NetworkTrainer:
     def cast_unet(self, args):
         return True  # default for other than HunyuanImage
 
+    def normalize_conflicting_network_target_flags(self, args):
+        train_unet_only = bool(getattr(args, "network_train_unet_only", False))
+        train_text_encoder_only = bool(getattr(args, "network_train_text_encoder_only", False))
+        if not train_unet_only or not train_text_encoder_only:
+            return
+
+        args.network_train_unet_only = False
+        args.network_train_text_encoder_only = False
+        logger.warning(
+            "Both network_train_unet_only and network_train_text_encoder_only were enabled. "
+            "Automatically switching to train both targets."
+        )
+
+        if bool(getattr(args, "cache_text_encoder_outputs", False)):
+            args.cache_text_encoder_outputs = False
+            if hasattr(args, "cache_text_encoder_outputs_to_disk"):
+                args.cache_text_encoder_outputs_to_disk = False
+            logger.warning(
+                "Disabled cache_text_encoder_outputs automatically because text encoder training is now active."
+            )
+
     def train(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
@@ -497,6 +556,7 @@ class NetworkTrainer:
         train_util.prepare_dataset_args(args, True)
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
+        self.normalize_conflicting_network_target_flags(args)
 
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
@@ -708,7 +768,14 @@ class NetworkTrainer:
         # apply network to unet and text_encoder
         train_unet = not args.network_train_text_encoder_only
         train_text_encoder = self.is_train_text_encoder(args)
+        if not train_unet and not train_text_encoder:
+            raise ValueError(
+                "No training target is enabled for this network route. "
+                "Please enable DiT/U-Net training or text encoder training before starting. "
+                "/ 当前没有任何训练目标，请至少启用 DiT/U-Net 或文本编码器中的一个。"
+            )
         network.apply_to(text_encoder, unet, train_text_encoder, train_unet)
+        self.validate_network_target_modules(args, network, train_text_encoder, train_unet)
 
         if args.network_weights is not None:
             # FIXME consider alpha of weights: this assumes that the alpha is not changed

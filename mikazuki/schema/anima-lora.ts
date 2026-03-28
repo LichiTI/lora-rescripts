@@ -12,27 +12,18 @@ Schema.intersect([
     Schema.object({
         qwen3_max_token_length: Schema.number().step(1).default(512).description("Qwen3 最大 token 长度"),
         t5_max_token_length: Schema.number().step(1).default(512).description("T5 最大 token 长度"),
-        timestep_sampling: Schema.union(["sigma", "uniform", "sigmoid", "shift", "flux_shift"]).default("sigmoid").description("时间步采样"),
+        timestep_sampling: Schema.union(["sigma", "uniform", "sigmoid", "shift", "flux_shift"]).default("shift").description("时间步采样。默认使用与官方 Anima 训练器一致的 shift"),
         sigmoid_scale: Schema.number().step(0.001).default(1.0).description("sigmoid 缩放"),
-        discrete_flow_shift: Schema.number().step(0.001).default(1.0).description("Rectified Flow 位移"),
+        discrete_flow_shift: Schema.number().step(0.001).default(3.0).description("Rectified Flow 位移。默认 3.0，与官方 Anima 训练器一致"),
         weighting_scheme: Schema.union(["sigma_sqrt", "logit_normal", "mode", "cosmap", "none", "uniform"]).default("uniform").description("时间步分布权重策略"),
         logit_mean: Schema.number().step(0.01).description("logit_normal 权重策略的均值"),
         logit_std: Schema.number().step(0.01).description("logit_normal 权重策略的标准差"),
         mode_scale: Schema.number().step(0.01).description("mode 权重策略的缩放系数"),
-        attn_mode: Schema.union(["", "torch", "xformers", "flash", "sageattn"]).default("").description("Attention 实现，留空表示使用脚本默认值（torch）"),
         split_attn: Schema.boolean().default(false).description("拆分 attention 计算以降低显存占用"),
         vae_chunk_size: Schema.number().min(2).description("VAE 编码/解码分块大小（需为偶数）"),
         vae_disable_cache: Schema.boolean().default(false).description("禁用内部 VAE 缓存机制"),
         unsloth_offload_checkpointing: Schema.boolean().default(false).description("使用更快的 CPU RAM activation offload（不能与 blocks_to_swap / cpu_offload_checkpointing 同时使用）"),
     }).description("Anima 专用参数"),
-
-    Schema.object({
-        self_attn_lr: Schema.string().description("自注意力层学习率，留空则跟随基础学习率，0 表示冻结"),
-        cross_attn_lr: Schema.string().description("交叉注意力层学习率，留空则跟随基础学习率，0 表示冻结"),
-        mlp_lr: Schema.string().description("MLP 层学习率，留空则跟随基础学习率，0 表示冻结"),
-        mod_lr: Schema.string().description("AdaLN 调制层学习率，留空则跟随基础学习率，0 表示冻结"),
-        llm_adapter_lr: Schema.string().description("LLM Adapter 学习率，留空则跟随基础学习率，0 表示冻结"),
-    }).description("Anima 分组学习率"),
 
     Schema.object(
         UpdateSchema(SHARED_SCHEMAS.RAW.DATASET_SETTINGS, {

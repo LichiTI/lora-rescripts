@@ -10,7 +10,7 @@ from accelerate import init_empty_weights
 from library.fp8_optimization_utils import apply_fp8_monkey_patch
 from library.lora_utils import load_safetensors_with_lora_and_fp8
 from library import anima_models
-from library.safetensors_utils import WeightTransformHooks
+from library.safetensors_utils import MemoryEfficientSafeOpen, WeightTransformHooks, get_split_weight_filenames
 from .utils import setup_logging
 
 setup_logging()
@@ -27,6 +27,69 @@ logger = logging.getLogger(__name__)
 FP8_OPTIMIZATION_TARGET_KEYS = ["blocks", ""]
 # ".embed." excludes Embedding in LLMAdapter
 FP8_OPTIMIZATION_EXCLUDE_KEYS = ["_embedder", "norm", "adaln", "final_layer", ".embed."]
+EXPECTED_BUFFER_KEY_FRAGMENTS = ("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq")
+
+
+def _normalize_wrapped_model_key(key: str) -> str:
+    normalized = key
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("module.", "model.", "net."):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+                changed = True
+
+    llm_adapter_idx = normalized.find("llm_adapter.")
+    if llm_adapter_idx >= 0:
+        normalized = normalized[llm_adapter_idx:]
+
+    return normalized
+
+
+def _iter_external_checkpoint_tensors(path: str):
+    if path.endswith(".safetensors"):
+        split_files = get_split_weight_filenames(path) or [path]
+        for filename in split_files:
+            with MemoryEfficientSafeOpen(filename) as f:
+                for key in f.keys():
+                    yield key, f.get_tensor(key)
+        return
+
+    try:
+        loaded = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        loaded = torch.load(path, map_location="cpu")
+
+    if isinstance(loaded, dict) and isinstance(loaded.get("state_dict"), dict):
+        loaded = loaded["state_dict"]
+    if not isinstance(loaded, dict):
+        raise ValueError(f"External checkpoint {path} did not contain a tensor state_dict")
+
+    for key, value in loaded.items():
+        if torch.is_tensor(value):
+            yield key, value
+
+
+def _load_external_llm_adapter_state_dict(path: str) -> Dict[str, torch.Tensor]:
+    normalized_path = os.path.expandvars(os.path.expanduser(str(path or "").strip()))
+    if not normalized_path:
+        return {}
+    if not os.path.exists(normalized_path):
+        raise FileNotFoundError(f"LLM adapter checkpoint not found: {normalized_path}")
+
+    adapter_state_dict: Dict[str, torch.Tensor] = {}
+    for original_key, tensor in _iter_external_checkpoint_tensors(normalized_path):
+        normalized_key = _normalize_wrapped_model_key(original_key)
+        if normalized_key.startswith("llm_adapter."):
+            adapter_state_dict[normalized_key] = tensor
+
+    if not adapter_state_dict:
+        raise ValueError(
+            f"External LLM adapter checkpoint does not contain any llm_adapter.* tensors: {normalized_path}"
+        )
+
+    return adapter_state_dict
 
 
 def load_anima_model(
@@ -39,6 +102,7 @@ def load_anima_model(
     fp8_scaled: bool = False,
     lora_weights_list: Optional[List[Dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[list[float]] = None,
+    llm_adapter_path: Optional[str] = None,
 ) -> anima_models.Anima:
     """
     Load Anima model from the specified checkpoint.
@@ -132,7 +196,7 @@ def load_anima_model(
         unexpected_missing = [
             k
             for k in missing
-            if not any(buf_name in k for buf_name in ("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"))
+            if not any(buf_name in k for buf_name in EXPECTED_BUFFER_KEY_FRAGMENTS)
         ]
         if unexpected_missing:
             # Raise error to avoid silent failures
@@ -144,6 +208,42 @@ def load_anima_model(
         # Raise error to avoid silent failures
         raise RuntimeError(f"Unexpected keys in checkpoint: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
     logger.info(f"Loaded DiT model from {dit_path}, unexpected missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+
+    if llm_adapter_path:
+        adapter_sd = _load_external_llm_adapter_state_dict(llm_adapter_path)
+        expected_llm_keys = {key for key in model.state_dict().keys() if key.startswith("llm_adapter.")}
+        adapter_keys = set(adapter_sd.keys())
+        missing_adapter_keys = [
+            key for key in sorted(expected_llm_keys - adapter_keys) if not any(buf in key for buf in EXPECTED_BUFFER_KEY_FRAGMENTS)
+        ]
+        unexpected_adapter_keys = sorted(adapter_keys - expected_llm_keys)
+
+        if missing_adapter_keys:
+            raise RuntimeError(
+                "External LLM adapter checkpoint is missing required keys: "
+                f"{missing_adapter_keys[:10]}{'...' if len(missing_adapter_keys) > 10 else ''}"
+            )
+        if unexpected_adapter_keys:
+            raise RuntimeError(
+                "External LLM adapter checkpoint contains unexpected keys: "
+                f"{unexpected_adapter_keys[:10]}{'...' if len(unexpected_adapter_keys) > 10 else ''}"
+            )
+
+        missing, unexpected = model.load_state_dict(adapter_sd, strict=False, assign=False)
+        missing = [key for key in missing if key.startswith("llm_adapter.")]
+        missing = [key for key in missing if not any(buf in key for buf in EXPECTED_BUFFER_KEY_FRAGMENTS)]
+        unexpected = [key for key in unexpected if key.startswith("llm_adapter.")]
+        if missing:
+            raise RuntimeError(
+                "External LLM adapter checkpoint could not fully override llm_adapter weights: "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+        if unexpected:
+            raise RuntimeError(
+                "External LLM adapter checkpoint produced unexpected llm_adapter keys: "
+                f"{unexpected[:10]}{'...' if len(unexpected) > 10 else ''}"
+            )
+        logger.info(f"Overrode Anima llm_adapter weights from {llm_adapter_path}")
 
     return model
 

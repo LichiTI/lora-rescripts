@@ -46,6 +46,10 @@ def train(args):
     deepspeed_utils.prepare_deepspeed_args(args)
     setup_logging(args, reset=True)
 
+    args.attn_mode = anima_train_utils.normalize_anima_attn_mode(
+        getattr(args, "attn_mode", None),
+    )
+
     # backward compatibility
     if not args.skip_cache_check:
         args.skip_cache_check = args.skip_latents_validity_check
@@ -179,6 +183,7 @@ def train(args):
 
     text_encoding_strategy = strategy_anima.AnimaTextEncodingStrategy()
     strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
+    train_dataset_group.set_current_strategies()
 
     # Prepare text encoder (always frozen for Anima)
     qwen3_text_encoder.to(weight_dtype)
@@ -226,6 +231,7 @@ def train(args):
     vae = qwen_image_autoencoder_kl.load_vae(
         vae_path, device="cpu", disable_mmap=True, spatial_chunk_size=args.vae_chunk_size, disable_cache=args.vae_disable_cache
     )
+    anima_train_utils.apply_opt_channels_last_for_anima(args, ("Anima VAE", vae))
 
     if cache_latents:
         vae.to(accelerator.device, dtype=weight_dtype)
@@ -241,19 +247,21 @@ def train(args):
     # Load DiT (MiniTrainDIT + optional LLM Adapter)
     logger.info("Loading Anima DiT...")
     dit = anima_utils.load_anima_model(
-        "cpu", args.pretrained_model_name_or_path, args.attn_mode, args.split_attn, "cpu", dit_weight_dtype=None
+        "cpu",
+        args.pretrained_model_name_or_path,
+        args.attn_mode,
+        args.split_attn,
+        "cpu",
+        dit_weight_dtype=None,
+        llm_adapter_path=args.llm_adapter_path,
     )
+    anima_train_utils.apply_opt_channels_last_for_anima(args, ("Anima DiT", dit))
 
     if args.gradient_checkpointing:
         dit.enable_gradient_checkpointing(
             cpu_offload=args.cpu_offload_checkpointing,
             unsloth_offload=args.unsloth_offload_checkpointing,
         )
-
-    train_dit = args.learning_rate != 0
-    dit.requires_grad_(train_dit)
-    if not train_dit:
-        dit.to(accelerator.device, dtype=weight_dtype)
 
     # Block swap
     is_swapping_blocks = args.blocks_to_swap is not None and args.blocks_to_swap > 0
@@ -267,18 +275,22 @@ def train(args):
         vae.to(accelerator.device, dtype=weight_dtype)
 
     # Setup optimizer with parameter groups
-    if train_dit:
-        param_groups = anima_train_utils.get_anima_param_groups(
-            dit,
-            base_lr=args.learning_rate,
-            self_attn_lr=args.self_attn_lr,
-            cross_attn_lr=args.cross_attn_lr,
-            mlp_lr=args.mlp_lr,
-            mod_lr=args.mod_lr,
-            llm_adapter_lr=args.llm_adapter_lr,
+    param_groups = anima_train_utils.get_anima_param_groups(
+        dit,
+        base_lr=args.learning_rate,
+        self_attn_lr=args.self_attn_lr,
+        cross_attn_lr=args.cross_attn_lr,
+        mlp_lr=args.mlp_lr,
+        mod_lr=args.mod_lr,
+        llm_adapter_lr=args.llm_adapter_lr,
+    )
+    train_dit = len(param_groups) > 0
+    if not train_dit:
+        raise ValueError(
+            "No trainable Anima components remain after applying learning_rate / self_attn_lr / "
+            "cross_attn_lr / mlp_lr / mod_lr / llm_adapter_lr. "
+            "Please make sure at least one effective learning rate is non-zero."
         )
-    else:
-        param_groups = []
 
     training_models = []
     if train_dit:
@@ -497,11 +509,13 @@ def train(args):
                     with torch.no_grad():
                         # images are already [-1, 1] from IMAGE_TRANSFORMS, add temporal dim
                         images = batch["images"].to(accelerator.device, dtype=weight_dtype)
+                        images = anima_train_utils.maybe_apply_anima_channels_last(args, images)
                         latents = vae.encode_pixels_to_latents(images).to(accelerator.device, dtype=dit_weight_dtype)
 
                     if torch.any(torch.isnan(latents)):
                         accelerator.print("NaN found in latents, replacing with zeros")
                         latents = torch.nan_to_num(latents, 0, out=latents)
+                latents = anima_train_utils.maybe_apply_anima_channels_last(args, latents)
 
                 # Get text encoder outputs
                 text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
@@ -549,9 +563,11 @@ def train(args):
                 h_latent = latents.shape[-2]
                 w_latent = latents.shape[-1]
                 padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=dit_weight_dtype, device=accelerator.device)
+                padding_mask = anima_train_utils.maybe_apply_anima_channels_last(args, padding_mask)
 
                 # DiT forward (LLM adapter runs inside forward for DDP gradient sync)
                 noisy_model_input = noisy_model_input.unsqueeze(2)  # 4D to 5D, (B, C, 1, H, W)
+                noisy_model_input = anima_train_utils.maybe_apply_anima_channels_last(args, noisy_model_input)
                 with accelerator.autocast():
                     model_pred = dit(
                         noisy_model_input,
@@ -769,14 +785,31 @@ def setup_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _restore_missing_parser_defaults(parser, args):
+    for action in getattr(parser, '_actions', []):
+        dest = getattr(action, 'dest', None)
+        if not dest or dest == 'help':
+            continue
+        if not hasattr(args, dest):
+            setattr(args, dest, action.default)
+    return args
+
+
 if __name__ == "__main__":
     parser = setup_parser()
 
     args = parser.parse_args()
     train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
+    args = _restore_missing_parser_defaults(parser, args)
 
     if args.attn_mode == "sdpa":
         args.attn_mode = "torch"  # backward compatibility
 
     train(args)
+
+
+
+
+
+
