@@ -50,7 +50,7 @@ Schema.intersect([
 
     Schema.intersect([
         Schema.object({
-            lora_type: Schema.union(["lora", "lokr"]).default("lora").description("适配器类型。LoRA 更轻量；LoKr 走内置线性层注入的实验路线"),
+            lora_type: Schema.union(["lora", "tlora", "lokr"]).default("lora").description("适配器类型。LoRA 更轻量；T-LoRA 会按时间步动态 rank；LoKr 走内置线性层注入的实验路线"),
             network_weights: Schema.string().role('filepicker').description("从已有的 LoRA / LoKr 模型继续训练，填写路径"),
             network_dim: Schema.number().min(1).default(16).description("网络维度，常用 4~128，不是越大越好, 低 dim 可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(16).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
@@ -68,6 +68,17 @@ Schema.intersect([
                 lora_type: Schema.const("lora").required(),
                 network_module: Schema.const("networks.lora_anima").default("networks.lora_anima").hidden(),
                 network_dropout: Schema.number().step(0.01).default(0).description("LoRA dropout 概率"),
+                lycoris_algo: Schema.string().hidden(),
+                lokr_factor: Schema.number().hidden(),
+                dropout: Schema.number().hidden(),
+            }),
+            Schema.object({
+                lora_type: Schema.const("tlora").required(),
+                network_module: Schema.const("networks.tlora_anima").default("networks.tlora_anima").hidden(),
+                network_dropout: Schema.number().step(0.01).default(0).description("T-LoRA dropout 概率"),
+                tlora_min_rank: Schema.number().min(1).default(1).description("T-LoRA 最小动态 rank"),
+                tlora_rank_schedule: Schema.union(["cosine", "linear"]).default("cosine").description("T-LoRA 动态 rank 调度"),
+                tlora_orthogonal_init: Schema.boolean().default(false).description("T-LoRA 对 lora_down 使用正交初始化（实验性）"),
                 lycoris_algo: Schema.string().hidden(),
                 lokr_factor: Schema.number().hidden(),
                 dropout: Schema.number().hidden(),

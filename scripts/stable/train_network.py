@@ -324,16 +324,22 @@ class NetworkTrainer:
 
         # Predict the noise residual
         with torch.set_grad_enabled(is_train), accelerator.autocast():
-            noise_pred = self.call_unet(
-                args,
-                accelerator,
-                unet,
-                noisy_latents.requires_grad_(train_unet),
-                timesteps,
-                text_encoder_conds,
-                batch,
-                weight_dtype,
-            )
+            try:
+                if network is not None and hasattr(network, "set_current_timestep"):
+                    network.set_current_timestep(timesteps)
+                noise_pred = self.call_unet(
+                    args,
+                    accelerator,
+                    unet,
+                    noisy_latents.requires_grad_(train_unet),
+                    timesteps,
+                    text_encoder_conds,
+                    batch,
+                    weight_dtype,
+                )
+            finally:
+                if network is not None and hasattr(network, "clear_current_timestep"):
+                    network.clear_current_timestep()
 
         if args.v_parameterization:
             # v-parameterization training
@@ -351,17 +357,23 @@ class NetworkTrainer:
             if len(diff_output_pr_indices) > 0:
                 network.set_multiplier(0.0)
                 with torch.no_grad(), accelerator.autocast():
-                    noise_pred_prior = self.call_unet(
-                        args,
-                        accelerator,
-                        unet,
-                        noisy_latents,
-                        timesteps,
-                        text_encoder_conds,
-                        batch,
-                        weight_dtype,
-                        indices=diff_output_pr_indices,
-                    )
+                    try:
+                        if network is not None and hasattr(network, "set_current_timestep"):
+                            network.set_current_timestep(timesteps[diff_output_pr_indices])
+                        noise_pred_prior = self.call_unet(
+                            args,
+                            accelerator,
+                            unet,
+                            noisy_latents,
+                            timesteps,
+                            text_encoder_conds,
+                            batch,
+                            weight_dtype,
+                            indices=diff_output_pr_indices,
+                        )
+                    finally:
+                        if network is not None and hasattr(network, "clear_current_timestep"):
+                            network.clear_current_timestep()
                 network.set_multiplier(1.0)  # may be overwritten by "network_multipliers" in the next step
                 target[diff_output_pr_indices] = noise_pred_prior.to(target.dtype)
 

@@ -1,4 +1,4 @@
-# temporary minimum implementation of LoRA
+# experimental T-LoRA-style implementation for FLUX
 # FLUX doesn't have Conv2d, so we ignore it
 # TODO commonize with the original implementation
 
@@ -48,6 +48,9 @@ class LoRAModule(torch.nn.Module):
         split_dims: Optional[List[int]] = None,
         ggpo_beta: Optional[float] = None,
         ggpo_sigma: Optional[float] = None,
+        tlora_min_rank: Optional[int] = None,
+        tlora_rank_schedule: Optional[str] = None,
+        tlora_orthogonal_init: bool = False,
     ):
         """
         if alpha == 0 or None, alpha is rank (no scaling).
@@ -66,6 +69,12 @@ class LoRAModule(torch.nn.Module):
 
         self.lora_dim = lora_dim
         self.split_dims = split_dims
+        self.network = None
+        self.tlora_min_rank = max(1, min(self.lora_dim, int(tlora_min_rank if tlora_min_rank is not None else 1)))
+        self.tlora_rank_schedule = str(tlora_rank_schedule or "cosine").strip().lower() or "cosine"
+        if self.tlora_rank_schedule not in {"linear", "cosine"}:
+            self.tlora_rank_schedule = "cosine"
+        self.tlora_orthogonal_init = bool(tlora_orthogonal_init)
 
         if split_dims is None:
             if org_module.__class__.__name__ == "Conv2d":
@@ -80,6 +89,8 @@ class LoRAModule(torch.nn.Module):
 
             torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
             torch.nn.init.zeros_(self.lora_up.weight)
+            if self.tlora_orthogonal_init:
+                torch.nn.init.orthogonal_(self.lora_down.weight)
         else:
             # conv2d not supported
             assert sum(split_dims) == out_dim, "sum of split_dims must be equal to out_dim"
@@ -91,6 +102,8 @@ class LoRAModule(torch.nn.Module):
             self.lora_up = torch.nn.ModuleList([torch.nn.Linear(self.lora_dim, split_dim, bias=False) for split_dim in split_dims])
             for lora_down in self.lora_down:
                 torch.nn.init.kaiming_uniform_(lora_down.weight, a=math.sqrt(5))
+                if self.tlora_orthogonal_init:
+                    torch.nn.init.orthogonal_(lora_down.weight)
             for lora_up in self.lora_up:
                 torch.nn.init.zeros_(lora_up.weight)
 
@@ -123,6 +136,56 @@ class LoRAModule(torch.nn.Module):
 
         del self.org_module
 
+    def set_network(self, network):
+        self.network = network
+
+    def _get_current_timesteps(self):
+        if self.network is None or not self.lora_name.startswith("lora_unet"):
+            return None
+        timesteps = getattr(self.network, "current_timestep", None)
+        if timesteps is None:
+            return None
+        if not torch.is_tensor(timesteps):
+            return None
+        if timesteps.numel() == 0:
+            return None
+        return timesteps
+
+    def _get_tlora_rank_mask_and_scale(self, lx):
+        timesteps = self._get_current_timesteps()
+        if timesteps is None or self.lora_dim <= self.tlora_min_rank:
+            return None, 1.0
+
+        batch_size = lx.size(0)
+        timesteps = timesteps.detach().to(device=lx.device, dtype=torch.float32).reshape(-1)
+        if timesteps.numel() == 1:
+            timesteps = timesteps.expand(batch_size)
+        elif timesteps.numel() != batch_size:
+            return None, 1.0
+
+        if timesteps.max().item() > 1.0 or timesteps.min().item() < 0.0:
+            timesteps = timesteps / 1000.0
+        timesteps = timesteps.clamp(0.0, 1.0)
+
+        # Default policy: high-noise steps use fewer active ranks, low-noise steps use more.
+        progress = 1.0 - timesteps
+        if self.tlora_rank_schedule == "cosine":
+            progress = 0.5 - 0.5 * torch.cos(progress * math.pi)
+
+        active_rank = self.tlora_min_rank + torch.round((self.lora_dim - self.tlora_min_rank) * progress).to(torch.int64)
+        active_rank = active_rank.clamp(min=self.tlora_min_rank, max=self.lora_dim)
+
+        rank_index = torch.arange(self.lora_dim, device=lx.device).unsqueeze(0)
+        mask = (rank_index < active_rank.unsqueeze(1)).to(dtype=lx.dtype)
+        while mask.dim() < lx.dim():
+            mask = mask.unsqueeze(1)
+
+        scale = (self.lora_dim / active_rank.clamp(min=1)).to(dtype=lx.dtype)
+        while torch.is_tensor(scale) and scale.dim() < lx.dim():
+            scale = scale.unsqueeze(-1)
+
+        return mask, scale
+
     def forward(self, x):
         org_forwarded = self.org_forward(x)
 
@@ -133,6 +196,9 @@ class LoRAModule(torch.nn.Module):
 
         if self.split_dims is None:
             lx = self.lora_down(x)
+            tlora_rank_mask, tlora_scale = self._get_tlora_rank_mask_and_scale(lx)
+            if tlora_rank_mask is not None:
+                lx = lx * tlora_rank_mask
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -152,6 +218,8 @@ class LoRAModule(torch.nn.Module):
                 scale = self.scale * (1.0 / (1.0 - self.rank_dropout))  # redundant for readability
             else:
                 scale = self.scale
+            if tlora_rank_mask is not None:
+                scale = scale * tlora_scale
 
             lx = self.lora_up(lx)
 
@@ -176,6 +244,11 @@ class LoRAModule(torch.nn.Module):
                 return org_forwarded + lx * self.multiplier * scale
         else:
             lxs = [lora_down(x) for lora_down in self.lora_down]
+            tlora_masks_and_scales = [self._get_tlora_rank_mask_and_scale(lx) for lx in lxs]
+            lxs = [
+                lx * mask if mask is not None else lx
+                for lx, (mask, _) in zip(lxs, tlora_masks_and_scales)
+            ]
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -195,6 +268,10 @@ class LoRAModule(torch.nn.Module):
                 scale = self.scale * (1.0 / (1.0 - self.rank_dropout))  # redundant for readability
             else:
                 scale = self.scale
+            if any(mask is not None for mask, _ in tlora_masks_and_scales):
+                # split_qkv style modules share one rank budget, so reuse the first active-rank scale.
+                _, tlora_scale = tlora_masks_and_scales[0]
+                scale = scale * tlora_scale
 
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
 
@@ -576,6 +653,14 @@ def create_network(
     if train_t5xxl is not None:
         train_t5xxl = True if train_t5xxl == "True" else False
 
+    tlora_min_rank = kwargs.get("tlora_min_rank", 1)
+    if tlora_min_rank is not None:
+        tlora_min_rank = int(tlora_min_rank)
+    tlora_rank_schedule = str(kwargs.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
+    tlora_orthogonal_init = kwargs.get("tlora_orthogonal_init", False)
+    if tlora_orthogonal_init is not None:
+        tlora_orthogonal_init = True if str(tlora_orthogonal_init) == "True" else bool(tlora_orthogonal_init)
+
     # verbose
     verbose = kwargs.get("verbose", False)
     if verbose is not None:
@@ -640,6 +725,9 @@ def create_network(
         ggpo_beta=ggpo_beta,
         ggpo_sigma=ggpo_sigma,
         reg_lrs=reg_lrs,
+        tlora_min_rank=tlora_min_rank,
+        tlora_rank_schedule=tlora_rank_schedule,
+        tlora_orthogonal_init=tlora_orthogonal_init,
         verbose=verbose,
     )
 
@@ -743,6 +831,9 @@ class LoRANetwork(torch.nn.Module):
         ggpo_beta: Optional[float] = None,
         ggpo_sigma: Optional[float] = None,
         reg_lrs: Optional[Dict[str, float]] = None,
+        tlora_min_rank: int = 1,
+        tlora_rank_schedule: str = "cosine",
+        tlora_orthogonal_init: bool = False,
         verbose: Optional[bool] = False,
     ) -> None:
         super().__init__()
@@ -765,6 +856,10 @@ class LoRANetwork(torch.nn.Module):
         self.train_single_block_indices = train_single_block_indices
         self.reg_dims = reg_dims
         self.reg_lrs = reg_lrs
+        self.tlora_min_rank = max(1, int(tlora_min_rank))
+        self.tlora_rank_schedule = str(tlora_rank_schedule or "cosine").strip().lower() or "cosine"
+        self.tlora_orthogonal_init = bool(tlora_orthogonal_init)
+        self.current_timestep: Optional[torch.Tensor] = None
 
         self.loraplus_lr_ratio = None
         self.loraplus_unet_lr_ratio = None
@@ -778,6 +873,9 @@ class LoRANetwork(torch.nn.Module):
             logger.info(f"create LoRA network. base dim (rank): {lora_dim}, alpha: {alpha}")
             logger.info(
                 f"neuron dropout: p={self.dropout}, rank dropout: p={self.rank_dropout}, module dropout: p={self.module_dropout}"
+            )
+            logger.info(
+                f"T-LoRA timestep rank schedule: min_rank={self.tlora_min_rank}, schedule={self.tlora_rank_schedule}, orthogonal_init={self.tlora_orthogonal_init}"
             )
             # if self.conv_lora_dim is not None:
             #     logger.info(
@@ -921,6 +1019,9 @@ class LoRANetwork(torch.nn.Module):
                                 split_dims=split_dims,
                                 ggpo_beta=ggpo_beta,
                                 ggpo_sigma=ggpo_sigma,
+                                tlora_min_rank=self.tlora_min_rank,
+                                tlora_rank_schedule=self.tlora_rank_schedule,
+                                tlora_orthogonal_init=self.tlora_orthogonal_init,
                             )
                             loras.append(lora)
 
@@ -987,6 +1088,12 @@ class LoRANetwork(torch.nn.Module):
         self.multiplier = multiplier
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.multiplier = self.multiplier
+
+    def set_current_timestep(self, timesteps: Optional[torch.Tensor]):
+        self.current_timestep = timesteps
+
+    def clear_current_timestep(self):
+        self.current_timestep = None
 
     def set_enabled(self, is_enabled):
         for lora in self.text_encoder_loras + self.unet_loras:
@@ -1149,6 +1256,7 @@ class LoRANetwork(torch.nn.Module):
             self.unet_loras = []
 
         for lora in self.text_encoder_loras + self.unet_loras:
+            lora.set_network(self)
             lora.apply_to()
             self.add_module(lora.lora_name, lora)
 

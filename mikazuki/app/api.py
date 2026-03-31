@@ -339,19 +339,23 @@ def apply_anima_ui_overrides(config: dict) -> None:
         train_norm_enabled = parse_boolish(existing_train_norm) if existing_train_norm is not None else None
     else:
         train_norm_enabled = parse_boolish(raw_train_norm)
+
     if model_train_type == "anima-lora" and not lora_type:
         legacy_network_module = str(config.get("network_module", "")).strip().lower()
-        if legacy_network_module == "lycoris.kohya":
+        if legacy_network_module == "networks.tlora_anima":
+            lora_type = "tlora"
+        elif legacy_network_module == "lycoris.kohya":
             lora_type = "lokr"
         elif str(get_network_arg_value(network_args, "algo") or "").strip().lower() == "lokr":
             lora_type = "lokr"
         else:
             lora_type = "lora"
+
     if model_train_type == "anima-lora" and lora_type:
-        config["network_module"] = "networks.lora_anima"
         config.pop("lycoris_algo", None)
 
         if lora_type == "lokr":
+            config["network_module"] = "networks.lora_anima"
             config["anima_adapter_type"] = "lokr"
             legacy_factor = get_network_arg_value(network_args, "factor")
             if legacy_factor not in (None, "") and "lokr_factor" not in config:
@@ -369,12 +373,75 @@ def apply_anima_ui_overrides(config: dict) -> None:
                 config["network_dropout"] = 0
             for key in ("conv_dim", "conv_alpha"):
                 config.pop(key, None)
-            stale_prefixes = ("algo=", "factor=", "conv_dim=", "conv_alpha=", "train_norm=", "dropout=")
+            stale_prefixes = (
+                "algo=",
+                "factor=",
+                "conv_dim=",
+                "conv_alpha=",
+                "train_norm=",
+                "dropout=",
+                "tlora_min_rank=",
+                "tlora_rank_schedule=",
+                "tlora_orthogonal_init=",
+            )
             network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+        elif lora_type == "tlora":
+            config["network_module"] = "networks.tlora_anima"
+            config["anima_adapter_type"] = "tlora"
+            stale_prefixes = (
+                "algo=",
+                "factor=",
+                "conv_dim=",
+                "conv_alpha=",
+                "train_norm=",
+                "dropout=",
+                "lokr_factor=",
+                "tlora_min_rank=",
+                "tlora_rank_schedule=",
+                "tlora_orthogonal_init=",
+            )
+            network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+            network_args = upsert_network_arg(network_args, "anima_adapter_type", "tlora")
+
+            try:
+                network_dim = int(config.get("network_dim", 0) or 0)
+            except (TypeError, ValueError):
+                network_dim = 0
+
+            try:
+                min_rank = int(config.get("tlora_min_rank", 1) or 1)
+            except (TypeError, ValueError):
+                min_rank = 1
+
+            if network_dim > 0:
+                min_rank = max(1, min(min_rank, network_dim))
+            else:
+                min_rank = max(1, min_rank)
+
+            config["tlora_min_rank"] = min_rank
+            network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
+
+            rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
+            if rank_schedule not in {"linear", "cosine"}:
+                rank_schedule = "cosine"
+            config["tlora_rank_schedule"] = rank_schedule
+            network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
+
+            orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
+            config["tlora_orthogonal_init"] = orthogonal_init
+            network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
+
+            for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
+                config.pop(key, None)
         else:
+            config["network_module"] = "networks.lora_anima"
             config["anima_adapter_type"] = "lora"
             network_args = upsert_network_arg(network_args, "anima_adapter_type", "lora")
-            network_args = [item for item in network_args if not str(item).startswith("lokr_factor=")]
+            network_args = [
+                item
+                for item in network_args
+                if not str(item).startswith(("lokr_factor=", "tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init="))
+            ]
             for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
                 config.pop(key, None)
 
@@ -393,9 +460,145 @@ def apply_anima_ui_overrides(config: dict) -> None:
         custom_attributes["prefer_json_caption"] = parse_boolish(config.pop("prefer_json_caption"))
         config["custom_attributes"] = custom_attributes
 
+
+def apply_flux_tlora_ui_overrides(config: dict) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if model_train_type != "flux-lora":
+        return
+
+    def normalize_network_args(*values):
+        items = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    item_str = str(item).strip()
+                    if item_str:
+                        items.append(item_str)
+            else:
+                item_str = str(value).strip()
+                if item_str:
+                    items.append(item_str)
+        return items
+
+    def upsert_network_arg(args_list, key, value):
+        prefix = f"{key}="
+        filtered = [item for item in args_list if not str(item).startswith(prefix)]
+        if value is not None and str(value).strip() != "":
+            filtered.append(f"{key}={value}")
+        return filtered
+
+    network_args = normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+    network_module = str(config.get("network_module", "") or "").strip().lower()
+    stale_prefixes = ("tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init=")
+    network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+
+    if network_module == "networks.tlora_flux":
+        try:
+            network_dim = int(config.get("network_dim", 0) or 0)
+        except (TypeError, ValueError):
+            network_dim = 0
+
+        try:
+            min_rank = int(config.get("tlora_min_rank", 1) or 1)
+        except (TypeError, ValueError):
+            min_rank = 1
+
+        if network_dim > 0:
+            min_rank = max(1, min(min_rank, network_dim))
+        else:
+            min_rank = max(1, min_rank)
+
+        config["tlora_min_rank"] = min_rank
+        network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
+
+        rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
+        if rank_schedule not in {"linear", "cosine"}:
+            rank_schedule = "cosine"
+        config["tlora_rank_schedule"] = rank_schedule
+        network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
+
+        orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
+        config["tlora_orthogonal_init"] = orthogonal_init
+        network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
+
+    if network_args:
+        config["network_args"] = network_args
+    else:
+        config.pop("network_args", None)
+
     sample_scheduler = str(config.get("sample_scheduler", "") or "").strip()
     if sample_scheduler == "":
         config["sample_scheduler"] = "simple"
+
+
+def apply_stable_tlora_ui_overrides(config: dict) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if model_train_type not in {"sd-lora", "sdxl-lora"}:
+        return
+
+    def normalize_network_args(*values):
+        items = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    item_str = str(item).strip()
+                    if item_str:
+                        items.append(item_str)
+            else:
+                item_str = str(value).strip()
+                if item_str:
+                    items.append(item_str)
+        return items
+
+    def upsert_network_arg(args_list, key, value):
+        prefix = f"{key}="
+        filtered = [item for item in args_list if not str(item).startswith(prefix)]
+        if value is not None and str(value).strip() != "":
+            filtered.append(f"{key}={value}")
+        return filtered
+
+    network_args = normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+    network_module = str(config.get("network_module", "") or "").strip().lower()
+    stale_prefixes = ("tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init=")
+    network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+
+    if network_module == "networks.tlora":
+        try:
+            network_dim = int(config.get("network_dim", 0) or 0)
+        except (TypeError, ValueError):
+            network_dim = 0
+
+        try:
+            min_rank = int(config.get("tlora_min_rank", 1) or 1)
+        except (TypeError, ValueError):
+            min_rank = 1
+
+        if network_dim > 0:
+            min_rank = max(1, min(min_rank, network_dim))
+        else:
+            min_rank = max(1, min_rank)
+
+        config["tlora_min_rank"] = min_rank
+        network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
+
+        rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
+        if rank_schedule not in {"linear", "cosine"}:
+            rank_schedule = "cosine"
+        config["tlora_rank_schedule"] = rank_schedule
+        network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
+
+        orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
+        config["tlora_orthogonal_init"] = orthogonal_init
+        network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
+
+    if network_args:
+        config["network_args"] = network_args
+    else:
+        config.pop("network_args", None)
 
 
 def resolve_anima_runtime_attention_backend(gpu_ids=None) -> str:
@@ -845,6 +1048,8 @@ async def create_toml_file(request: Request):
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     apply_anima_ui_overrides(config)
+    apply_flux_tlora_ui_overrides(config)
+    apply_stable_tlora_ui_overrides(config)
     start_warnings = []
     start_warnings.extend(normalize_conflicting_network_target_flags(config))
 
@@ -1035,6 +1240,8 @@ async def training_preflight(request: Request) -> APIResponse:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     apply_anima_ui_overrides(config)
+    apply_flux_tlora_ui_overrides(config)
+    apply_stable_tlora_ui_overrides(config)
     normalize_conflicting_network_target_flags(config)
 
     raw_gpu_ids = config.get("gpu_ids")
@@ -1071,6 +1278,8 @@ async def training_sample_prompt(request: Request) -> APIResponse:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
     apply_anima_ui_overrides(config)
+    apply_flux_tlora_ui_overrides(config)
+    apply_stable_tlora_ui_overrides(config)
     normalize_conflicting_network_target_flags(config)
 
     try:

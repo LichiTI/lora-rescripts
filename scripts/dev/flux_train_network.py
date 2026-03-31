@@ -377,17 +377,23 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 )
             return model_pred
 
-        model_pred = call_dit(
-            img=packed_noisy_model_input,
-            img_ids=img_ids,
-            t5_out=t5_out,
-            txt_ids=txt_ids,
-            l_pooled=l_pooled,
-            timesteps=timesteps,
-            guidance_vec=guidance_vec,
-            t5_attn_mask=t5_attn_mask,
-            mod_vectors=mod_vectors,
-        )
+        if network is not None and hasattr(network, "set_current_timestep"):
+            network.set_current_timestep(timesteps)
+        try:
+            model_pred = call_dit(
+                img=packed_noisy_model_input,
+                img_ids=img_ids,
+                t5_out=t5_out,
+                txt_ids=txt_ids,
+                l_pooled=l_pooled,
+                timesteps=timesteps,
+                guidance_vec=guidance_vec,
+                t5_attn_mask=t5_attn_mask,
+                mod_vectors=mod_vectors,
+            )
+        finally:
+            if network is not None and hasattr(network, "clear_current_timestep"):
+                network.clear_current_timestep()
 
         # unpack latents
         model_pred = flux_utils.unpack_latents(model_pred, packed_latent_height, packed_latent_width)

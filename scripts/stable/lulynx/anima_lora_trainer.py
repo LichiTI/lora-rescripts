@@ -318,6 +318,7 @@ class AnimaNetworkTrainer:
         latents,
         text_encoder_conds,
         unet,
+        network,
         weight_dtype,
         is_train=True,
         profiler: Optional[anima_train_utils.AnimaStepTimingProfiler] = None,
@@ -362,15 +363,21 @@ class AnimaNetworkTrainer:
             noisy_model_input = noisy_model_input.unsqueeze(2)
             noisy_model_input = anima_train_utils.maybe_apply_anima_channels_last(args, noisy_model_input)
             with torch.set_grad_enabled(is_train), accelerator.autocast():
-                model_pred = anima(
-                    noisy_model_input,
-                    timesteps,
-                    prompt_embeds,
-                    padding_mask=padding_mask,
-                    target_input_ids=t5_input_ids,
-                    target_attention_mask=t5_attn_mask,
-                    source_attention_mask=attn_mask,
-                )
+                try:
+                    if network is not None and hasattr(network, "set_current_timestep"):
+                        network.set_current_timestep(timesteps)
+                    model_pred = anima(
+                        noisy_model_input,
+                        timesteps,
+                        prompt_embeds,
+                        padding_mask=padding_mask,
+                        target_input_ids=t5_input_ids,
+                        target_attention_mask=t5_attn_mask,
+                        source_attention_mask=attn_mask,
+                    )
+                finally:
+                    if network is not None and hasattr(network, "clear_current_timestep"):
+                        network.clear_current_timestep()
             model_pred = model_pred.squeeze(2)
 
         target = noise - latents
@@ -494,6 +501,7 @@ class AnimaNetworkTrainer:
             latents,
             text_encoder_conds,
             unet,
+            network,
             weight_dtype,
             profiler=profiler,
             run_nan_check=run_nan_check,
