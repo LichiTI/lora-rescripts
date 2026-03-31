@@ -50,6 +50,8 @@ Modify By `Lulynx`
 
 SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trainer).
 
+This is an experimental project currently in beta, and there are tons of bugs.
+
 LoRA & Dreambooth training GUI & scripts preset & one key training environment for [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts.git)
 
 ## Recent Updates
