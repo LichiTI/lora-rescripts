@@ -153,6 +153,80 @@ for item in sys.argv[1:]:
 raise SystemExit(0 if ok else 1)" "$@" >/dev/null 2>&1
 }
 
+explain_modules_ready() {
+    local python_bin="$1"
+    shift
+
+    if [[ "$#" -eq 0 ]]; then
+        return 0
+    fi
+
+    "$python_bin" -c "import importlib, sys, traceback
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+        print(f'[OK] import {name}')
+    except Exception as exc:
+        print(f'[FAIL] import {name}: {exc}')
+        traceback.print_exc()" "$@" 2>&1
+}
+
+explain_package_constraints() {
+    local python_bin="$1"
+    shift
+
+    if [[ "$#" -eq 0 ]]; then
+        return 0
+    fi
+
+    "$python_bin" -c "import sys, importlib.metadata as md
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+for item in sys.argv[1:]:
+    name, spec = item.split(chr(31), 1)
+    try:
+        version = md.version(name)
+    except md.PackageNotFoundError:
+        print(f'[MISSING] {name} {spec}'.strip())
+        continue
+    if spec and Version(version) not in SpecifierSet(spec):
+        print(f'[MISMATCH] {name}=={version} does not satisfy {spec}')
+    else:
+        print(f'[OK] {name}=={version}')" "$@" 2>&1
+}
+
+report_tageditor_dependency_state() {
+    local python_bin="$1"
+    local marker_path="$2"
+    shift 2
+    local modules=("$@")
+    local constraints=(
+        $'gradio\x1f==4.28.3'
+        $'gradio-client\x1f==0.16.0'
+        $'fastapi\x1f<0.113'
+        $'starlette\x1f<0.39'
+        $'pydantic\x1f<2.11'
+        $'huggingface-hub\x1f<1'
+    )
+
+    echo "Tag editor dependency check target: $python_bin" >&2
+    if [[ -n "$marker_path" ]]; then
+        if [[ -f "$marker_path" ]]; then
+            echo "Tag editor marker file: OK ($marker_path)" >&2
+        else
+            echo "Tag editor marker file is missing: $marker_path" >&2
+        fi
+    else
+        echo "Tag editor marker file: not used for this runtime selection" >&2
+    fi
+
+    echo "Tag editor import check details:" >&2
+    explain_modules_ready "$python_bin" "${modules[@]}" >&2 || true
+
+    echo "Tag editor package constraint details:" >&2
+    explain_package_constraints "$python_bin" "${constraints[@]}" >&2 || true
+}
+
 get_python_minor_version() {
     local python_bin="$1"
     "$python_bin" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null
@@ -284,15 +358,35 @@ select_tageditor_python() {
         return 0
     fi
 
-    local main_python_version
-    main_python_version="$(get_python_minor_version "$python_exe" || true)"
-    if [[ -n "$main_python_version" && "$main_python_version" != "3.13" ]]; then
-        tageditor_python="$python_exe"
+    local fallback_main_python=""
+    if [[ "$runtime_name" == "sageattention" || "$runtime_name" == "sageattention2" ]]; then
+        if [[ -x "$portable_python" ]]; then
+            fallback_main_python="$portable_python"
+            tageditor_marker="$script_dir/python/.tageditor_installed"
+        elif [[ -x "$venv_python" ]]; then
+            fallback_main_python="$venv_python"
+            tageditor_marker="$script_dir/venv/.tageditor_installed"
+        fi
+    else
+        fallback_main_python="$python_exe"
         if [[ "$python_exe" == "$portable_python" ]]; then
             tageditor_marker="$script_dir/python/.tageditor_installed"
         elif [[ "$python_exe" == "$venv_python" ]]; then
             tageditor_marker="$script_dir/venv/.tageditor_installed"
         fi
+    fi
+
+    local main_python_version
+    if [[ -n "$fallback_main_python" ]]; then
+        main_python_version="$(get_python_minor_version "$fallback_main_python" || true)"
+    else
+        main_python_version=""
+    fi
+
+    if [[ -n "$main_python_version" && "$main_python_version" != "3.13" ]]; then
+        tageditor_python="$fallback_main_python"
+    else
+        tageditor_marker=""
     fi
 }
 
@@ -360,20 +454,31 @@ if [[ "$disable_tageditor" -eq 0 ]]; then
             $'huggingface-hub\x1f<1'
         )
         tageditor_install_needed=0
+        tageditor_modules_ready=1
+        tageditor_constraints_ready=1
+        tageditor_marker_ready=1
 
         if ! test_modules_ready "$tageditor_python" "${tageditor_modules[@]}"; then
             tageditor_install_needed=1
+            tageditor_modules_ready=0
         fi
 
-        if [[ "$tageditor_install_needed" -eq 0 && -n "$tageditor_marker" && ! -f "$tageditor_marker" ]]; then
+        if [[ -n "$tageditor_marker" && ! -f "$tageditor_marker" ]]; then
+            tageditor_marker_ready=0
+        fi
+
+        if [[ "$tageditor_install_needed" -eq 0 && "$tageditor_marker_ready" -eq 0 ]]; then
             tageditor_install_needed=1
         fi
 
         if [[ "$tageditor_install_needed" -eq 0 ]] && ! test_package_constraints "$tageditor_python" "${tageditor_constraints[@]}"; then
             tageditor_install_needed=1
+            tageditor_constraints_ready=0
         fi
 
         if [[ "$tageditor_install_needed" -eq 1 ]]; then
+            echo "Tag editor dependencies are missing or incompatible for Python: $tageditor_python" >&2
+            report_tageditor_dependency_state "$tageditor_python" "$tageditor_marker" "${tageditor_modules[@]}"
             if ! test_pip_ready "$tageditor_python"; then
                 echo "Tag editor Python is incomplete: pip is not available." >&2
                 exit 1
@@ -382,11 +487,19 @@ if [[ "$disable_tageditor" -eq 0 ]]; then
             echo "Tag editor dependencies are missing or incompatible. Running install_tageditor.sh..."
             bash "$script_dir/install_tageditor.sh"
             select_tageditor_python
-            if [[ -z "$tageditor_python" ]] || ! test_modules_ready "$tageditor_python" "${tageditor_modules[@]}" || ! test_package_constraints "$tageditor_python" "${tageditor_constraints[@]}"; then
+            if [[ -z "$tageditor_python" ]]; then
+                echo "Tag editor dependency installation failed: no usable tag editor Python was selected after install." >&2
+                exit 1
+            fi
+            if ! test_modules_ready "$tageditor_python" "${tageditor_modules[@]}" || ! test_package_constraints "$tageditor_python" "${tageditor_constraints[@]}"; then
+                echo "Tag editor dependency installation failed for Python: $tageditor_python" >&2
+                report_tageditor_dependency_state "$tageditor_python" "$tageditor_marker" "${tageditor_modules[@]}"
                 echo "Tag editor dependency installation failed." >&2
                 exit 1
             fi
             if [[ -n "$tageditor_marker" && ! -f "$tageditor_marker" ]]; then
+                echo "Tag editor dependency installation failed: marker file was not created." >&2
+                report_tageditor_dependency_state "$tageditor_python" "$tageditor_marker" "${tageditor_modules[@]}"
                 echo "Tag editor dependency installation failed." >&2
                 exit 1
             fi
