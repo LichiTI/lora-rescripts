@@ -29,6 +29,8 @@ from mikazuki.utils.tensorboard_runs import (
     has_new_checkpoint_since,
     snapshot_tensorboard_event_files,
 )
+from mikazuki.utils.trainer_registry import get_trainer_definition_by_file
+from mikazuki.utils.nvidia_smi import apply_gpu_power_limit, restore_gpu_power_limits
 
 
 def ensure_repo_on_pythonpath(customize_env: dict):
@@ -195,6 +197,8 @@ def run_train(
 ):
     log.info(f"Training started with config file / 训练开始，使用配置文件: {toml_path}")
     customize_env = os.environ.copy()
+    trainer_definition = get_trainer_definition_by_file(trainer_file)
+    direct_python_trainer = bool(trainer_definition and trainer_definition.direct_python)
 
     try:
         config_data = toml.load(toml_path)
@@ -207,34 +211,53 @@ def run_train(
     ensure_repo_on_pythonpath(customize_env)
     apply_windows_accelerate_env(customize_env)
 
-    try:
-        distributed_runtime = resolve_distributed_runtime(config_data, gpu_ids)
-    except ValueError as exc:
-        log.warning(f"[distributed] {exc}")
-        return APIResponse(status="error", message=str(exc))
-    except Exception as exc:
-        log.error(f"[distributed] failed to resolve distributed runtime: {exc}")
-        return APIResponse(status="error", message="分布式运行时解析失败，请检查日志。")
+    if direct_python_trainer:
+        summary = trainer_definition.direct_launch_summary or "当前训练直接由独立 Python 训练器启动，不走 accelerate 分布式包装。"
 
-    customize_env.update(distributed_runtime.get("env_overrides", {}))
-    for warning in distributed_runtime.get("warnings", []):
-        log.warning(f"[distributed] {warning}")
-    for note in distributed_runtime.get("notes", []):
-        log.info(f"[distributed] {note}")
+        distributed_runtime = {
+            "enabled": False,
+            "is_multi_machine": False,
+            "total_num_processes": 1,
+            "env_overrides": {},
+            "warnings": [],
+            "notes": [],
+            "summary": summary,
+        }
+        worker_sync_runtime = {
+            "enabled": False,
+            "is_worker": False,
+            "warnings": [],
+            "notes": [],
+        }
+    else:
+        try:
+            distributed_runtime = resolve_distributed_runtime(config_data, gpu_ids)
+        except ValueError as exc:
+            log.warning(f"[distributed] {exc}")
+            return APIResponse(status="error", message=str(exc))
+        except Exception as exc:
+            log.error(f"[distributed] failed to resolve distributed runtime: {exc}")
+            return APIResponse(status="error", message="分布式运行时解析失败，请检查日志。")
 
-    try:
-        worker_sync_runtime = resolve_worker_sync_runtime(config_data, distributed_runtime, base_dir_path())
-    except ValueError as exc:
-        log.warning(f"[distributed-sync] {exc}")
-        return APIResponse(status="error", message=str(exc))
-    except Exception as exc:
-        log.error(f"[distributed-sync] failed to resolve worker sync runtime: {exc}")
-        return APIResponse(status="error", message="分布式同步运行时解析失败，请检查日志。")
+        customize_env.update(distributed_runtime.get("env_overrides", {}))
+        for warning in distributed_runtime.get("warnings", []):
+            log.warning(f"[distributed] {warning}")
+        for note in distributed_runtime.get("notes", []):
+            log.info(f"[distributed] {note}")
 
-    for warning in worker_sync_runtime.get("warnings", []):
-        log.warning(f"[distributed-sync] {warning}")
-    for note in worker_sync_runtime.get("notes", []):
-        log.info(f"[distributed-sync] {note}")
+        try:
+            worker_sync_runtime = resolve_worker_sync_runtime(config_data, distributed_runtime, base_dir_path())
+        except ValueError as exc:
+            log.warning(f"[distributed-sync] {exc}")
+            return APIResponse(status="error", message=str(exc))
+        except Exception as exc:
+            log.error(f"[distributed-sync] failed to resolve worker sync runtime: {exc}")
+            return APIResponse(status="error", message="分布式同步运行时解析失败，请检查日志。")
+
+        for warning in worker_sync_runtime.get("warnings", []):
+            log.warning(f"[distributed-sync] {warning}")
+        for note in worker_sync_runtime.get("notes", []):
+            log.info(f"[distributed-sync] {note}")
 
     if worker_sync_runtime.get("enabled"):
         sync_ok, sync_message = apply_worker_sync_from_main(toml_path, worker_sync_runtime, base_dir_path())
@@ -281,36 +304,39 @@ def run_train(
     if resolved_trainer_file != trainer_file:
         log.info(f"[distributed-sync] trainer file updated from synced config: {trainer_file} -> {resolved_trainer_file}")
     trainer_path, _ = prepare_python_script(resolved_trainer_file, customize_env)
+    trainer_definition = get_trainer_definition_by_file(str(trainer_path))
+    direct_python_trainer = bool(trainer_definition and trainer_definition.direct_python)
 
     world_size_for_batch = max(1, int(distributed_runtime.get("total_num_processes", 1) or 1))
     launch_train_batch_override = None
-    try:
-        configured_global_batch = int(config_data.get("train_batch_size", 1) or 1)
-    except (TypeError, ValueError):
-        configured_global_batch = 0
-    ok_batch, per_device_batch, batch_error = resolve_per_device_batch_from_global(
-        configured_global_batch, world_size_for_batch
-    )
-    if not ok_batch:
-        return APIResponse(status="error", message=f"训练批大小配置错误: {batch_error}")
-    launch_train_batch_override = int(per_device_batch)
-
-    try:
-        grad_accum_steps = int(config_data.get("gradient_accumulation_steps", 1) or 1)
-    except (TypeError, ValueError):
-        grad_accum_steps = 1
-    if grad_accum_steps <= 0:
-        grad_accum_steps = 1
-    world_effective_batch = int(configured_global_batch) * int(grad_accum_steps)
-    if world_size_for_batch > 1:
-        log.info(
-            "[batch-semantics] user_global_batch=%s world_size=%s per_device_batch=%s grad_accum=%s world_effective_batch=%s",
-            int(configured_global_batch),
-            int(world_size_for_batch),
-            int(per_device_batch),
-            int(grad_accum_steps),
-            int(world_effective_batch),
+    if not direct_python_trainer:
+        try:
+            configured_global_batch = int(config_data.get("train_batch_size", 1) or 1)
+        except (TypeError, ValueError):
+            configured_global_batch = 0
+        ok_batch, per_device_batch, batch_error = resolve_per_device_batch_from_global(
+            configured_global_batch, world_size_for_batch
         )
+        if not ok_batch:
+            return APIResponse(status="error", message=f"训练批大小配置错误: {batch_error}")
+        launch_train_batch_override = int(per_device_batch)
+
+        try:
+            grad_accum_steps = int(config_data.get("gradient_accumulation_steps", 1) or 1)
+        except (TypeError, ValueError):
+            grad_accum_steps = 1
+        if grad_accum_steps <= 0:
+            grad_accum_steps = 1
+        world_effective_batch = int(configured_global_batch) * int(grad_accum_steps)
+        if world_size_for_batch > 1:
+            log.info(
+                "[batch-semantics] user_global_batch=%s world_size=%s per_device_batch=%s grad_accum=%s world_effective_batch=%s",
+                int(configured_global_batch),
+                int(world_size_for_batch),
+                int(per_device_batch),
+                int(grad_accum_steps),
+                int(world_effective_batch),
+            )
 
     if gpu_ids:
         customize_env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
@@ -319,7 +345,16 @@ def run_train(
     else:
         log.info("Final training GPU selection / 最终参与训练的 GPU: default visible CUDA device")
 
-    if bool(config_data.get("enable_mixed_resolution_training")):
+    if direct_python_trainer:
+        script_runner = get_script_runner_path()
+        args = [
+            sys.executable,
+            str(script_runner),
+            str(trainer_path),
+            "--config_file",
+            toml_path,
+        ]
+    elif bool(config_data.get("enable_mixed_resolution_training")):
         runner_path = base_dir_path() / "mikazuki" / "staged_resolution_runner.py"
         args = build_staged_resolution_runner_args(
             runner_path,
@@ -359,7 +394,30 @@ def run_train(
         return APIResponse(status="error", message="Failed to create task / 无法创建训练任务")
 
     def _run():
+        power_limit_restore_state = []
         try:
+            requested_gpu_power_limit_w = config_data.get("gpu_power_limit_w")
+            try:
+                requested_gpu_power_limit_w = int(round(float(requested_gpu_power_limit_w)))
+            except (TypeError, ValueError):
+                requested_gpu_power_limit_w = 0
+
+            if requested_gpu_power_limit_w > 0:
+                power_limit_result = apply_gpu_power_limit(
+                    requested_gpu_power_limit_w,
+                    target_ids=gpu_ids,
+                    environ=customize_env,
+                )
+                for warning in power_limit_result.get("warnings", []):
+                    log.warning(f"[power-limit] {warning}")
+                power_limit_restore_state = power_limit_result.get("restore_state", []) or []
+                if power_limit_result.get("applied"):
+                    applied_records = power_limit_result.get("records", []) or []
+                    applied_summary = ", ".join(
+                        [f"GPU {item['gpu_id']}={item['applied_power_limit_w']}W" for item in applied_records]
+                    )
+                    log.info(f"[power-limit] applied whole-GPU power limit: {applied_summary}")
+
             run_started_at = time.time()
             task.execute()
             result = task.communicate()
@@ -379,6 +437,17 @@ def run_train(
                 log.info("Training finished / 训练完成")
         except Exception as exc:
             log.error(f"An error occurred when training / 训练出现致命错误: {exc}")
+        finally:
+            if power_limit_restore_state:
+                restore_result = restore_gpu_power_limits(power_limit_restore_state)
+                restored_records = restore_result.get("restored", []) or []
+                if restored_records:
+                    restored_summary = ", ".join(
+                        [f"GPU {item['gpu_id']}={item['power_limit_w']}W" for item in restored_records]
+                    )
+                    log.info(f"[power-limit] restored GPU power limit: {restored_summary}")
+                for warning in restore_result.get("warnings", []):
+                    log.warning(f"[power-limit] {warning}")
 
     coro = asyncio.to_thread(_run)
     asyncio.create_task(coro)

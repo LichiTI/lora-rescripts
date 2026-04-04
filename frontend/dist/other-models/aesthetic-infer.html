@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>美学评分模型推理 | SD 训练 UI</title>
+    <link rel="stylesheet" href="/assets/style.874872ce.css">
+    <style>
+      :root {
+        color-scheme: light;
+        --page-bg: #f5f7fb;
+        --card-bg: #ffffff;
+        --line: #d9e3f0;
+        --text-main: #213547;
+        --text-sub: #5f6b7a;
+        --primary: #409eff;
+        --primary-soft: #ecf5ff;
+        --danger: #f56c6c;
+        --success: #67c23a;
+        --warning: #e6a23c;
+        --shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--page-bg);
+        color: var(--text-main);
+        font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      }
+
+      a {
+        color: var(--primary);
+        text-decoration: none;
+      }
+
+      .page-shell {
+        width: min(1440px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 24px 0 40px;
+      }
+
+      .page-header {
+        margin-bottom: 18px;
+      }
+
+      .page-header h1 {
+        margin: 10px 0 8px;
+        font-size: 30px;
+        line-height: 1.2;
+      }
+
+      .page-header p {
+        margin: 0;
+        color: var(--text-sub);
+        line-height: 1.7;
+      }
+
+      .back-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: var(--primary-soft);
+        color: var(--primary);
+        font-size: 13px;
+      }
+
+      .layout {
+        display: grid;
+        gap: 16px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--card-bg);
+        box-shadow: var(--shadow);
+        padding: 18px;
+      }
+
+      .card-title {
+        margin: 0 0 12px;
+        font-size: 18px;
+        line-height: 1.3;
+      }
+
+      .card-desc {
+        margin: 0 0 14px;
+        color: var(--text-sub);
+        line-height: 1.7;
+        font-size: 14px;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .field {
+        grid-column: span 12;
+      }
+
+      .field.span-6 {
+        grid-column: span 6;
+      }
+
+      .field.span-4 {
+        grid-column: span 4;
+      }
+
+      .field.span-3 {
+        grid-column: span 3;
+      }
+
+      .field label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .field small {
+        display: block;
+        margin-top: 6px;
+        color: var(--text-sub);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .input-row {
+        display: flex;
+        gap: 8px;
+      }
+
+      input[type="text"],
+      input[type="number"],
+      select {
+        width: 100%;
+        min-height: 42px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        color: var(--text-main);
+        font-size: 14px;
+      }
+
+      input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 42px;
+        padding: 0 2px;
+      }
+
+      button {
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: #fff;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: #fff;
+        color: var(--primary);
+      }
+
+      button.danger {
+        border-color: var(--danger);
+        background: var(--danger);
+        color: #fff;
+      }
+
+      button[disabled] {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .runtime-box,
+      .status-box {
+        background: #f8fbff;
+        border: 1px solid #dbeafe;
+        border-radius: 12px;
+        padding: 14px;
+        white-space: pre-wrap;
+        line-height: 1.7;
+        font-size: 13px;
+      }
+
+      .runtime-box.warn {
+        background: #fffaf2;
+        border-color: #fde7bf;
+      }
+
+      .logs {
+        margin: 0;
+        background: #0f172a;
+        color: #cbd5e1;
+        border-radius: 12px;
+        padding: 14px;
+        min-height: 180px;
+        max-height: 360px;
+        overflow: auto;
+        font-size: 12px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .summary-item {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+        background: #fbfdff;
+      }
+
+      .summary-item .label {
+        color: var(--text-sub);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+
+      .summary-item .value {
+        font-size: 24px;
+        font-weight: 700;
+      }
+
+      .results-toolbar {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr 1fr auto;
+        gap: 10px;
+        margin: 12px 0 14px;
+      }
+
+      .download-actions,
+      .pager {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .pager {
+        margin-top: 12px;
+        align-items: center;
+      }
+
+      .pager span {
+        color: var(--text-sub);
+        font-size: 13px;
+      }
+
+      .gallery {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .gallery-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .gallery-image-wrap {
+        aspect-ratio: 1 / 1;
+        background: #edf2f7;
+        overflow: hidden;
+      }
+
+      .gallery-image-wrap img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .gallery-empty {
+        display: grid;
+        place-items: center;
+        height: 100%;
+        color: var(--text-sub);
+        font-size: 13px;
+      }
+
+      .gallery-body {
+        padding: 12px;
+      }
+
+      .path-line {
+        font-size: 13px;
+        font-weight: 600;
+        word-break: break-all;
+        line-height: 1.6;
+        margin-bottom: 10px;
+      }
+
+      .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        background: #eef5ff;
+        color: #2f76d2;
+      }
+
+      .badge.special {
+        background: #fff1f0;
+        color: #cf1322;
+      }
+
+      .badge.ok {
+        background: #f0f9eb;
+        color: #389e0d;
+      }
+
+      .score-list {
+        display: grid;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--text-sub);
+      }
+
+      .score-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .empty-block {
+        padding: 18px;
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        color: var(--text-sub);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      @media (max-width: 1080px) {
+        .summary-grid,
+        .gallery {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .results-toolbar {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .field.span-6,
+        .field.span-4,
+        .field.span-3 {
+          grid-column: span 12;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .page-shell {
+          width: min(100%, calc(100% - 20px));
+          padding-top: 14px;
+        }
+
+        .summary-grid,
+        .gallery,
+        .results-toolbar {
+          grid-template-columns: 1fr;
+        }
+
+        .input-row {
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="page-header">
+        <a class="back-link" href="/other-models/aesthetic-scorer.html">返回美学评分训练</a>
+        <h1>美学评分模型推理</h1>
+        <p>使用已经训练好的融合头，对整批图片输出美学、构图、色彩、色情四个维度分数，并可按阈值区分特殊样本与域内样本。</p>
+      </header>
+      <main class="layout" id="aesthetic-infer-app">
+        <section class="card">
+          <h2 class="card-title">运行状态</h2>
+          <p class="card-desc">这里会显示当前环境依赖状态和正在运行的推理任务状态。</p>
+          <div id="runtime-status" class="runtime-box">正在读取运行状态...</div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">推理参数</h2>
+          <p class="card-desc">`checkpoint` 和 `input_dir` 是必填项。`output_dir` 留空时会自动落到检查点目录下的 `infer_run`。</p>
+          <div class="form-grid">
+            <div class="field">
+              <label for="checkpoint">模型检查点</label>
+              <div class="input-row">
+                <input id="checkpoint" type="text" placeholder="选择 .safetensors / .pt / .pth 检查点">
+                <button id="browse-checkpoint" type="button" class="secondary">浏览</button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="input-dir">输入图片目录</label>
+              <div class="input-row">
+                <input id="input-dir" type="text" placeholder="选择待推理图片目录">
+                <button id="browse-input-dir" type="button" class="secondary">浏览</button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="output-dir">输出目录</label>
+              <div class="input-row">
+                <input id="output-dir" type="text" placeholder="留空时自动使用 checkpoint 同级 infer_run">
+                <button id="browse-output-dir" type="button" class="secondary">浏览</button>
+              </div>
+            </div>
+
+            <div class="field span-3">
+              <label for="device">设备</label>
+              <select id="device">
+                <option value="">自动</option>
+                <option value="cuda">CUDA</option>
+                <option value="cpu">CPU</option>
+              </select>
+            </div>
+
+            <div class="field span-3">
+              <label for="batch-size">批大小</label>
+              <input id="batch-size" type="number" min="1" step="1" value="8">
+            </div>
+
+            <div class="field span-3">
+              <label for="special-threshold">特殊样本阈值</label>
+              <input id="special-threshold" type="number" min="0" max="1" step="0.01" value="0.5">
+            </div>
+
+            <div class="field span-3">
+              <label for="organize-mode">整理模式</label>
+              <select id="organize-mode">
+                <option value="copy">copy</option>
+                <option value="hardlink">hardlink</option>
+                <option value="symlink">symlink</option>
+                <option value="move">move</option>
+              </select>
+            </div>
+
+            <div class="field span-4">
+              <label for="organize-root-dir">整理输出目录</label>
+              <div class="input-row">
+                <input id="organize-root-dir" type="text" placeholder="留空时自动使用 output_dir/organized">
+                <button id="browse-organize-root-dir" type="button" class="secondary">浏览</button>
+              </div>
+            </div>
+
+            <div class="field span-4">
+              <label for="organize-dimensions">整理维度</label>
+              <input id="organize-dimensions" type="text" value="aesthetic,composition,color,sexual">
+              <small>多个维度用英文逗号分隔。</small>
+            </div>
+
+            <div class="field span-4">
+              <label for="image-extensions">图片后缀</label>
+              <input id="image-extensions" type="text" value=".jpg,.jpeg,.png,.webp,.bmp,.gif">
+            </div>
+
+            <div class="field span-3">
+              <label>递归扫描</label>
+              <div class="check-row">
+                <input id="recursive" type="checkbox" checked>
+                <span>包含子目录</span>
+              </div>
+            </div>
+
+            <div class="field span-3">
+              <label>保存 JSONL</label>
+              <div class="check-row">
+                <input id="save-jsonl" type="checkbox" checked>
+                <span>输出 `predictions.jsonl`</span>
+              </div>
+            </div>
+
+            <div class="field span-3">
+              <label>保存 CSV</label>
+              <div class="check-row">
+                <input id="save-csv" type="checkbox" checked>
+                <span>输出 `predictions.csv`</span>
+              </div>
+            </div>
+
+            <div class="field span-3">
+              <label>整理文件夹</label>
+              <div class="check-row">
+                <input id="organize-enabled" type="checkbox">
+                <span>按分数分桶整理</span>
+              </div>
+            </div>
+
+            <div class="field span-3">
+              <label>保留 special 分组</label>
+              <div class="check-row">
+                <input id="organize-include-special-group" type="checkbox" checked>
+                <span>special / in_domain</span>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button id="start-button" type="button">开始推理</button>
+            <button id="stop-button" type="button" class="danger">停止推理</button>
+            <button id="refresh-button" type="button" class="secondary">刷新状态</button>
+            <button id="load-results-button" type="button" class="secondary">读取结果</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">任务与日志</h2>
+          <div id="task-status" class="status-box">当前没有运行中的任务。</div>
+          <div class="actions">
+            <button id="clear-logs-button" type="button" class="secondary">清空本地日志视图</button>
+          </div>
+          <pre id="task-logs" class="logs">等待日志输出...</pre>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">结果浏览</h2>
+          <p class="card-desc">任务完成后，这里会读取 `summary.json` 和 `predictions.*`，支持搜索、筛选与分页浏览。</p>
+          <div id="results-summary" class="empty-block">当前还没有可读取的结果。</div>
+          <div class="download-actions" id="download-actions" style="display:none;">
+            <button id="download-summary" type="button" class="secondary">下载 summary.json</button>
+            <button id="download-jsonl" type="button" class="secondary">下载 predictions.jsonl</button>
+            <button id="download-csv" type="button" class="secondary">下载 predictions.csv</button>
+          </div>
+          <div class="results-toolbar">
+            <input id="result-keyword" type="text" placeholder="按文件名或相对路径搜索">
+            <select id="result-special-filter">
+              <option value="all">全部样本</option>
+              <option value="in_domain">仅域内样本</option>
+              <option value="special">仅特殊样本</option>
+            </select>
+            <select id="result-sort-by">
+              <option value="">默认顺序</option>
+              <option value="aesthetic">按美学分数</option>
+              <option value="composition">按构图分数</option>
+              <option value="color">按色彩分数</option>
+              <option value="sexual">按色情分数</option>
+              <option value="in_domain_prob">按域内概率</option>
+              <option value="special_tag">按 special 标记</option>
+            </select>
+            <select id="result-sort-order">
+              <option value="desc">降序</option>
+              <option value="asc">升序</option>
+            </select>
+            <button id="search-results-button" type="button" class="secondary">筛选</button>
+          </div>
+          <div id="result-gallery" class="gallery"></div>
+          <div class="pager">
+            <button id="prev-page-button" type="button" class="secondary">上一页</button>
+            <span id="page-indicator">第 0 / 0 页</span>
+            <button id="next-page-button" type="button" class="secondary">下一页</button>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/assets/aesthetic-infer-standalone.js"></script>
+      <script type="module" src="/assets/aesthetic-runtime-boot.js" defer></script>
+</body>
+</html>
+

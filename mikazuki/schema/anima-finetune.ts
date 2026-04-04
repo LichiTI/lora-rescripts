@@ -172,6 +172,8 @@ Schema.intersect([
         }, ["xformers", "sdpa"])
     ).description("速度优化选项"),
 
+    SHARED_SCHEMAS.THERMAL_MANAGEMENT,
+
     Schema.intersect([
         Schema.object({
             enable_debug_options: Schema.boolean().default(false).description("显示 Anima 调试选项。普通训练通常不需要开启"),

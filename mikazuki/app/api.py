@@ -70,6 +70,20 @@ from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
 )
+from mikazuki.utils.trainer_registry import get_trainer_definition
+from mikazuki.utils.backend_status import (
+    read_backend_status,
+    request_backend_restart,
+)
+from mikazuki.utils.yolo_runtime import (
+    build_yolo_runtime_payload,
+    start_yolo_dependency_install,
+)
+from mikazuki.utils.aesthetic_runtime import (
+    build_aesthetic_runtime_payload,
+    start_aesthetic_dependency_install,
+)
+from mikazuki.utils.aesthetic_infer_runtime import aesthetic_infer_manager
 from mikazuki.utils.frontend_profiles import (
     PLUGIN_ROOT,
     install_github_frontend_plugin,
@@ -119,32 +133,6 @@ script_positional_args = {
     "tools/resize_images_to_resolution.py": ["src_img_folder", "dst_img_folder"],
     "tools/convert_diffusers20_original_sd.py": ["model_to_load", "model_to_save"],
 }
-
-trainer_mapping = {
-    "sd-lora": "./scripts/stable/train_network.py",
-    "sdxl-lora": "./scripts/stable/sdxl_train_network.py",
-
-    "sd-dreambooth": "./scripts/stable/train_db.py",
-    "sdxl-finetune": "./scripts/stable/sdxl_train.py",
-    "sd-controlnet": "./scripts/stable/train_control_net.py",
-    "sdxl-controlnet": "./scripts/stable/sdxl_train_control_net.py",
-    "sdxl-controlnet-lllite": "./scripts/stable/sdxl_train_control_net_lllite.py",
-    "flux-controlnet": "./scripts/stable/flux_train_control_net.py",
-    "sd-textual-inversion": "./scripts/stable/train_textual_inversion.py",
-    "sd-textual-inversion-xti": "./scripts/stable/train_textual_inversion_XTI.py",
-    "sdxl-textual-inversion": "./scripts/stable/sdxl_train_textual_inversion.py",
-
-    "sd3-lora": "./scripts/dev/sd3_train_network.py",
-    "sd3-finetune": "./scripts/stable/sd3_train.py",
-    "flux-lora": "./scripts/dev/flux_train_network.py",
-    "flux-finetune": "./scripts/dev/flux_train.py",
-    "lumina-lora": "./scripts/stable/lumina_train_network.py",
-    "lumina-finetune": "./scripts/stable/lumina_train.py",
-    "hunyuan-image-lora": "./scripts/stable/hunyuan_image_train_network.py",
-    "anima-lora": "./scripts/stable/anima_train_network.py",
-    "anima-finetune": "./scripts/stable/anima_train.py",
-}
-
 
 async def load_schemas():
     avaliable_schemas.clear()
@@ -265,6 +253,10 @@ def parse_boolish(value) -> bool:
         if normalized in {"1", "true", "yes", "on"}:
             return True
     return bool(value)
+
+
+def is_yolo_training_type(training_type: str) -> bool:
+    return str(training_type or "").strip().lower() == "yolo"
 
 
 def normalize_conflicting_network_target_flags(config: dict) -> list[str]:
@@ -1053,6 +1045,49 @@ async def create_toml_file(request: Request):
     start_warnings = []
     start_warnings.extend(normalize_conflicting_network_target_flags(config))
 
+    cooldown_every_n_epochs = config.get("cooldown_every_n_epochs")
+    cooldown_minutes = config.get("cooldown_minutes")
+    cooldown_until_temp_c = config.get("cooldown_until_temp_c")
+    cooldown_poll_seconds = config.get("cooldown_poll_seconds")
+    try:
+        cooldown_every_n_epochs_value = int(round(float(cooldown_every_n_epochs)))
+    except (TypeError, ValueError):
+        cooldown_every_n_epochs_value = None
+    try:
+        cooldown_minutes_value = float(cooldown_minutes)
+    except (TypeError, ValueError):
+        cooldown_minutes_value = None
+    try:
+        cooldown_until_temp_c_value = int(round(float(cooldown_until_temp_c)))
+    except (TypeError, ValueError):
+        cooldown_until_temp_c_value = None
+    try:
+        cooldown_poll_seconds_value = int(round(float(cooldown_poll_seconds)))
+    except (TypeError, ValueError):
+        cooldown_poll_seconds_value = 15
+
+    if cooldown_every_n_epochs_value is not None and cooldown_every_n_epochs_value > 0 and (
+        (cooldown_minutes_value is not None and cooldown_minutes_value > 0)
+        or (cooldown_until_temp_c_value is not None and cooldown_until_temp_c_value > 0)
+    ):
+        cooldown_details = [f"每 {cooldown_every_n_epochs_value} 个 epoch 在该轮保存与预览完成后暂停一次"]
+        if cooldown_minutes_value is not None and cooldown_minutes_value > 0:
+            cooldown_details.append(f"至少等待 {cooldown_minutes_value:g} 分钟")
+        if cooldown_until_temp_c_value is not None and cooldown_until_temp_c_value > 0:
+            poll_seconds = cooldown_poll_seconds_value or 15
+            cooldown_details.append(f"并等待显卡温度降到 {cooldown_until_temp_c_value}°C 以下（每 {poll_seconds} 秒轮询一次）")
+        start_warnings.append("散热冷却已启用：" + "，".join(cooldown_details) + "。")
+
+    gpu_power_limit_w = config.get("gpu_power_limit_w")
+    try:
+        gpu_power_limit_w_value = int(round(float(gpu_power_limit_w)))
+    except (TypeError, ValueError):
+        gpu_power_limit_w_value = None
+    if gpu_power_limit_w_value is not None and gpu_power_limit_w_value > 0:
+        start_warnings.append(
+            f"已请求 GPU 功率墙：{gpu_power_limit_w_value}W。该限制作用于整张显卡，不是单个训练进程；依赖 nvidia-smi、驱动与管理员/root 权限，不支持时会自动跳过。"
+        )
+
     raw_gpu_ids = config.pop("gpu_ids", None)
     gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
     if gpu_filter_warning:
@@ -1061,35 +1096,59 @@ async def create_toml_file(request: Request):
         start_warnings.append(f"本次训练将使用 GPU: {', '.join(gpu_ids)}")
     else:
         start_warnings.append("本次训练未显式指定 GPU，默认使用当前 PyTorch 可见的主训练显卡。")
-    try:
-        distributed_runtime = resolve_distributed_runtime(config, gpu_ids)
-    except ValueError as exc:
-        return APIResponseFail(message=str(exc))
-    except Exception:
-        log.exception("Distributed runtime resolution failed unexpectedly")
-        return APIResponseFail(message="分布式运行时解析失败，请查看日志。")
-    start_warnings.extend(distributed_runtime.get("warnings", []))
-    start_warnings.extend(distributed_runtime.get("notes", []))
-    if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
-        start_warnings.append(
-            "当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。"
-        )
-    try:
-        worker_sync_runtime = resolve_worker_sync_runtime(config, distributed_runtime, launch_utils.base_dir_path())
-    except ValueError as exc:
-        return APIResponseFail(message=str(exc))
-    except Exception:
-        log.exception("Worker sync runtime resolution failed unexpectedly")
-        return APIResponseFail(message="分布式同步运行时解析失败，请查看日志。")
-    start_warnings.extend(worker_sync_runtime.get("warnings", []))
-    start_warnings.extend(worker_sync_runtime.get("notes", []))
+    model_train_type = str(config.get("model_train_type", "sd-lora") or "sd-lora").strip().lower()
+    trainer_definition = get_trainer_definition(model_train_type)
+    if trainer_definition is None:
+        return APIResponseFail(message=f"Unsupported trainer type: {model_train_type}")
+    yolo_training = is_yolo_training_type(model_train_type)
+    direct_python_training = bool(trainer_definition.direct_python)
+
+    if direct_python_training:
+        if parse_boolish(config.get("enable_distributed_training")):
+            return APIResponseFail(
+                message="当前训练种类暂不走 Mikazuki 分布式启动。"
+            )
+        distributed_runtime = {
+            "total_num_processes": 1,
+            "warnings": [],
+            "notes": [],
+            "summary": "当前训练种类直接由独立 Python 训练器启动，不走 accelerate 分布式包装。",
+        }
+        worker_sync_runtime = {
+            "warnings": [],
+            "notes": [],
+        }
+        if yolo_training and len(gpu_ids) > 1:
+            start_warnings.append("已为 YOLO 保留多张可见 GPU；若未手动填写 device，Ultralytics 会按当前可见显卡自行决定多卡训练方式。")
+    else:
+        try:
+            distributed_runtime = resolve_distributed_runtime(config, gpu_ids)
+        except ValueError as exc:
+            return APIResponseFail(message=str(exc))
+        except Exception:
+            log.exception("Distributed runtime resolution failed unexpectedly")
+            return APIResponseFail(message="分布式运行时解析失败，请查看日志。")
+        start_warnings.extend(distributed_runtime.get("warnings", []))
+        start_warnings.extend(distributed_runtime.get("notes", []))
+        if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
+            start_warnings.append(
+                "当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。"
+            )
+        try:
+            worker_sync_runtime = resolve_worker_sync_runtime(config, distributed_runtime, launch_utils.base_dir_path())
+        except ValueError as exc:
+            return APIResponseFail(message=str(exc))
+        except Exception:
+            log.exception("Worker sync runtime resolution failed unexpectedly")
+            return APIResponseFail(message="分布式同步运行时解析失败，请查看日志。")
+        start_warnings.extend(worker_sync_runtime.get("warnings", []))
+        start_warnings.extend(worker_sync_runtime.get("notes", []))
     apply_anima_runtime_attention_backend(config, gpu_ids)
 
-    suggest_cpu_threads = 8 if len(train_utils.get_total_images(config["train_data_dir"])) > 200 else 2
-    model_train_type = config.pop("model_train_type", "sd-lora")
-    if model_train_type not in trainer_mapping:
-        return APIResponseFail(message=f"Unsupported trainer type: {model_train_type}")
-    trainer_file = trainer_mapping[model_train_type]
+    model_train_type = str(config.pop("model_train_type", "sd-lora") or "sd-lora").strip().lower()
+    train_data_dir = str(config.get("train_data_dir", "") or "").strip()
+    suggest_cpu_threads = 8 if train_data_dir and len(train_utils.get_total_images(train_data_dir)) > 200 else 2
+    trainer_file = trainer_definition.trainer_file
 
     # Windows + multiprocessing dataloader is more fragile on Anima routes.
     # If the user did not choose these explicitly, default to safer single-process loading.
@@ -1097,19 +1156,29 @@ async def create_toml_file(request: Request):
         config.setdefault("max_data_loader_n_workers", 0)
         config.setdefault("persistent_data_loader_workers", False)
 
-    if model_train_type != "sdxl-finetune":
+    if trainer_definition.config_validator is not None:
+        config_error = trainer_definition.config_validator(config)
+        if config_error:
+            return APIResponseFail(message=config_error)
+
+    if trainer_definition.start_warning_builder is not None:
+        start_warnings.extend(trainer_definition.start_warning_builder(config))
+    if not direct_python_training and model_train_type != "sdxl-finetune":
         if not train_utils.validate_data_dir(config["train_data_dir"]):
             return APIResponseFail(message="训练数据集路径不存在或没有图片，请检查目录。")
 
-    if model_train_type in {"sd-controlnet", "sdxl-controlnet", "flux-controlnet"}:
+    if not direct_python_training and model_train_type in {"sd-controlnet", "sdxl-controlnet", "flux-controlnet"}:
         conditioning_data_dir = config.get("conditioning_data_dir", "")
         if not conditioning_data_dir or not train_utils.validate_data_dir(conditioning_data_dir):
             return APIResponseFail(message="条件图数据集路径不存在或没有图片，请检查目录。")
 
     try:
-        planning_config = dict(config)
-        planning_config["num_processes"] = int(distributed_runtime.get("total_num_processes", 1) or 1)
-        mixed_resolution_plan = build_mixed_resolution_plan(planning_config, training_type=model_train_type)
+        if direct_python_training:
+            mixed_resolution_plan = None
+        else:
+            planning_config = dict(config)
+            planning_config["num_processes"] = int(distributed_runtime.get("total_num_processes", 1) or 1)
+            mixed_resolution_plan = build_mixed_resolution_plan(planning_config, training_type=model_train_type)
     except ValueError as exc:
         return APIResponseFail(message=str(exc))
     except Exception:
@@ -1117,14 +1186,17 @@ async def create_toml_file(request: Request):
         return APIResponseFail(message="阶段分辨率训练规划失败，请查看日志。")
 
     mixed_resolution_payload = None
-    if mixed_resolution_plan.enabled:
+    if mixed_resolution_plan is not None and mixed_resolution_plan.enabled:
         mixed_resolution_payload = asdict(mixed_resolution_plan)
         start_warnings.append(
             f"已启用阶段分辨率训练：共 {len(mixed_resolution_plan.phases)} 个阶段，将按顺序自动切换分辨率与 batch。"
         )
 
     try:
-        cache_preflight = analyze_dataset_cache_preflight(config, training_type=model_train_type)
+        if direct_python_training:
+            cache_preflight = {"errors": [], "warnings": [], "notes": []}
+        else:
+            cache_preflight = analyze_dataset_cache_preflight(config, training_type=model_train_type)
     except Exception:
         log.exception("Dataset cache preflight failed unexpectedly")
         return APIResponseFail(message="数据集缓存预检失败，请查看日志。")
@@ -1134,9 +1206,10 @@ async def create_toml_file(request: Request):
 
     start_warnings.extend(cache_preflight.get("warnings", []))
 
-    validated, message = train_utils.validate_model(config["pretrained_model_name_or_path"], model_train_type)
-    if not validated:
-        return APIResponseFail(message=message)
+    if not trainer_definition.skip_model_validation:
+        validated, message = train_utils.validate_model(config["pretrained_model_name_or_path"], model_train_type)
+        if not validated:
+            return APIResponseFail(message=message)
 
     sageattention_override_message = apply_sageattention_runtime_override(config)
     if sageattention_override_message:
@@ -1158,39 +1231,43 @@ async def create_toml_file(request: Request):
             message="Required runtime dependencies are missing or broken: " + " | ".join(missing_details)
         )
 
-    prompt_file = str(config.get("prompt_file", "") or "").strip()
-    inline_sample_prompts = str(config.get("sample_prompts", "") or "").strip()
-
-    if prompt_file:
-        if not os.path.exists(prompt_file):
-            return APIResponseFail(message=f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
-        config["sample_prompts"] = prompt_file
-    elif inline_sample_prompts and should_use_inline_sample_prompts(inline_sample_prompts, config):
-        if os.path.isfile(inline_sample_prompts):
-            config["sample_prompts"] = inline_sample_prompts
-        else:
-            sample_prompts_file = str(autosave_dir / build_sample_prompt_file_name(config))
-            with open(sample_prompts_file, "w", encoding="utf-8") as f:
-                normalized = enrich_inline_sample_prompts(inline_sample_prompts, config)
-                f.write(normalized)
-            config["sample_prompts"] = sample_prompts_file
-            log.info(f"Wrote inline sample_prompts to file {sample_prompts_file}")
+    if direct_python_training:
+        config.pop("prompt_file", None)
+        config.pop("sample_prompts", None)
     else:
-        try:
-            positive_prompt, sample_prompts_arg = get_sample_prompts(config=config)
+        prompt_file = str(config.get("prompt_file", "") or "").strip()
+        inline_sample_prompts = str(config.get("sample_prompts", "") or "").strip()
 
-            if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
-                sample_prompts_file = str(autosave_dir / f"{timestamp}-prompt.txt")
+        if prompt_file:
+            if not os.path.exists(prompt_file):
+                return APIResponseFail(message=f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
+            config["sample_prompts"] = prompt_file
+        elif inline_sample_prompts and should_use_inline_sample_prompts(inline_sample_prompts, config):
+            if os.path.isfile(inline_sample_prompts):
+                config["sample_prompts"] = inline_sample_prompts
+            else:
+                sample_prompts_file = str(autosave_dir / build_sample_prompt_file_name(config))
                 with open(sample_prompts_file, "w", encoding="utf-8") as f:
-                    f.write(sample_prompts_arg)
+                    normalized = enrich_inline_sample_prompts(inline_sample_prompts, config)
+                    f.write(normalized)
                 config["sample_prompts"] = sample_prompts_file
-                log.info(f"Wrote prompts to file {sample_prompts_file}")
+                log.info(f"Wrote inline sample_prompts to file {sample_prompts_file}")
+        else:
+            try:
+                positive_prompt, sample_prompts_arg = get_sample_prompts(config=config)
 
-        except ValueError as e:
-            log.error(f"Error while processing prompts: {e}")
-            return APIResponseFail(message=str(e))
+                if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
+                    sample_prompts_file = str(autosave_dir / f"{timestamp}-prompt.txt")
+                    with open(sample_prompts_file, "w", encoding="utf-8") as f:
+                        f.write(sample_prompts_arg)
+                    config["sample_prompts"] = sample_prompts_file
+                    log.info(f"Wrote prompts to file {sample_prompts_file}")
 
-    config.pop("prompt_file", None)
+            except ValueError as e:
+                log.error(f"Error while processing prompts: {e}")
+                return APIResponseFail(message=str(e))
+
+        config.pop("prompt_file", None)
 
     with open(toml_file, "w", encoding="utf-8") as f:
         f.write(toml.dumps(config))
@@ -1256,7 +1333,7 @@ async def training_preflight(request: Request) -> APIResponse:
     result = analyze_training_preflight(
         config,
         training_type=training_type,
-        trainer_supported=training_type in trainer_mapping,
+        trainer_supported=get_trainer_definition(training_type) is not None,
         conditioning_required=training_type in {"sd-controlnet", "sdxl-controlnet", "flux-controlnet"},
         sample_prompt_builder=build_sample_prompt_preview,
         attention_fallback_checker=lambda payload: simulate_attention_backend_fallback_warning(payload, gpu_ids),
@@ -1739,6 +1816,122 @@ async def get_tasks() -> APIResponse:
     return APIResponseSuccess(data={
         "tasks": tm.dump()
     })
+
+
+@router.get("/backend/status", response_model_exclude_none=True)
+async def get_backend_status() -> APIResponse:
+    return APIResponseSuccess(data=read_backend_status())
+
+
+@router.post("/backend/restart", response_model_exclude_none=True)
+async def restart_backend() -> APIResponse:
+    ok, message = request_backend_restart()
+    if not ok:
+        return APIResponseFail(message=message)
+    return APIResponseSuccess(message=message, data={"status": read_backend_status()})
+
+
+@router.get("/yolo/runtime_status", response_model_exclude_none=True)
+async def get_yolo_runtime_status() -> APIResponse:
+    return APIResponseSuccess(data=build_yolo_runtime_payload())
+
+
+@router.post("/yolo/install_dependencies", response_model_exclude_none=True)
+async def install_yolo_dependencies() -> APIResponse:
+    ok, message, payload = start_yolo_dependency_install()
+    if not ok:
+        return APIResponseFail(message=message, data=payload)
+    return APIResponseSuccess(message=message, data=payload)
+
+
+@router.get("/aesthetic/runtime_status", response_model_exclude_none=True)
+async def get_aesthetic_runtime_status() -> APIResponse:
+    return APIResponseSuccess(data=build_aesthetic_runtime_payload())
+
+
+@router.post("/aesthetic/install_dependencies", response_model_exclude_none=True)
+async def install_aesthetic_dependencies() -> APIResponse:
+    ok, message, payload = start_aesthetic_dependency_install()
+    if not ok:
+        return APIResponseFail(message=message, data=payload)
+    return APIResponseSuccess(message=message, data=payload)
+
+
+@router.get("/aesthetic_infer/runtime_status", response_model_exclude_none=True)
+async def get_aesthetic_infer_runtime_status() -> APIResponse:
+    return APIResponseSuccess(data=aesthetic_infer_manager.get_runtime_payload())
+
+
+@router.get("/aesthetic_infer/status", response_model_exclude_none=True)
+async def get_aesthetic_infer_status() -> APIResponse:
+    return APIResponseSuccess(data=aesthetic_infer_manager.get_status())
+
+
+@router.get("/aesthetic_infer/logs", response_model_exclude_none=True)
+async def get_aesthetic_infer_logs(since_id: int = 0, limit: int = 300) -> APIResponse:
+    return APIResponseSuccess(data=aesthetic_infer_manager.get_logs(since_id=since_id, limit=limit))
+
+
+@router.post("/aesthetic_infer/start", response_model_exclude_none=True)
+async def start_aesthetic_infer(request: Request) -> APIResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        return APIResponseFail(message="请求体不是合法的 JSON。")
+    if not isinstance(payload, dict):
+        return APIResponseFail(message="请求体必须是 JSON 对象。")
+    ok, message, data = aesthetic_infer_manager.start(payload)
+    if not ok:
+        return APIResponseFail(message=message, data=data)
+    return APIResponseSuccess(message=message, data=data)
+
+
+@router.post("/aesthetic_infer/stop", response_model_exclude_none=True)
+async def stop_aesthetic_infer() -> APIResponse:
+    ok, message, data = aesthetic_infer_manager.stop()
+    if not ok:
+        return APIResponseFail(message=message, data=data)
+    return APIResponseSuccess(message=message, data=data)
+
+
+@router.get("/aesthetic_infer/results", response_model_exclude_none=True)
+async def get_aesthetic_infer_results(
+    output_dir: str = "",
+    page: int = 1,
+    page_size: int = 24,
+    q: str = "",
+    special_filter: str = "all",
+    sort_by: str = "",
+    sort_order: str = "desc",
+) -> APIResponse:
+    ok, message, data = aesthetic_infer_manager.get_results(
+        output_dir_raw=output_dir,
+        page=page,
+        page_size=page_size,
+        keyword=q,
+        special_filter=special_filter,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    if not ok:
+        return APIResponseFail(message=message)
+    return APIResponseSuccess(data=data)
+
+
+@router.get("/aesthetic_infer/file")
+async def get_aesthetic_infer_file(output_dir: str, kind: str):
+    path = aesthetic_infer_manager.resolve_output_file(output_dir, kind)
+    if path is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(str(path))
+
+
+@router.get("/aesthetic_infer/image")
+async def get_aesthetic_infer_image(path: str):
+    resolved_path = aesthetic_infer_manager.resolve_image_path(path)
+    if resolved_path is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(str(resolved_path))
 
 
 @router.get("/tasks/terminate/{task_id}", response_model_exclude_none=True)

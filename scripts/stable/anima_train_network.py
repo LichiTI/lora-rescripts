@@ -1,6 +1,6 @@
 # Thin entrypoint for the standalone Lulynx Anima LoRA core.
 
-from lulynx.anima_lora_trainer import AnimaNetworkTrainer, setup_parser
+from anima_lora_trainer_with_cooldown import AnimaNetworkTrainer, setup_parser
 from library import train_util
 
 

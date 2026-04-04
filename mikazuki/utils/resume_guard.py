@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Iterable
 
 CKPT_EXTENSIONS = {".safetensors", ".ckpt", ".pt"}
+YOLO_RESUME_EXTENSIONS = {".pt", ".pth"}
 STATE_REQUIRED_FILES = ("train_state.json", "optimizer.bin", "scheduler.bin")
 STATE_MODEL_FILE_CANDIDATES = ("model.safetensors", "pytorch_model.bin", "model.bin")
 
@@ -59,7 +60,30 @@ def iter_existing_output_artifacts(config: dict, repo_root: Path) -> Iterable[Pa
     return artifacts
 
 
+def get_model_train_type(config: dict) -> str:
+    return str(config.get("model_train_type", "") or "").strip().lower()
+
+
+def validate_yolo_resume_checkpoint(config: dict, repo_root: Path) -> tuple[bool, str]:
+    resume_path_raw = str(config.get("resume", "") or "").strip()
+    if not resume_path_raw:
+        return True, ""
+
+    resume_file = resolve_local_path(resume_path_raw, repo_root)
+    if not resume_file.exists():
+        return False, f"YOLO resume 检查点不存在，已阻止启动。resume={resume_file}"
+    if not resume_file.is_file():
+        return False, f"YOLO resume 路径必须是 .pt / .pth 文件，已阻止启动。resume={resume_file}"
+    if resume_file.suffix.lower() not in YOLO_RESUME_EXTENSIONS:
+        return False, f"YOLO resume 路径必须是 .pt / .pth 文件，已阻止启动。resume={resume_file}"
+
+    return True, ""
+
+
 def validate_resume_launch_guard(config: dict, repo_root: Path) -> tuple[bool, str]:
+    if get_model_train_type(config) == "yolo":
+        return validate_yolo_resume_checkpoint(config, repo_root)
+
     existing_artifacts = list(iter_existing_output_artifacts(config, repo_root))
     if not existing_artifacts:
         return True, ""

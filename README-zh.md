@@ -46,6 +46,10 @@ Modify By `Lulynx`
   <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README.md">文档</a>
   ·
   <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README-zh.md">中文README</a>
+  ·
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/AGENTS.md">协作约束</a>
+  ·
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/FRONTEND.md">前端补丁规范</a>
 </p>
 
 SD-reScripts 是基于 LoRA-scripts（又名 SD-Trainer）继续维护的分支版本。

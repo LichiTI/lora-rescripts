@@ -140,6 +140,8 @@ Schema.intersect([
     // 其他选项
     SHARED_SCHEMAS.OTHER,
 
+    SHARED_SCHEMAS.THERMAL_MANAGEMENT,
+
     // 速度优化选项
     Schema.intersect([
         Schema.object(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH),

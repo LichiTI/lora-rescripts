@@ -67,6 +67,8 @@ WORKER_OUTPUT_MARKER = "THIS_IS_WORKER_NODE_CHECK_MAIN_OUTPUTS"
 MODEL_TRAIN_TYPE_TO_TRAINER_FILE = {
     "sd-lora": "./scripts/stable/train_network.py",
     "sdxl-lora": "./scripts/stable/sdxl_train_network.py",
+    "yolo": "./scripts/stable/yolo_train.py",
+    "aesthetic-scorer": "./scripts/stable/aesthetic_scorer_train.py",
     "sd-dreambooth": "./scripts/stable/train_db.py",
     "sdxl-finetune": "./scripts/stable/sdxl_train.py",
     "sd-controlnet": "./scripts/stable/train_control_net.py",

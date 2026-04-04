@@ -234,6 +234,8 @@ Schema.intersect([
         ]),
     ]).description("速度优化选项"),
 
+    SHARED_SCHEMAS.THERMAL_MANAGEMENT,
+
     Schema.object({
         enable_distributed_training: Schema.boolean().default(false).description("启用分布式启动。当前为最小实现，支持多进程 / 多机拉起，以及 worker 最小配置与缺失资源同步"),
         num_processes: Schema.number().min(1).description("每台机器启动的训练进程数。留空时会优先按所选 GPU 数量自动推断"),

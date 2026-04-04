@@ -20,6 +20,7 @@ from mikazuki.utils.mixed_resolution import (
 from mikazuki.utils.resume_guard import validate_resume_launch_guard
 from mikazuki.utils.runtime_dependencies import analyze_training_runtime_dependencies
 from mikazuki.utils.tensorboard_runs import apply_tensorboard_runtime_config
+from mikazuki.utils.trainer_registry import get_trainer_definition
 
 
 def parse_boolish(value) -> bool:
@@ -283,6 +284,8 @@ def analyze_training_preflight(
     conditioning_data_dir = str(payload.get("conditioning_data_dir", "")).strip()
     resume_path = str(payload.get("resume", "")).strip()
     model_path = str(payload.get("pretrained_model_name_or_path", "")).strip()
+    trainer_definition = get_trainer_definition(training_type)
+    direct_python_training = bool(trainer_definition and trainer_definition.direct_python)
     raw_gpu_ids = payload.get("gpu_ids")
     gpu_ids = [str(item) for item in raw_gpu_ids] if isinstance(raw_gpu_ids, list) else []
     distributed_runtime = None
@@ -292,7 +295,9 @@ def analyze_training_preflight(
         errors.append(f"Unsupported trainer type: {training_type}")
 
     dataset_summary = None
-    if train_data_dir:
+    if trainer_definition and trainer_definition.preflight_builder is not None:
+        dataset_summary = trainer_definition.preflight_builder(payload, errors, warnings, notes)
+    elif train_data_dir:
         try:
             dataset_report = analyze_dataset(train_data_dir, caption_extension=str(payload.get("caption_extension", ".txt")))
             dataset_summary = summarize_dataset_report(dataset_report)
@@ -320,7 +325,9 @@ def analyze_training_preflight(
                 log.warning(f"Training preflight conditioning dataset analysis failed: {exc}")
                 warnings.append("Conditioning dataset analysis could not complete during preflight.")
 
-    if model_path:
+    if trainer_definition and trainer_definition.skip_model_validation:
+        pass
+    elif model_path:
         validated, message = train_utils.validate_model(model_path, training_type)
         if not validated:
             errors.append(message or "Pretrained model validation failed.")
@@ -328,12 +335,13 @@ def analyze_training_preflight(
         errors.append("pretrained_model_name_or_path is empty.")
 
     if resume_path:
-        if not os.path.exists(resume_path):
-            errors.append("Resume path does not exist.")
-        elif not os.path.isdir(resume_path):
-            warnings.append("Resume path exists but is not a directory. Confirm this is a valid save_state folder.")
-        else:
-            notes.append(f"Resume path detected: {resume_path}")
+        if not (trainer_definition and trainer_definition.preflight_handles_resume):
+            if not os.path.exists(resume_path):
+                errors.append("Resume path does not exist.")
+            elif not os.path.isdir(resume_path):
+                warnings.append("Resume path exists but is not a directory. Confirm this is a valid save_state folder.")
+            else:
+                notes.append(f"Resume path detected: {resume_path}")
 
     try:
         guard_ok, guard_message = validate_resume_launch_guard(payload, base_dir_path())
@@ -415,28 +423,29 @@ def analyze_training_preflight(
     if bool(payload.get("clear_dataset_npz_before_train")):
         notes.append("clear_dataset_npz_before_train is enabled, so train/reg dataset .npz caches will be cleared before launch.")
 
-    try:
-        distributed_runtime = resolve_distributed_runtime(payload, gpu_ids)
-    except ValueError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        log.warning(f"Training preflight distributed runtime analysis failed: {exc}")
-        warnings.append("Distributed runtime analysis could not complete during preflight.")
-    else:
-        warnings.extend(distributed_runtime.get("warnings", []))
-        notes.extend(distributed_runtime.get("notes", []))
-        if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
-            notes.append("当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。")
+    if not direct_python_training:
         try:
-            worker_sync_runtime = resolve_worker_sync_runtime(payload, distributed_runtime, base_dir_path())
+            distributed_runtime = resolve_distributed_runtime(payload, gpu_ids)
         except ValueError as exc:
             errors.append(str(exc))
         except Exception as exc:
-            log.warning(f"Training preflight worker sync analysis failed: {exc}")
-            warnings.append("Worker sync analysis could not complete during preflight.")
+            log.warning(f"Training preflight distributed runtime analysis failed: {exc}")
+            warnings.append("Distributed runtime analysis could not complete during preflight.")
         else:
-            warnings.extend(worker_sync_runtime.get("warnings", []))
-            notes.extend(worker_sync_runtime.get("notes", []))
+            warnings.extend(distributed_runtime.get("warnings", []))
+            notes.extend(distributed_runtime.get("notes", []))
+            if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
+                notes.append("当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。")
+            try:
+                worker_sync_runtime = resolve_worker_sync_runtime(payload, distributed_runtime, base_dir_path())
+            except ValueError as exc:
+                errors.append(str(exc))
+            except Exception as exc:
+                log.warning(f"Training preflight worker sync analysis failed: {exc}")
+                warnings.append("Worker sync analysis could not complete during preflight.")
+            else:
+                warnings.extend(worker_sync_runtime.get("warnings", []))
+                notes.extend(worker_sync_runtime.get("notes", []))
 
     try:
         tensorboard_runtime = apply_tensorboard_runtime_config(payload, base_dir_path())
@@ -454,42 +463,45 @@ def analyze_training_preflight(
                 notes.append("TensorBoard 将创建新的日志运行目录。")
 
     mixed_resolution = None
-    try:
-        mixed_resolution_payload = dict(payload)
-        if distributed_runtime is not None:
-            mixed_resolution_payload["num_processes"] = int(distributed_runtime.get("total_num_processes", 1) or 1)
-        mixed_resolution = build_mixed_resolution_plan(mixed_resolution_payload, training_type=training_type)
-        if mixed_resolution.enabled:
-            notes.append(build_mixed_resolution_summary_text(mixed_resolution))
-    except ValueError as exc:
-        errors.append(str(exc))
-    except Exception as exc:
-        log.warning(f"Training preflight mixed-resolution analysis failed: {exc}")
-        warnings.append("Mixed-resolution planning could not complete during preflight.")
+    if not direct_python_training:
+        try:
+            mixed_resolution_payload = dict(payload)
+            if distributed_runtime is not None:
+                mixed_resolution_payload["num_processes"] = int(distributed_runtime.get("total_num_processes", 1) or 1)
+            mixed_resolution = build_mixed_resolution_plan(mixed_resolution_payload, training_type=training_type)
+            if mixed_resolution.enabled:
+                notes.append(build_mixed_resolution_summary_text(mixed_resolution))
+        except ValueError as exc:
+            errors.append(str(exc))
+        except Exception as exc:
+            log.warning(f"Training preflight mixed-resolution analysis failed: {exc}")
+            warnings.append("Mixed-resolution planning could not complete during preflight.")
 
     cache_preflight = None
-    try:
-        cache_preflight = analyze_dataset_cache_preflight(payload, training_type=training_type)
-        errors.extend(cache_preflight.get("errors", []))
-        warnings.extend(cache_preflight.get("warnings", []))
-        notes.extend(cache_preflight.get("notes", []))
-    except Exception as exc:
-        log.warning(f"Training preflight cache analysis failed: {exc}")
-        warnings.append("Dataset cache audit could not complete during preflight.")
+    if not direct_python_training:
+        try:
+            cache_preflight = analyze_dataset_cache_preflight(payload, training_type=training_type)
+            errors.extend(cache_preflight.get("errors", []))
+            warnings.extend(cache_preflight.get("warnings", []))
+            notes.extend(cache_preflight.get("notes", []))
+        except Exception as exc:
+            log.warning(f"Training preflight cache analysis failed: {exc}")
+            warnings.append("Dataset cache audit could not complete during preflight.")
 
     sample_prompt = None
-    try:
-        sample_prompt = sample_prompt_builder(payload)
-        if sample_prompt:
-            warnings.extend([str(item) for item in sample_prompt.get("warnings", []) if str(item).strip()])
-            notes.extend([str(item) for item in sample_prompt.get("notes", []) if str(item).strip()])
-            if sample_prompt.get("warning"):
-                warnings.append(str(sample_prompt["warning"]))
-    except ValueError as exc:
-        warnings.append(str(exc))
-    except Exception as exc:
-        log.warning(f"Training preflight sample prompt preview failed: {exc}")
-        warnings.append("Sample prompt preview could not be generated.")
+    if not direct_python_training:
+        try:
+            sample_prompt = sample_prompt_builder(payload)
+            if sample_prompt:
+                warnings.extend([str(item) for item in sample_prompt.get("warnings", []) if str(item).strip()])
+                notes.extend([str(item) for item in sample_prompt.get("notes", []) if str(item).strip()])
+                if sample_prompt.get("warning"):
+                    warnings.append(str(sample_prompt["warning"]))
+        except ValueError as exc:
+            warnings.append(str(exc))
+        except Exception as exc:
+            log.warning(f"Training preflight sample prompt preview failed: {exc}")
+            warnings.append("Sample prompt preview could not be generated.")
 
     attention_warning = attention_fallback_checker(payload)
     if attention_warning:

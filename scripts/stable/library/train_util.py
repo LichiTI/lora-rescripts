@@ -77,6 +77,11 @@ import library.huggingface_util as huggingface_util
 import library.sai_model_spec as sai_model_spec
 import library.deepspeed_utils as deepspeed_utils
 from library.utils import setup_logging, resize_image, validate_interpolation_fn
+try:
+    from mikazuki.utils.nvidia_smi import query_gpu_metrics, resolve_visible_gpu_targets_from_env
+except Exception:
+    query_gpu_metrics = None
+    resolve_visible_gpu_targets_from_env = None
 
 setup_logging()
 import logging
@@ -89,6 +94,7 @@ from library.original_unet import UNet2DConditionModel
 HIGH_VRAM = False
 
 _ARGPARSE_ZH_HELP_FALLBACK = " / 中文说明：请参考前面的英文描述。"
+_EPOCH_COOLDOWN_WARNING_KEYS = set()
 
 
 def _normalize_argparse_help_text(help_text: Optional[str]) -> Optional[str]:
@@ -4088,6 +4094,36 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         action="store_true",
         help="save training state (including optimizer states etc.) on train end / optimizerなど学習状態も含めたstateを学習完了時に保存する",
     )
+    parser.add_argument(
+        "--cooldown_every_n_epochs",
+        type=int,
+        default=None,
+        help="cool down training every N epochs after epoch-end save/preview / 各epoch末尾の保存・プレビュー後にNエポックごとにクールダウンする / 每 N 个 epoch 在轮次结束保存与预览完成后执行一次冷却暂停",
+    )
+    parser.add_argument(
+        "--cooldown_minutes",
+        type=float,
+        default=None,
+        help="minimum cooldown time in minutes for each cooldown pause / クールダウン時に最低限待機する分数 / 每次冷却至少暂停多少分钟",
+    )
+    parser.add_argument(
+        "--cooldown_until_temp_c",
+        type=int,
+        default=None,
+        help="wait until local training GPU temperature drops to this Celsius target / ローカル学習GPU温度がこの摂氏温度以下になるまで待機する / 等待本机训练显卡温度降到该摄氏度以下再继续",
+    )
+    parser.add_argument(
+        "--cooldown_poll_seconds",
+        type=int,
+        default=15,
+        help="polling interval in seconds when waiting for GPU temperature / GPU温度待機時のポーリング間隔（秒） / 按温度等待时的轮询间隔（秒）",
+    )
+    parser.add_argument(
+        "--gpu_power_limit_w",
+        type=int,
+        default=None,
+        help="set whole-GPU power limit in watts before training starts (not per-process) / 学習開始前にGPU全体の電力上限をワットで設定する（プロセス単位ではない） / 训练开始前尝试设置整张训练显卡的功率墙，单位瓦，不是单个进程限制",
+    )
     parser.add_argument("--resume", type=str, default=None, help="saved state to resume training / 学習再開するモデルのstate")
 
     parser.add_argument("--train_batch_size", type=int, default=1, help="batch size for training / 学習時のバッチサイズ")
@@ -4766,6 +4802,173 @@ def verify_training_args(args: argparse.Namespace):
             "sample_every_n_steps is less than or equal to 0, so it will be disabled / sample_every_n_stepsに0以下の値が指定されたため無効になります / sample_every_n_steps 小于等于 0，已自动禁用"
         )
         args.sample_every_n_steps = None
+
+    if getattr(args, "cooldown_every_n_epochs", None) is not None and args.cooldown_every_n_epochs <= 0:
+        logger.warning(
+            "cooldown_every_n_epochs is less than or equal to 0, so it will be disabled / cooldown_every_n_epochsに0以下の値が指定されたため無効になります / cooldown_every_n_epochs 小于等于 0，已自动禁用"
+        )
+        args.cooldown_every_n_epochs = None
+
+    if getattr(args, "cooldown_minutes", None) is not None and args.cooldown_minutes <= 0:
+        logger.warning(
+            "cooldown_minutes is less than or equal to 0, so fixed cooldown time will be disabled / cooldown_minutesに0以下の値が指定されたため固定待機を無効にします / cooldown_minutes 小于等于 0，已自动禁用固定等待"
+        )
+        args.cooldown_minutes = None
+
+    if getattr(args, "cooldown_until_temp_c", None) is not None and args.cooldown_until_temp_c <= 0:
+        logger.warning(
+            "cooldown_until_temp_c is less than or equal to 0, so temperature cooldown will be disabled / cooldown_until_temp_cに0以下の値が指定されたため温度待機を無効にします / cooldown_until_temp_c 小于等于 0，已自动禁用温度等待"
+        )
+        args.cooldown_until_temp_c = None
+
+    if getattr(args, "cooldown_poll_seconds", None) is None or args.cooldown_poll_seconds <= 0:
+        if getattr(args, "cooldown_poll_seconds", None) is not None and args.cooldown_poll_seconds <= 0:
+            logger.warning(
+                "cooldown_poll_seconds is less than or equal to 0, so it will be reset to 15 seconds / cooldown_poll_secondsに0以下の値が指定されたため15秒に戻します / cooldown_poll_seconds 小于等于 0，已自动重置为 15 秒"
+            )
+        args.cooldown_poll_seconds = 15
+
+    if getattr(args, "cooldown_every_n_epochs", None) is not None:
+        if getattr(args, "cooldown_minutes", None) is None and getattr(args, "cooldown_until_temp_c", None) is None:
+            logger.warning(
+                "cooldown_every_n_epochs is set, but neither cooldown_minutes nor cooldown_until_temp_c is configured, so cooldown will be disabled / cooldown_every_n_epochsは設定されていますが、cooldown_minutesとcooldown_until_temp_cのどちらも未設定のため無効にします / 已设置 cooldown_every_n_epochs，但未配置 cooldown_minutes 或 cooldown_until_temp_c，已自动禁用冷却"
+            )
+            args.cooldown_every_n_epochs = None
+    elif getattr(args, "cooldown_minutes", None) is not None or getattr(args, "cooldown_until_temp_c", None) is not None:
+        logger.warning(
+            "cooldown_minutes or cooldown_until_temp_c is set without cooldown_every_n_epochs, so cooldown will not run / cooldown_every_n_epochsが未設定のため温度待機・固定待機は実行されません / 未设置 cooldown_every_n_epochs，冷却暂停不会执行"
+        )
+
+    if getattr(args, "gpu_power_limit_w", None) is not None and args.gpu_power_limit_w <= 0:
+        logger.warning(
+            "gpu_power_limit_w is less than or equal to 0, so it will be disabled / gpu_power_limit_wに0以下の値が指定されたため無効になります / gpu_power_limit_w 小于等于 0，已自动禁用"
+        )
+        args.gpu_power_limit_w = None
+
+
+def _warn_epoch_cooldown_once(key: str, message: str):
+    if key in _EPOCH_COOLDOWN_WARNING_KEYS:
+        return
+    _EPOCH_COOLDOWN_WARNING_KEYS.add(key)
+    logger.warning(message)
+
+
+def _summarize_gpu_temperatures(gpus: Sequence[dict]) -> str:
+    summaries = []
+    for gpu in gpus or []:
+        gpu_id = str(gpu.get("index", "?"))
+        temperature_c = gpu.get("temperature_c")
+        if temperature_c is None:
+            summaries.append(f"{gpu_id}:N/A")
+        else:
+            summaries.append(f"{gpu_id}:{int(round(float(temperature_c)))}C")
+    return ", ".join(summaries) if summaries else "N/A"
+
+
+def maybe_run_epoch_cooldown(
+    args: argparse.Namespace,
+    accelerator: Accelerator,
+    epoch_no: int,
+    total_epochs: Optional[int] = None,
+    context_label: str = "training",
+) -> bool:
+    cooldown_every_n_epochs = getattr(args, "cooldown_every_n_epochs", None)
+    cooldown_minutes = getattr(args, "cooldown_minutes", None)
+    cooldown_until_temp_c = getattr(args, "cooldown_until_temp_c", None)
+    cooldown_poll_seconds = int(getattr(args, "cooldown_poll_seconds", 15) or 15)
+
+    if cooldown_every_n_epochs is None or cooldown_every_n_epochs <= 0:
+        return False
+    if epoch_no is None or epoch_no <= 0:
+        return False
+    if epoch_no % cooldown_every_n_epochs != 0:
+        return False
+    if total_epochs is not None and epoch_no >= total_epochs:
+        return False
+    if cooldown_minutes is None and cooldown_until_temp_c is None:
+        return False
+
+    accelerator.wait_for_everyone()
+    try:
+        if not accelerator.is_local_main_process:
+            return True
+
+        logger.info(
+            f"[cooldown] {context_label}: epoch {epoch_no}"
+            + (f"/{total_epochs}" if total_epochs is not None else "")
+            + " reached cooldown point."
+        )
+
+        if cooldown_minutes is not None:
+            cooldown_seconds = max(0.0, float(cooldown_minutes) * 60.0)
+            if cooldown_seconds > 0:
+                logger.info(
+                    f"[cooldown] {context_label}: sleeping for at least {float(cooldown_minutes):.2f} minute(s)."
+                )
+                time.sleep(cooldown_seconds)
+
+        if cooldown_until_temp_c is None:
+            return True
+
+        if query_gpu_metrics is None or resolve_visible_gpu_targets_from_env is None:
+            _warn_epoch_cooldown_once(
+                "cooldown-import-missing",
+                "[cooldown] GPU temperature cooldown is unavailable because the nvidia-smi helper could not be imported. / GPU温度クールダウン用ヘルパーを読み込めないため温度待機をスキップします / 无法导入 nvidia-smi 辅助模块，已跳过温度冷却等待",
+            )
+            return True
+
+        target_ids = resolve_visible_gpu_targets_from_env() or None
+        metrics = query_gpu_metrics(target_ids)
+        if not metrics.get("ok"):
+            _warn_epoch_cooldown_once(
+                f"cooldown-query-failed:{metrics.get('error', '')}",
+                f"[cooldown] Unable to query GPU temperature, skip temperature wait: {metrics.get('error', 'unknown error')} / GPU温度を取得できないため温度待機をスキップします / 无法读取 GPU 温度，已跳过温度等待",
+            )
+            return True
+
+        gpus = metrics.get("gpus") or []
+        temperatures = [gpu.get("temperature_c") for gpu in gpus if gpu.get("temperature_c") is not None]
+        if not temperatures:
+            _warn_epoch_cooldown_once(
+                "cooldown-temperature-unavailable",
+                "[cooldown] GPU temperature telemetry is unavailable, skip temperature wait. / GPU温度テレメトリが利用できないため温度待機をスキップします / GPU 温度遥测不可用，已跳过温度等待",
+            )
+            return True
+
+        logger.info(
+            f"[cooldown] {context_label}: waiting until max GPU temperature is <= {int(cooldown_until_temp_c)}C "
+            + f"(current: {_summarize_gpu_temperatures(gpus)})."
+        )
+
+        while True:
+            max_temperature = max(temp for temp in temperatures if temp is not None)
+            if max_temperature <= cooldown_until_temp_c:
+                logger.info(
+                    f"[cooldown] {context_label}: cooldown finished at {_summarize_gpu_temperatures(gpus)}."
+                )
+                break
+
+            time.sleep(max(1, cooldown_poll_seconds))
+            metrics = query_gpu_metrics(target_ids)
+            if not metrics.get("ok"):
+                _warn_epoch_cooldown_once(
+                    f"cooldown-query-loop-failed:{metrics.get('error', '')}",
+                    f"[cooldown] GPU temperature polling failed, stop temperature wait: {metrics.get('error', 'unknown error')} / GPU温度ポーリングに失敗したため温度待機を終了します / GPU 温度轮询失败，已结束温度等待",
+                )
+                break
+
+            gpus = metrics.get("gpus") or []
+            temperatures = [gpu.get("temperature_c") for gpu in gpus if gpu.get("temperature_c") is not None]
+            if not temperatures:
+                _warn_epoch_cooldown_once(
+                    "cooldown-temperature-loop-unavailable",
+                    "[cooldown] GPU temperature telemetry disappeared during cooldown, stop temperature wait. / クールダウン中にGPU温度テレメトリが利用できなくなったため温度待機を終了します / 冷却过程中 GPU 温度遥测不可用，已结束温度等待",
+                )
+                break
+    finally:
+        accelerator.wait_for_everyone()
+
+    return True
 
 
 def add_dataset_arguments(

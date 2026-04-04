@@ -884,6 +884,13 @@ def train(args):
             [text_encoder1, text_encoder2],
             unet,
         )
+        train_util.maybe_run_epoch_cooldown(
+            args,
+            accelerator,
+            epoch + 1,
+            num_train_epochs,
+            context_label="SDXL finetune",
+        )
 
     is_main_process = accelerator.is_main_process
     # if is_main_process:

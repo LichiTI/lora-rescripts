@@ -46,6 +46,10 @@ Modify By `Lulynx`
   <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README.md">Documents</a>
   ·
   <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/README-zh.md">中文README</a>
+  ·
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/AGENTS.md">AGENTS</a>
+  ·
+  <a href="https://github.com/WhitecrowAurora/lora-rescripts/blob/main/FRONTEND.md">FRONTEND</a>
 </p>
 
 SD-reScripts is a maintained fork / continuation of LoRA-scripts (a.k.a. SD-Trainer).

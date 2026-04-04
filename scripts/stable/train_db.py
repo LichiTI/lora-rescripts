@@ -515,6 +515,13 @@ def train(args):
         train_util.sample_images(
             accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenize_strategy.tokenizer, text_encoder, unet
         )
+        train_util.maybe_run_epoch_cooldown(
+            args,
+            accelerator,
+            epoch + 1,
+            num_train_epochs,
+            context_label="DreamBooth finetune",
+        )
 
     is_main_process = accelerator.is_main_process
     if is_main_process:

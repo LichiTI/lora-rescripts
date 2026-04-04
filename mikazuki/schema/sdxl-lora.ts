@@ -105,5 +105,7 @@ Schema.intersect([
         })
     ).description("速度优化选项"),
 
+    SHARED_SCHEMAS.THERMAL_MANAGEMENT,
+
     SHARED_SCHEMAS.DISTRIBUTED_TRAINING
 ]);

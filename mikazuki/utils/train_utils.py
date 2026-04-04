@@ -122,6 +122,8 @@ ALLOW_UNKNOWN_MODEL_TYPE_TRAINERS = {
     "anima-finetune",
 }
 
+YOLO_MODEL_EXTENSIONS = {".pt", ".pth", ".yaml", ".yml"}
+
 
 def is_promopt_like(s):
     for p in ["--n", "--s", "--l", "--d"]:
@@ -179,6 +181,9 @@ def guess_model_type(path):
 
 
 def validate_model(model_name: str, training_type: str = "sd-lora"):
+    if training_type == "yolo":
+        return validate_yolo_model_source(model_name)
+
     if os.path.exists(model_name):
         if os.path.isdir(model_name):
             files = os.listdir(model_name)
@@ -231,6 +236,48 @@ def validate_model(model_name: str, training_type: str = "sd-lora"):
         return True, "ok"
 
     return False, "model not found"
+
+
+def validate_yolo_model_source(model_name: str):
+    model_name = str(model_name or "").strip()
+    if not model_name:
+        return False, "YOLO 模型路径不能为空。"
+
+    if os.path.exists(model_name):
+        if os.path.isdir(model_name):
+            return False, "YOLO 模型路径必须指向 .pt / .pth / .yaml / .yml 文件，不能是文件夹。"
+
+        suffix = os.path.splitext(model_name)[1].lower()
+        if suffix and suffix not in YOLO_MODEL_EXTENSIONS:
+            return False, "YOLO 模型文件后缀必须是 .pt / .pth / .yaml / .yml。"
+        return True, "ok"
+
+    if any(sep in model_name for sep in ("/", "\\")):
+        return False, f"YOLO 模型文件不存在: {model_name}"
+
+    suffix = os.path.splitext(model_name)[1].lower()
+    if suffix in YOLO_MODEL_EXTENSIONS:
+        log.info(f"Allowing YOLO model alias / 允许 YOLO 官方模型名: {model_name}")
+        return True, "ok"
+
+    return False, f"YOLO 模型文件不存在: {model_name}"
+
+
+def validate_yolo_data_dir(path):
+    if not os.path.exists(path):
+        log.error(f"YOLO data dir {path} not exists, check your params")
+        return False
+
+    if not os.path.isdir(path):
+        log.error(f"YOLO data dir {path} is not a directory")
+        return False
+
+    imgs = get_total_images(path, True)
+    if len(imgs) == 0:
+        log.error(f"No image found in YOLO data dir {path}")
+        return False
+
+    return True
 
 
 def validate_data_dir(path):
@@ -313,10 +360,14 @@ def get_total_images(path, recursive=True):
         image_files = glob.glob(path + '/**/*.jpg', recursive=True)
         image_files += glob.glob(path + '/**/*.jpeg', recursive=True)
         image_files += glob.glob(path + '/**/*.png', recursive=True)
+        image_files += glob.glob(path + '/**/*.webp', recursive=True)
+        image_files += glob.glob(path + '/**/*.bmp', recursive=True)
     else:
         image_files = glob.glob(path + '/*.jpg')
         image_files += glob.glob(path + '/*.jpeg')
         image_files += glob.glob(path + '/*.png')
+        image_files += glob.glob(path + '/*.webp')
+        image_files += glob.glob(path + '/*.bmp')
     return image_files
 
 

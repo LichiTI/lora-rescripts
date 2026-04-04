@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-c1d3ab42","path":"/other-models/aesthetic-scorer.html","title":"\\u7F8E\\u5B66\\u8BC4\\u5206\\u6A21\\u578B\\u8BAD\\u7EC3","lang":"en-US","frontmatter":{"example":true,"trainType":"aesthetic-scorer"},"excerpt":"","headers":[],"filePathRelative":"other-models/aesthetic-scorer.md"}');export{e as data};

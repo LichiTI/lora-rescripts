@@ -133,6 +133,14 @@
             ])
         ]),
 
+        THERMAL_MANAGEMENT: Schema.object({
+            cooldown_every_n_epochs: Schema.number().min(1).description("每 N 个 epoch 在该轮保存与预览完成后暂停一次训练。留空表示关闭"),
+            cooldown_minutes: Schema.number().min(0).step(0.5).description("每次冷却至少暂停多少分钟。留空或 0 表示不按固定时长等待"),
+            cooldown_until_temp_c: Schema.number().min(1).description("冷却时等待到本机训练显卡温度降到多少摄氏度以下再继续。留空表示不按温度等待"),
+            cooldown_poll_seconds: Schema.number().min(1).default(15).description("温度轮询间隔（秒）。仅在按温度等待时生效"),
+            gpu_power_limit_w: Schema.number().min(1).description("训练开始前尝试设置整张训练显卡的功率墙，单位瓦。该限制作用于整张显卡，不是单个训练进程"),
+        }).description("散热与功耗管理"),
+
         LR_OPTIMIZER: Schema.intersect([
             Schema.object({
                 learning_rate: Schema.string().default("1e-4").description("总学习率, 在分开设置 U-Net 与文本编码器学习率后这个值失效。"),

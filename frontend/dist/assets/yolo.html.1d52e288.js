@@ -1,0 +1,1 @@
+const e=JSON.parse('{"key":"v-2f4a8d0c","path":"/other-models/yolo.html","title":"YOLO \\u6A21\\u578B\\u8BAD\\u7EC3","lang":"en-US","frontmatter":{"example":true,"trainType":"yolo"},"excerpt":"","headers":[],"filePathRelative":"other-models/yolo.md"}');export{e as data};

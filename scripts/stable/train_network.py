@@ -1858,6 +1858,13 @@ class NetworkTrainer:
             self.sample_images(accelerator, args, effective_epoch_no, global_step, accelerator.device, vae, tokenizers, text_encoder, unet)
             progress_bar.unpause()
             optimizer_train_fn()
+            train_util.maybe_run_epoch_cooldown(
+                args,
+                accelerator,
+                effective_epoch_no,
+                displayed_num_train_epochs,
+                context_label="network training",
+            )
 
             # end of epoch
 

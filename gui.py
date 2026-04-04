@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mikazuki.launch_utils import (base_dir_path, catch_exception, git_tag,
                                    prepare_environment, check_port_avaliable, find_avaliable_ports)
 from mikazuki.log import log
+from mikazuki.utils.backend_status import BACKEND_STATUS_FILE_ENV, write_backend_status
 
 APP_NAME = "SD-reScripts"
 APP_VERSION = "v1.1.5 Beta10"
@@ -33,6 +34,7 @@ parser.add_argument("--localization", type=str)
 parser.add_argument("--dev", action="store_true")
 
 TAGEDITOR_STATUS_FILE = base_dir_path() / "tmp" / "tageditor_status.json"
+BACKEND_STATUS_FILE = base_dir_path() / "tmp" / "backend_status.json"
 
 
 def write_tageditor_status(status: str, detail: str = ""):
@@ -201,7 +203,9 @@ def launch():
     os.environ["MIKAZUKI_TAGEDITOR_PORT"] = "28001"
     os.environ["MIKAZUKI_DEV"] = "1" if args.dev else "0"
     os.environ["MIKAZUKI_TAGEDITOR_STATUS_FILE"] = str(TAGEDITOR_STATUS_FILE)
+    os.environ[BACKEND_STATUS_FILE_ENV] = str(BACKEND_STATUS_FILE)
     os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "disabled" if args.disable_tageditor else "unknown"
+    write_backend_status("starting", "后端启动中，正在加载运行环境与前端资源。")
     if args.disable_tageditor:
         write_tageditor_status("disabled", "Tag editor is disabled for this launch.")
     else:

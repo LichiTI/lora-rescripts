@@ -82,6 +82,7 @@ if /i "%DEL_HF%"=="Y" (
 echo.
 echo [4/7] Slim bundled main Python packages for distribution? (Y/N, default N)
 echo This will physically remove installed runtime packages like torch / torchvision / xformers / diffusers / transformers / numpy / scipy / onnxruntime.
+echo It also removes YOLO and aesthetic scorer related packages such as opencv-python / matplotlib / polars / PyYAML / open-clip-torch / timm / tqdm.
 echo It keeps only pip / setuptools / wheel bootstrap components so first startup can auto-install dependencies again.
 echo It does not delete the python folder itself; only Lib\site-packages / Scripts / share payload is slimmed.
 set /p "SLIM_MAIN=: "
@@ -130,6 +131,7 @@ if /i "%SLIM_BLACKWELL%"=="Y" (
 echo.
 echo [7/7] Slim bundled SageAttention Python packages too? (Y/N, default N)
 echo This will physically remove torch / torchvision / triton / sageattention and other SageAttention runtime packages.
+echo It also removes YOLO and aesthetic scorer related packages such as opencv-python / matplotlib / polars / PyYAML / open-clip-torch / timm / tqdm.
 echo It keeps only pip / setuptools / wheel bootstrap components.
 echo It does not delete the SageAttention runtime folders themselves; only runtime payload is slimmed.
 echo If both hyphen and legacy underscore runtime folders exist, all detected SageAttention runtimes will be slimmed here.
@@ -149,8 +151,8 @@ echo.
 echo Cleanup summary:
 echo - Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache, embedded runtime .cache / torch_compile_debug
 echo - Optional: output, huggingface cache/config, main python deps, tag editor deps, blackwell python deps, SageAttention python deps
-echo - Main/Blackwell python slimming also removes xformers and will require reinstall on next startup
-echo - SageAttention python slimming removes triton / sageattention and will require reinstall on next startup
+echo - Main/Blackwell python slimming also removes xformers, YOLO extras, and aesthetic scorer extras, and will require reinstall on next startup
+echo - SageAttention python slimming removes triton / sageattention / YOLO extras / aesthetic scorer extras and will require reinstall on next startup
 echo - Main remaining bulky folder should drop massively after choosing Y for main python slimming
 echo.
 pause

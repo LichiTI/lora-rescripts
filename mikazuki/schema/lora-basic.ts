@@ -84,4 +84,6 @@ Schema.intersect([
         xformers: Schema.boolean().default(true).description("启用 xformers"),
         cache_latents: Schema.boolean().default(true).description("缓存图像 latent, 缓存 VAE 输出以减少 VRAM 使用")
     }).description("速度优化选项"),
+
+    SHARED_SCHEMAS.THERMAL_MANAGEMENT,
 ]);

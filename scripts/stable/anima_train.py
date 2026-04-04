@@ -777,6 +777,13 @@ def train(args):
                 text_encoding_strategy,
                 sample_prompts_te_outputs,
             )
+        train_util.maybe_run_epoch_cooldown(
+            args,
+            accelerator,
+            epoch + 1,
+            num_train_epochs,
+            context_label="Anima finetune",
+        )
 
     # End training
     is_main_process = accelerator.is_main_process

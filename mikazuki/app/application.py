@@ -13,10 +13,12 @@ from fastapi.responses import FileResponse, RedirectResponse
 from mikazuki.app.config import app_config
 from mikazuki.app.api import load_schemas, load_presets
 from mikazuki.app.api import router as api_router
+from mikazuki.app.aesthetic_labeling_api import router as aesthetic_labeling_router
 # from mikazuki.app.ipc import router as ipc_router
 from mikazuki.app.proxy import router as proxy_router
 from mikazuki.utils.devices import check_torch_gpu
 from mikazuki.utils.frontend_profiles import BUILTIN_PROFILE_ID, resolve_frontend_profile
+from mikazuki.utils.backend_status import write_backend_status
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -61,11 +63,13 @@ def _resolve_frontend_file(request_path: str) -> Path:
 
 
 async def app_startup():
+    write_backend_status("loading", "正在加载配置、数据结构与运行时信息。")
     app_config.load_config()
 
     await load_schemas()
     await load_presets()
     await asyncio.to_thread(check_torch_gpu)
+    write_backend_status("ready", "后端已就绪。")
 
     if sys.platform == "win32" and os.environ.get("MIKAZUKI_DEV", "0") != "1":
         browser_host = os.environ.get("MIKAZUKI_HOST", "127.0.0.1")
@@ -106,6 +110,7 @@ async def add_cache_control_header(request, call_next):
     return response
 
 app.include_router(api_router, prefix="/api")
+app.include_router(aesthetic_labeling_router, prefix="/api")
 # app.include_router(ipc_router, prefix="/ipc")
 
 

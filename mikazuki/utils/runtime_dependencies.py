@@ -93,6 +93,71 @@ PACKAGE_REGISTRY = {
         "display_name": "diffusers",
         "required_by_default": True,
     },
+    "requests": {
+        "package_name": "requests",
+        "display_name": "requests",
+        "required_by_default": False,
+    },
+    "psutil": {
+        "package_name": "psutil",
+        "display_name": "psutil",
+        "required_by_default": False,
+    },
+    "cv2": {
+        "package_name": "opencv-python",
+        "display_name": "opencv-python",
+        "required_by_default": False,
+    },
+    "matplotlib": {
+        "package_name": "matplotlib",
+        "display_name": "matplotlib",
+        "required_by_default": False,
+    },
+    "scipy": {
+        "package_name": "scipy",
+        "display_name": "scipy",
+        "required_by_default": False,
+    },
+    "polars": {
+        "package_name": "polars",
+        "display_name": "polars",
+        "required_by_default": False,
+    },
+    "torchvision": {
+        "package_name": "torchvision",
+        "display_name": "torchvision",
+        "required_by_default": False,
+    },
+    "open_clip": {
+        "package_name": "open-clip-torch",
+        "display_name": "open-clip-torch",
+        "required_by_default": False,
+    },
+    "timm": {
+        "package_name": "timm",
+        "display_name": "timm",
+        "required_by_default": False,
+    },
+    "tqdm": {
+        "package_name": "tqdm",
+        "display_name": "tqdm",
+        "required_by_default": False,
+    },
+    "yaml": {
+        "package_name": "PyYAML",
+        "display_name": "PyYAML",
+        "required_by_default": False,
+    },
+    "PIL": {
+        "package_name": "Pillow",
+        "display_name": "Pillow",
+        "required_by_default": False,
+    },
+    "thop": {
+        "package_name": "ultralytics-thop",
+        "display_name": "ultralytics-thop",
+        "required_by_default": False,
+    },
 }
 
 BUILTIN_LR_SCHEDULERS = {
@@ -288,6 +353,41 @@ def _add_anima_requirement(target: dict[str, list[str]], config: dict) -> None:
     _append_requirement(target, "sentencepiece", f"model_train_type={model_train_type}")
 
 
+def _add_yolo_requirement(target: dict[str, list[str]], config: dict) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if model_train_type != "yolo":
+        return
+
+    for module_name in (
+        "cv2",
+        "matplotlib",
+        "scipy",
+        "polars",
+        "requests",
+        "psutil",
+        "torchvision",
+        "PIL",
+        "yaml",
+    ):
+        _append_requirement(target, module_name, f"model_train_type={model_train_type}")
+
+
+def _add_aesthetic_requirement(target: dict[str, list[str]], config: dict) -> None:
+    model_train_type = str(config.get("model_train_type", "")).strip().lower()
+    if model_train_type != "aesthetic-scorer":
+        return
+
+    for module_name in (
+        "open_clip",
+        "timm",
+        "transformers",
+        "safetensors",
+        "PIL",
+        "tqdm",
+    ):
+        _append_requirement(target, module_name, f"model_train_type={model_train_type}")
+
+
 def collect_training_dependency_requirements(config: dict) -> dict[str, list[str]]:
     requirements: dict[str, list[str]] = {}
     _add_optimizer_requirement(requirements, str(config.get("optimizer_type", "")).strip())
@@ -295,6 +395,8 @@ def collect_training_dependency_requirements(config: dict) -> dict[str, list[str
     _add_attention_requirement(requirements, config)
     _add_network_module_requirement(requirements, config)
     _add_anima_requirement(requirements, config)
+    _add_yolo_requirement(requirements, config)
+    _add_aesthetic_requirement(requirements, config)
     return requirements
 
 
