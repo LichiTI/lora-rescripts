@@ -37,7 +37,7 @@ from mikazuki.tagger.llm import (
 )
 from mikazuki.tagger.interrogator import (available_interrogators,
                                           on_interrogate)
-from mikazuki.tasks import tm, TaskStatus as _TaskStatus
+from mikazuki.tasks import tm
 from mikazuki.utils.caption_backup import (create_caption_backup,
                                            list_caption_backups,
                                            NO_CAPTIONS_TO_BACKUP_MESSAGE,
@@ -45,13 +45,19 @@ from mikazuki.utils.caption_backup import (create_caption_backup,
 from mikazuki.utils.caption_cleanup import (apply_caption_cleanup,
                                              preview_caption_cleanup)
 from mikazuki.utils.dataset_cache_preflight import analyze_dataset_cache_preflight
-from mikazuki.utils.distributed import resolve_distributed_runtime
-from mikazuki.utils.distributed_sync import resolve_worker_sync_runtime
 from mikazuki.utils.mixed_resolution import (
     build_mixed_resolution_plan,
     build_mixed_resolution_summary_text,
 )
+from mikazuki.utils.training_launch_runtime import resolve_training_launch_runtime
 from mikazuki.utils.training_preflight import analyze_training_preflight
+from mikazuki.utils.training_sample_prompt_runtime import prepare_training_sample_prompt_config
+from mikazuki.utils.training_start_warnings import (
+    build_runtime_dependency_failure_message,
+    build_training_gpu_selection_warning,
+    build_training_resource_warnings,
+    merge_training_result_warnings,
+)
 from mikazuki.utils import train_utils
 from mikazuki.utils.dataset_analysis import analyze_dataset
 from mikazuki.utils.masked_loss_audit import analyze_masked_loss_dataset
@@ -61,15 +67,18 @@ from mikazuki.utils.image_resize_runtime import (
     resolve_image_resize_path,
     run_image_resize_job,
 )
-from mikazuki.utils.devices import (
-    get_attention_runtime_mode,
-    get_xformers_status,
-    printable_devices,
-)
+from mikazuki.utils.devices import get_xformers_status, printable_devices
 from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
 )
+from mikazuki.utils.attention_runtime_guard import (
+    apply_sageattention_route_guard,
+    apply_sageattention_runtime_override,
+    apply_sagebwd_runtime_guard,
+    apply_startup_attention_policy,
+)
+from mikazuki.utils.training_runtime_context import resolve_training_runtime_guard_context
 from mikazuki.utils.trainer_registry import get_trainer_definition
 from mikazuki.utils.backend_status import (
     read_backend_status,
@@ -287,44 +296,156 @@ def normalize_conflicting_network_target_flags(config: dict) -> list[str]:
     return warnings
 
 
+TLORA_STALE_NETWORK_ARG_PREFIXES = (
+    "tlora_min_rank=",
+    "tlora_rank_schedule=",
+    "tlora_orthogonal_init=",
+)
+
+PISSA_STALE_NETWORK_ARG_PREFIXES = (
+    "pissa_init=",
+    "pissa_method=",
+    "pissa_niter=",
+    "pissa_oversample=",
+    "pissa_apply_conv2d=",
+    "pissa_export_mode=",
+)
+
+
+def normalize_network_args(*values) -> list[str]:
+    items = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                item_str = str(item).strip()
+                if item_str:
+                    items.append(item_str)
+        else:
+            item_str = str(value).strip()
+            if item_str:
+                items.append(item_str)
+    return items
+
+
+def filter_network_args(args_list, stale_prefixes) -> list[str]:
+    return [item for item in args_list if not str(item).startswith(tuple(stale_prefixes))]
+
+
+def upsert_network_arg(args_list, key, value) -> list[str]:
+    prefix = f"{key}="
+    filtered = [item for item in args_list if not str(item).startswith(prefix)]
+    if value is not None and str(value).strip() != "":
+        filtered.append(f"{key}={value}")
+    return filtered
+
+
+def get_network_arg_value(args_list, key):
+    prefix = f"{key}="
+    for item in reversed(args_list):
+        item_str = str(item).strip()
+        if item_str.startswith(prefix):
+            return item_str.split("=", 1)[1].strip()
+    return None
+
+
+def pop_network_args(config: dict) -> list[str]:
+    return normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+
+
+def assign_network_args(config: dict, network_args: list[str]) -> None:
+    if network_args:
+        config["network_args"] = network_args
+    else:
+        config.pop("network_args", None)
+
+
+def apply_tlora_rank_overrides(config: dict, network_args: list[str]) -> list[str]:
+    network_args = filter_network_args(network_args, TLORA_STALE_NETWORK_ARG_PREFIXES)
+
+    try:
+        network_dim = int(config.get("network_dim", 0) or 0)
+    except (TypeError, ValueError):
+        network_dim = 0
+
+    try:
+        min_rank = int(config.get("tlora_min_rank", 1) or 1)
+    except (TypeError, ValueError):
+        min_rank = 1
+
+    if network_dim > 0:
+        min_rank = max(1, min(min_rank, network_dim))
+    else:
+        min_rank = max(1, min_rank)
+
+    config["tlora_min_rank"] = min_rank
+    network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
+
+    rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
+    if rank_schedule not in {"linear", "cosine"}:
+        rank_schedule = "cosine"
+    config["tlora_rank_schedule"] = rank_schedule
+    network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
+
+    orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
+    config["tlora_orthogonal_init"] = orthogonal_init
+    network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
+
+    return network_args
+
+
+def apply_pissa_overrides(config: dict, network_args: list[str]) -> list[str]:
+    network_args = filter_network_args(network_args, PISSA_STALE_NETWORK_ARG_PREFIXES)
+
+    pissa_init = parse_boolish(config.get("pissa_init", False))
+    config["pissa_init"] = pissa_init
+    if not pissa_init:
+        return network_args
+
+    pissa_method = str(config.get("pissa_method", "rsvd") or "rsvd").strip().lower() or "rsvd"
+    if pissa_method not in {"rsvd", "svd"}:
+        pissa_method = "rsvd"
+    config["pissa_method"] = pissa_method
+
+    try:
+        pissa_niter = int(config.get("pissa_niter", 2) or 2)
+    except (TypeError, ValueError):
+        pissa_niter = 2
+    pissa_niter = max(0, pissa_niter)
+    config["pissa_niter"] = pissa_niter
+
+    try:
+        pissa_oversample = int(config.get("pissa_oversample", 8) or 8)
+    except (TypeError, ValueError):
+        pissa_oversample = 8
+    pissa_oversample = max(0, pissa_oversample)
+    config["pissa_oversample"] = pissa_oversample
+
+    pissa_apply_conv2d = parse_boolish(config.get("pissa_apply_conv2d", False))
+    config["pissa_apply_conv2d"] = pissa_apply_conv2d
+
+    pissa_export_mode_raw = config.get("pissa_export_mode", "LoRA无损兼容导出")
+    pissa_export_mode_text = str(pissa_export_mode_raw or "LoRA无损兼容导出").strip()
+    pissa_export_mode = "approx" if "快速" in pissa_export_mode_text else "lossless"
+    config["pissa_export_mode"] = pissa_export_mode_text
+
+    network_args = upsert_network_arg(network_args, "pissa_init", "True")
+    network_args = upsert_network_arg(network_args, "pissa_method", pissa_method)
+    network_args = upsert_network_arg(network_args, "pissa_niter", pissa_niter)
+    network_args = upsert_network_arg(network_args, "pissa_oversample", pissa_oversample)
+    network_args = upsert_network_arg(network_args, "pissa_apply_conv2d", "True" if pissa_apply_conv2d else "False")
+    network_args = upsert_network_arg(network_args, "pissa_export_mode", pissa_export_mode)
+    return network_args
+
+
 def apply_anima_ui_overrides(config: dict) -> None:
     model_train_type = str(config.get("model_train_type", "")).strip().lower()
     if not model_train_type.startswith("anima"):
         return
 
-    def normalize_network_args(*values):
-        items = []
-        for value in values:
-            if value is None:
-                continue
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    item_str = str(item).strip()
-                    if item_str:
-                        items.append(item_str)
-            else:
-                item_str = str(value).strip()
-                if item_str:
-                    items.append(item_str)
-        return items
-
-    def upsert_network_arg(args_list, key, value):
-        prefix = f"{key}="
-        filtered = [item for item in args_list if not str(item).startswith(prefix)]
-        if value is not None and str(value).strip() != "":
-            filtered.append(f"{key}={value}")
-        return filtered
-
-    def get_network_arg_value(args_list, key):
-        prefix = f"{key}="
-        for item in reversed(args_list):
-            item_str = str(item).strip()
-            if item_str.startswith(prefix):
-                return item_str.split("=", 1)[1].strip()
-        return None
-
     lora_type = str(config.pop("lora_type", "")).strip().lower()
-    network_args = normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+    network_args = pop_network_args(config)
     raw_train_norm = config.pop("train_norm", None)
     if raw_train_norm is None:
         existing_train_norm = get_network_arg_value(network_args, "train_norm")
@@ -375,8 +496,10 @@ def apply_anima_ui_overrides(config: dict) -> None:
                 "tlora_min_rank=",
                 "tlora_rank_schedule=",
                 "tlora_orthogonal_init=",
+                *PISSA_STALE_NETWORK_ARG_PREFIXES,
             )
-            network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+            network_args = filter_network_args(network_args, stale_prefixes)
+            config["pissa_init"] = False
         elif lora_type == "tlora":
             config["network_module"] = "networks.tlora_anima"
             config["anima_adapter_type"] = "tlora"
@@ -391,37 +514,12 @@ def apply_anima_ui_overrides(config: dict) -> None:
                 "tlora_min_rank=",
                 "tlora_rank_schedule=",
                 "tlora_orthogonal_init=",
+                *PISSA_STALE_NETWORK_ARG_PREFIXES,
             )
-            network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+            network_args = filter_network_args(network_args, stale_prefixes)
             network_args = upsert_network_arg(network_args, "anima_adapter_type", "tlora")
-
-            try:
-                network_dim = int(config.get("network_dim", 0) or 0)
-            except (TypeError, ValueError):
-                network_dim = 0
-
-            try:
-                min_rank = int(config.get("tlora_min_rank", 1) or 1)
-            except (TypeError, ValueError):
-                min_rank = 1
-
-            if network_dim > 0:
-                min_rank = max(1, min(min_rank, network_dim))
-            else:
-                min_rank = max(1, min_rank)
-
-            config["tlora_min_rank"] = min_rank
-            network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
-
-            rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
-            if rank_schedule not in {"linear", "cosine"}:
-                rank_schedule = "cosine"
-            config["tlora_rank_schedule"] = rank_schedule
-            network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
-
-            orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
-            config["tlora_orthogonal_init"] = orthogonal_init
-            network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
+            network_args = apply_tlora_rank_overrides(config, network_args)
+            config["pissa_init"] = False
 
             for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
                 config.pop(key, None)
@@ -432,18 +530,18 @@ def apply_anima_ui_overrides(config: dict) -> None:
             network_args = [
                 item
                 for item in network_args
-                if not str(item).startswith(("lokr_factor=", "tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init="))
+                if not str(item).startswith(
+                    ("lokr_factor=", "tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init=")
+                )
             ]
+            network_args = apply_pissa_overrides(config, network_args)
             for key in ("lokr_factor", "conv_dim", "conv_alpha", "dropout"):
                 config.pop(key, None)
 
         if train_norm_enabled is not None:
             network_args = upsert_network_arg(network_args, "train_norm", "True" if train_norm_enabled else "False")
 
-    if network_args:
-        config["network_args"] = network_args
-    else:
-        config.pop("network_args", None)
+    assign_network_args(config, network_args)
 
     if "prefer_json_caption" in config:
         custom_attributes = config.get("custom_attributes")
@@ -458,67 +556,14 @@ def apply_flux_tlora_ui_overrides(config: dict) -> None:
     if model_train_type != "flux-lora":
         return
 
-    def normalize_network_args(*values):
-        items = []
-        for value in values:
-            if value is None:
-                continue
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    item_str = str(item).strip()
-                    if item_str:
-                        items.append(item_str)
-            else:
-                item_str = str(value).strip()
-                if item_str:
-                    items.append(item_str)
-        return items
-
-    def upsert_network_arg(args_list, key, value):
-        prefix = f"{key}="
-        filtered = [item for item in args_list if not str(item).startswith(prefix)]
-        if value is not None and str(value).strip() != "":
-            filtered.append(f"{key}={value}")
-        return filtered
-
-    network_args = normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+    network_args = pop_network_args(config)
     network_module = str(config.get("network_module", "") or "").strip().lower()
-    stale_prefixes = ("tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init=")
-    network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+    network_args = filter_network_args(network_args, TLORA_STALE_NETWORK_ARG_PREFIXES)
 
     if network_module == "networks.tlora_flux":
-        try:
-            network_dim = int(config.get("network_dim", 0) or 0)
-        except (TypeError, ValueError):
-            network_dim = 0
+        network_args = apply_tlora_rank_overrides(config, network_args)
 
-        try:
-            min_rank = int(config.get("tlora_min_rank", 1) or 1)
-        except (TypeError, ValueError):
-            min_rank = 1
-
-        if network_dim > 0:
-            min_rank = max(1, min(min_rank, network_dim))
-        else:
-            min_rank = max(1, min_rank)
-
-        config["tlora_min_rank"] = min_rank
-        network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
-
-        rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
-        if rank_schedule not in {"linear", "cosine"}:
-            rank_schedule = "cosine"
-        config["tlora_rank_schedule"] = rank_schedule
-        network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
-
-        orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
-        config["tlora_orthogonal_init"] = orthogonal_init
-        network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
-
-    if network_args:
-        config["network_args"] = network_args
-    else:
-        config.pop("network_args", None)
+    assign_network_args(config, network_args)
 
     sample_scheduler = str(config.get("sample_scheduler", "") or "").strip()
     if sample_scheduler == "":
@@ -530,148 +575,49 @@ def apply_stable_tlora_ui_overrides(config: dict) -> None:
     if model_train_type not in {"sd-lora", "sdxl-lora"}:
         return
 
-    def normalize_network_args(*values):
-        items = []
-        for value in values:
-            if value is None:
-                continue
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    item_str = str(item).strip()
-                    if item_str:
-                        items.append(item_str)
-            else:
-                item_str = str(value).strip()
-                if item_str:
-                    items.append(item_str)
-        return items
-
-    def upsert_network_arg(args_list, key, value):
-        prefix = f"{key}="
-        filtered = [item for item in args_list if not str(item).startswith(prefix)]
-        if value is not None and str(value).strip() != "":
-            filtered.append(f"{key}={value}")
-        return filtered
-
-    network_args = normalize_network_args(config.get("network_args"), config.pop("network_args_custom", None))
+    network_args = pop_network_args(config)
     network_module = str(config.get("network_module", "") or "").strip().lower()
-    stale_prefixes = ("tlora_min_rank=", "tlora_rank_schedule=", "tlora_orthogonal_init=")
-    network_args = [item for item in network_args if not str(item).startswith(stale_prefixes)]
+    network_args = filter_network_args(network_args, TLORA_STALE_NETWORK_ARG_PREFIXES)
+    network_args = filter_network_args(network_args, PISSA_STALE_NETWORK_ARG_PREFIXES)
 
     if network_module == "networks.tlora":
-        try:
-            network_dim = int(config.get("network_dim", 0) or 0)
-        except (TypeError, ValueError):
-            network_dim = 0
-
-        try:
-            min_rank = int(config.get("tlora_min_rank", 1) or 1)
-        except (TypeError, ValueError):
-            min_rank = 1
-
-        if network_dim > 0:
-            min_rank = max(1, min(min_rank, network_dim))
-        else:
-            min_rank = max(1, min_rank)
-
-        config["tlora_min_rank"] = min_rank
-        network_args = upsert_network_arg(network_args, "tlora_min_rank", min_rank)
-
-        rank_schedule = str(config.get("tlora_rank_schedule", "cosine") or "cosine").strip().lower() or "cosine"
-        if rank_schedule not in {"linear", "cosine"}:
-            rank_schedule = "cosine"
-        config["tlora_rank_schedule"] = rank_schedule
-        network_args = upsert_network_arg(network_args, "tlora_rank_schedule", rank_schedule)
-
-        orthogonal_init = parse_boolish(config.get("tlora_orthogonal_init", False))
-        config["tlora_orthogonal_init"] = orthogonal_init
-        network_args = upsert_network_arg(network_args, "tlora_orthogonal_init", "True" if orthogonal_init else "False")
-
-    if network_args:
-        config["network_args"] = network_args
+        network_args = apply_tlora_rank_overrides(config, network_args)
+        config["pissa_init"] = False
+    elif network_module == "networks.lora":
+        network_args = apply_pissa_overrides(config, network_args)
     else:
-        config.pop("network_args", None)
+        config["pissa_init"] = False
+
+    assign_network_args(config, network_args)
 
 
-def resolve_anima_runtime_attention_backend(gpu_ids=None) -> str:
-    runtime_mode = get_attention_runtime_mode()
-    if runtime_mode == "sageattention":
-        return "sageattn"
-    if runtime_mode == "blackwell":
-        return "torch"
-
-    xformers_info = get_xformers_status(gpu_ids)
-    if xformers_info.get("selected_supported", xformers_info.get("supported", False)):
-        return "xformers"
-    return "torch"
+def apply_training_ui_overrides(config: dict) -> list[str]:
+    apply_anima_ui_overrides(config)
+    apply_flux_tlora_ui_overrides(config)
+    apply_stable_tlora_ui_overrides(config)
+    return normalize_conflicting_network_target_flags(config)
 
 
-def apply_anima_runtime_attention_backend(config: dict, gpu_ids=None) -> None:
-    model_train_type = str(config.get("model_train_type", "")).strip().lower()
-    if not model_train_type.startswith("anima"):
-        return
-
-    resolved_backend = resolve_anima_runtime_attention_backend(gpu_ids)
-    config["attn_mode"] = resolved_backend
-
-    if "xformers" in config:
-        config["xformers"] = resolved_backend == "xformers"
-    if "sdpa" in config:
-        config["sdpa"] = resolved_backend == "torch"
-    if "sageattn" in config:
-        config["sageattn"] = resolved_backend == "sageattn"
-    if "use_sage_attn" in config:
-        config["use_sage_attn"] = resolved_backend == "sageattn"
-
-
-def apply_sageattention_runtime_override(config: dict) -> Optional[str]:
-    if get_attention_runtime_mode() != "sageattention":
+def build_sdxl_clip_skip_warning(config: dict) -> Optional[str]:
+    training_type = str(config.get("model_train_type", "") or "").strip().lower()
+    if not training_type.startswith("sdxl"):
         return None
 
-    if parse_boolish(config.get("mem_eff_attn", False)):
+    raw_clip_skip = config.get("clip_skip")
+    try:
+        clip_skip = int(raw_clip_skip)
+    except (TypeError, ValueError):
         return None
 
-    uses_xformers_flag = parse_boolish(config.get("xformers", False))
-    attn_mode = str(config.get("attn_mode", "")).strip().lower()
-    uses_xformers_attn_mode = attn_mode == "xformers"
-    wants_sageattention = (
-        parse_boolish(config.get("sageattn", False))
-        or parse_boolish(config.get("use_sage_attn", False))
-        or attn_mode == "sageattn"
+    if clip_skip <= 1:
+        return None
+
+    return (
+        f"当前配置启用了 SDXL clip_skip={clip_skip}。该组合仍属实验性设置，"
+        "可能导致训练结果与推理表现不一致，也可能让预览图提前出现异常；若无明确需要，建议改回 1。"
     )
 
-    if not uses_xformers_flag and not uses_xformers_attn_mode:
-        return None
 
-    if uses_xformers_flag:
-        config["xformers"] = False
-
-    if uses_xformers_attn_mode:
-        config["attn_mode"] = "sageattn" if wants_sageattention else "sdpa"
-
-    if wants_sageattention:
-        if "sdpa" in config:
-            config["sdpa"] = False
-        message = (
-            "检测到当前为 SageAttention 专用运行时，已自动忽略 xformers，"
-            "本次训练将优先使用 SageAttention。"
-        )
-        log.info(message)
-        return message
-
-    if "sdpa" in config:
-        config["sdpa"] = True
-        message = (
-            "检测到当前为 SageAttention 专用运行时，已自动忽略 xformers。"
-            "由于当前配置未启用 SageAttention，本次训练将改用 sdpa。"
-        )
-    else:
-        message = (
-            "检测到当前为 SageAttention 专用运行时，已自动忽略 xformers。"
-            "若希望本次训练直接使用 SageAttention，请启用 sageattn。"
-        )
-    log.warning(message)
-    return message
 
 
 def build_sample_prompt_file_name(config: dict) -> str:
@@ -837,6 +783,10 @@ def build_sample_prompt_record(config: dict) -> Optional[dict]:
     elif legacy_sample_prompts:
         notes.append("检测到单行 sample_prompts 旧值；当前将优先使用下方单提示词字段，避免被残留值覆盖。")
 
+    has_positive_prompt = bool(str(config.get("positive_prompts", "") or "").strip())
+    if not has_positive_prompt and not parse_boolish(config.get("randomly_choice_prompt")):
+        return None
+
     config_copy = dict(config)
     _, sample_prompt = get_sample_prompts(config_copy)
     if sample_prompt is None:
@@ -895,81 +845,6 @@ def apply_attention_backend_fallback(config: dict, gpu_ids) -> Optional[str]:
     return message
 
 
-def normalize_requested_gpu_ids(raw_gpu_ids) -> tuple[list[str], Optional[str]]:
-    def _extract_ids(value):
-        if value is None:
-            return []
-        if isinstance(value, bool):
-            return []
-        if isinstance(value, (int, float)):
-            return [str(int(value))]
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return []
-
-            gpu_matches = re.findall(r"\bGPU\s*(\d+)\b", stripped, flags=re.IGNORECASE)
-            if gpu_matches:
-                return gpu_matches
-
-            if stripped.isdigit():
-                return [stripped]
-
-            tokens = [token for token in re.split(r"[\s,\[\]\(\)\"']+", stripped) if token]
-            return [token for token in tokens if token.isdigit()]
-
-        if isinstance(value, (list, tuple, set)):
-            normalized = []
-            for item in value:
-                normalized.extend(_extract_ids(item))
-            return normalized
-
-        return []
-
-    parsed_ids = _extract_ids(raw_gpu_ids)
-    unique_ids = []
-    seen = set()
-    for gpu_id in parsed_ids:
-        if gpu_id in seen:
-            continue
-        seen.add(gpu_id)
-        unique_ids.append(gpu_id)
-
-    max_available = len(printable_devices) if printable_devices else None
-    if max_available is None:
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                max_available = int(torch.cuda.device_count())
-        except Exception:
-            max_available = None
-    valid_ids = []
-    dropped_ids = []
-    for gpu_id in unique_ids:
-        try:
-            gpu_index = int(gpu_id)
-        except (TypeError, ValueError):
-            dropped_ids.append(str(gpu_id))
-            continue
-
-        if gpu_index < 0 or (max_available is not None and gpu_index >= max_available):
-            dropped_ids.append(str(gpu_id))
-            continue
-
-        valid_ids.append(str(gpu_index))
-
-    warning = None
-    if dropped_ids:
-        warning = (
-            "已自动忽略不可用或非 CUDA 的 GPU 选择："
-            + ", ".join(dropped_ids)
-            + "。当前只会使用可被 PyTorch CUDA 识别的训练显卡。"
-        )
-
-    return valid_ids, warning
-
-
 def simulate_attention_backend_fallback_warning(config: dict, gpu_ids) -> Optional[str]:
     if config.get("mem_eff_attn", False):
         return None
@@ -1025,6 +900,28 @@ def build_sample_prompt_preview(config: dict) -> Optional[dict]:
     }
 
 
+def build_disabled_sample_prompt_record(
+    config: dict,
+    *,
+    source: str,
+    detail: str,
+    warnings: list[str] | None = None,
+    notes: list[str] | None = None,
+) -> dict:
+    normalized_detail = str(detail or "当前训练配置未提供可用的预览提示词。").strip()
+    return {
+        "enabled": False,
+        "source": source,
+        "detail": normalized_detail,
+        "preview": normalized_detail,
+        "content": "",
+        "line_count": 0,
+        "suggested_file_name": build_sample_prompt_file_name(config),
+        "warnings": [str(item) for item in (warnings or []) if str(item).strip()],
+        "notes": [str(item) for item in (notes or []) if str(item).strip()],
+    }
+
+
 @router.post("/run")
 async def create_toml_file(request: Request):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1039,63 +936,21 @@ async def create_toml_file(request: Request):
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
-    apply_anima_ui_overrides(config)
-    apply_flux_tlora_ui_overrides(config)
-    apply_stable_tlora_ui_overrides(config)
-    start_warnings = []
-    start_warnings.extend(normalize_conflicting_network_target_flags(config))
-
-    cooldown_every_n_epochs = config.get("cooldown_every_n_epochs")
-    cooldown_minutes = config.get("cooldown_minutes")
-    cooldown_until_temp_c = config.get("cooldown_until_temp_c")
-    cooldown_poll_seconds = config.get("cooldown_poll_seconds")
-    try:
-        cooldown_every_n_epochs_value = int(round(float(cooldown_every_n_epochs)))
-    except (TypeError, ValueError):
-        cooldown_every_n_epochs_value = None
-    try:
-        cooldown_minutes_value = float(cooldown_minutes)
-    except (TypeError, ValueError):
-        cooldown_minutes_value = None
-    try:
-        cooldown_until_temp_c_value = int(round(float(cooldown_until_temp_c)))
-    except (TypeError, ValueError):
-        cooldown_until_temp_c_value = None
-    try:
-        cooldown_poll_seconds_value = int(round(float(cooldown_poll_seconds)))
-    except (TypeError, ValueError):
-        cooldown_poll_seconds_value = 15
-
-    if cooldown_every_n_epochs_value is not None and cooldown_every_n_epochs_value > 0 and (
-        (cooldown_minutes_value is not None and cooldown_minutes_value > 0)
-        or (cooldown_until_temp_c_value is not None and cooldown_until_temp_c_value > 0)
-    ):
-        cooldown_details = [f"每 {cooldown_every_n_epochs_value} 个 epoch 在该轮保存与预览完成后暂停一次"]
-        if cooldown_minutes_value is not None and cooldown_minutes_value > 0:
-            cooldown_details.append(f"至少等待 {cooldown_minutes_value:g} 分钟")
-        if cooldown_until_temp_c_value is not None and cooldown_until_temp_c_value > 0:
-            poll_seconds = cooldown_poll_seconds_value or 15
-            cooldown_details.append(f"并等待显卡温度降到 {cooldown_until_temp_c_value}°C 以下（每 {poll_seconds} 秒轮询一次）")
-        start_warnings.append("散热冷却已启用：" + "，".join(cooldown_details) + "。")
-
-    gpu_power_limit_w = config.get("gpu_power_limit_w")
-    try:
-        gpu_power_limit_w_value = int(round(float(gpu_power_limit_w)))
-    except (TypeError, ValueError):
-        gpu_power_limit_w_value = None
-    if gpu_power_limit_w_value is not None and gpu_power_limit_w_value > 0:
-        start_warnings.append(
-            f"已请求 GPU 功率墙：{gpu_power_limit_w_value}W。该限制作用于整张显卡，不是单个训练进程；依赖 nvidia-smi、驱动与管理员/root 权限，不支持时会自动跳过。"
-        )
+    start_warnings = apply_training_ui_overrides(config)
+    start_warnings.extend(build_training_resource_warnings(config))
 
     raw_gpu_ids = config.pop("gpu_ids", None)
-    gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
-    if gpu_filter_warning:
-        start_warnings.append(gpu_filter_warning)
-    if gpu_ids:
-        start_warnings.append(f"本次训练将使用 GPU: {', '.join(gpu_ids)}")
-    else:
-        start_warnings.append("本次训练未显式指定 GPU，默认使用当前 PyTorch 可见的主训练显卡。")
+    runtime_context = resolve_training_runtime_guard_context(config, raw_gpu_ids)
+    if runtime_context["errors"]:
+        return APIResponseFail(message="\n".join(runtime_context["errors"]))
+    gpu_ids = runtime_context["gpu_ids"]
+    amd_topology_guard = runtime_context["amd_topology_guard"]
+    intel_topology_guard = runtime_context["intel_topology_guard"]
+    amd_runtime_config_guard = runtime_context["amd_runtime_config_guard"]
+    intel_runtime_config_guard = runtime_context["intel_runtime_config_guard"]
+    start_warnings.extend(runtime_context["warnings"])
+    start_warnings.extend(runtime_context["notes"])
+    start_warnings.append(build_training_gpu_selection_warning(gpu_ids))
     model_train_type = str(config.get("model_train_type", "sd-lora") or "sd-lora").strip().lower()
     trainer_definition = get_trainer_definition(model_train_type)
     if trainer_definition is None:
@@ -1108,42 +963,19 @@ async def create_toml_file(request: Request):
             return APIResponseFail(
                 message="当前训练种类暂不走 Mikazuki 分布式启动。"
             )
-        distributed_runtime = {
-            "total_num_processes": 1,
-            "warnings": [],
-            "notes": [],
-            "summary": "当前训练种类直接由独立 Python 训练器启动，不走 accelerate 分布式包装。",
-        }
-        worker_sync_runtime = {
-            "warnings": [],
-            "notes": [],
-        }
-        if yolo_training and len(gpu_ids) > 1:
-            start_warnings.append("已为 YOLO 保留多张可见 GPU；若未手动填写 device，Ultralytics 会按当前可见显卡自行决定多卡训练方式。")
-    else:
-        try:
-            distributed_runtime = resolve_distributed_runtime(config, gpu_ids)
-        except ValueError as exc:
-            return APIResponseFail(message=str(exc))
-        except Exception:
-            log.exception("Distributed runtime resolution failed unexpectedly")
-            return APIResponseFail(message="分布式运行时解析失败，请查看日志。")
-        start_warnings.extend(distributed_runtime.get("warnings", []))
-        start_warnings.extend(distributed_runtime.get("notes", []))
-        if int(distributed_runtime.get("total_num_processes", 1) or 1) > 1:
-            start_warnings.append(
-                "当前为多进程/分布式训练：train_batch_size 将按全局 batch 解释，启动时会自动换算成每卡 batch。"
-            )
-        try:
-            worker_sync_runtime = resolve_worker_sync_runtime(config, distributed_runtime, launch_utils.base_dir_path())
-        except ValueError as exc:
-            return APIResponseFail(message=str(exc))
-        except Exception:
-            log.exception("Worker sync runtime resolution failed unexpectedly")
-            return APIResponseFail(message="分布式同步运行时解析失败，请查看日志。")
-        start_warnings.extend(worker_sync_runtime.get("warnings", []))
-        start_warnings.extend(worker_sync_runtime.get("notes", []))
-    apply_anima_runtime_attention_backend(config, gpu_ids)
+    launch_runtime = resolve_training_launch_runtime(
+        config,
+        gpu_ids,
+        direct_python_training=direct_python_training,
+        yolo_training=yolo_training,
+        base_dir=launch_utils.base_dir_path(),
+    )
+    if launch_runtime["error_message"]:
+        return APIResponseFail(message=launch_runtime["error_message"])
+    distributed_runtime = launch_runtime["distributed_runtime"]
+    worker_sync_runtime = launch_runtime["worker_sync_runtime"]
+    start_warnings.extend(launch_runtime["warnings"])
+    skip_preview_prompt_prep = runtime_context["skip_preview_prompt_prep"]
 
     model_train_type = str(config.pop("model_train_type", "sd-lora") or "sd-lora").strip().lower()
     train_data_dir = str(config.get("train_data_dir", "") or "").strip()
@@ -1211,7 +1043,23 @@ async def create_toml_file(request: Request):
         if not validated:
             return APIResponseFail(message=message)
 
-    sageattention_override_message = apply_sageattention_runtime_override(config)
+    startup_attention_message = apply_startup_attention_policy(config, parse_boolish)
+    if startup_attention_message:
+        start_warnings.append(startup_attention_message)
+
+    sagebwd_runtime_message = apply_sagebwd_runtime_guard(config, parse_boolish)
+    if sagebwd_runtime_message:
+        start_warnings.append(sagebwd_runtime_message)
+
+    sageattention_route_message = apply_sageattention_route_guard(config)
+    if sageattention_route_message:
+        start_warnings.append(sageattention_route_message)
+
+    sdxl_clip_skip_warning = build_sdxl_clip_skip_warning(config)
+    if sdxl_clip_skip_warning:
+        start_warnings.append(sdxl_clip_skip_warning)
+
+    sageattention_override_message = apply_sageattention_runtime_override(config, parse_boolish)
     if sageattention_override_message:
         start_warnings.append(sageattention_override_message)
 
@@ -1220,89 +1068,33 @@ async def create_toml_file(request: Request):
         start_warnings.append(attention_fallback_message)
 
     dependency_report = analyze_training_runtime_dependencies(config)
-    if not dependency_report["ready"]:
-        missing_details = []
-        for dependency in dependency_report["missing"]:
-            package_label = dependency["display_name"]
-            reason = dependency.get("reason") or "Package is not importable."
-            requirement = ", ".join(dependency.get("required_for", []))
-            missing_details.append(f"{package_label} ({requirement}): {reason}")
-        return APIResponseFail(
-            message="Required runtime dependencies are missing or broken: " + " | ".join(missing_details)
-        )
+    dependency_failure_message = build_runtime_dependency_failure_message(dependency_report)
+    if dependency_failure_message:
+        return APIResponseFail(message=dependency_failure_message)
 
-    if direct_python_training:
-        config.pop("prompt_file", None)
-        config.pop("sample_prompts", None)
-    else:
-        prompt_file = str(config.get("prompt_file", "") or "").strip()
-        inline_sample_prompts = str(config.get("sample_prompts", "") or "").strip()
-
-        if prompt_file:
-            if not os.path.exists(prompt_file):
-                return APIResponseFail(message=f"Prompt 文件 {prompt_file} 不存在，请检查路径。")
-            config["sample_prompts"] = prompt_file
-        elif inline_sample_prompts and should_use_inline_sample_prompts(inline_sample_prompts, config):
-            if os.path.isfile(inline_sample_prompts):
-                config["sample_prompts"] = inline_sample_prompts
-            else:
-                sample_prompts_file = str(autosave_dir / build_sample_prompt_file_name(config))
-                with open(sample_prompts_file, "w", encoding="utf-8") as f:
-                    normalized = enrich_inline_sample_prompts(inline_sample_prompts, config)
-                    f.write(normalized)
-                config["sample_prompts"] = sample_prompts_file
-                log.info(f"Wrote inline sample_prompts to file {sample_prompts_file}")
-        else:
-            try:
-                positive_prompt, sample_prompts_arg = get_sample_prompts(config=config)
-
-                if positive_prompt is not None and train_utils.is_promopt_like(sample_prompts_arg):
-                    sample_prompts_file = str(autosave_dir / f"{timestamp}-prompt.txt")
-                    with open(sample_prompts_file, "w", encoding="utf-8") as f:
-                        f.write(sample_prompts_arg)
-                    config["sample_prompts"] = sample_prompts_file
-                    log.info(f"Wrote prompts to file {sample_prompts_file}")
-
-            except ValueError as e:
-                log.error(f"Error while processing prompts: {e}")
-                return APIResponseFail(message=str(e))
-
-        config.pop("prompt_file", None)
+    sample_prompt_error = prepare_training_sample_prompt_config(
+        config,
+        autosave_dir=autosave_dir,
+        timestamp=timestamp,
+        direct_python_training=direct_python_training,
+        skip_preview_prompt_prep=skip_preview_prompt_prep,
+        get_sample_prompts=get_sample_prompts,
+        should_use_inline_sample_prompts=should_use_inline_sample_prompts,
+        enrich_inline_sample_prompts=enrich_inline_sample_prompts,
+        build_sample_prompt_file_name=build_sample_prompt_file_name,
+    )
+    if sample_prompt_error:
+        return APIResponseFail(message=sample_prompt_error)
 
     with open(toml_file, "w", encoding="utf-8") as f:
         f.write(toml.dumps(config))
 
     result = process.run_train(toml_file, trainer_file, gpu_ids, suggest_cpu_threads)
-
-    if mixed_resolution_payload is not None:
-        result.data = result.data or {}
-        result.data["mixed_resolution"] = mixed_resolution_payload
-
-    tensorboard_run_dir = ""
-    tensorboard_resume_merge = False
-    tensorboard_reused_from_state = False
-    if result.data:
-        tensorboard_run_dir = str(result.data.get("tensorboard_run_dir", "") or "").strip()
-        tensorboard_resume_merge = bool(result.data.get("tensorboard_resume_merge"))
-        tensorboard_reused_from_state = bool(result.data.get("tensorboard_reused_from_state"))
-        distributed_active = bool(result.data.get("distributed_active"))
-        distributed_summary = str(result.data.get("distributed_summary", "") or "").strip()
-        if distributed_active and distributed_summary and distributed_summary not in start_warnings:
-            start_warnings.append(f"分布式摘要：{distributed_summary}")
-    if tensorboard_run_dir:
-        start_warnings.append(f"TensorBoard 日志目录：{tensorboard_run_dir}")
-        if tensorboard_reused_from_state:
-            start_warnings.append("TensorBoard 将继续写入 resume state 中记录的原日志目录。")
-        elif tensorboard_resume_merge:
-            start_warnings.append("TensorBoard 将复用当前模型最近一次已有的日志目录。")
-
-    if start_warnings:
-        result.data = result.data or {}
-        result.data["warnings"] = start_warnings
-        if result.message:
-            result.message = f"{result.message} {' '.join(start_warnings)}"
-        else:
-            result.message = " ".join(start_warnings)
+    merge_training_result_warnings(
+        result,
+        start_warnings,
+        mixed_resolution_payload=mixed_resolution_payload,
+    )
 
     return result
 
@@ -1316,18 +1108,15 @@ async def training_preflight(request: Request) -> APIResponse:
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
-    apply_anima_ui_overrides(config)
-    apply_flux_tlora_ui_overrides(config)
-    apply_stable_tlora_ui_overrides(config)
-    normalize_conflicting_network_target_flags(config)
+    override_warnings = apply_training_ui_overrides(config)
 
-    raw_gpu_ids = config.get("gpu_ids")
-    gpu_ids, gpu_filter_warning = normalize_requested_gpu_ids(raw_gpu_ids)
-    if gpu_ids:
-        config["gpu_ids"] = gpu_ids
-    else:
-        config.pop("gpu_ids", None)
-    apply_anima_runtime_attention_backend(config, gpu_ids)
+    runtime_context = resolve_training_runtime_guard_context(
+        config,
+        config.get("gpu_ids"),
+        persist_gpu_ids=True,
+    )
+    gpu_ids = runtime_context["gpu_ids"]
+    startup_attention_warning = apply_startup_attention_policy(config, parse_boolish)
     training_type = str(config.get("model_train_type", "sd-lora"))
 
     result = analyze_training_preflight(
@@ -1339,8 +1128,16 @@ async def training_preflight(request: Request) -> APIResponse:
         attention_fallback_checker=lambda payload: simulate_attention_backend_fallback_warning(payload, gpu_ids),
     )
 
-    if gpu_filter_warning:
-        result["warnings"] = result.get("warnings", []) + [gpu_filter_warning]
+    if runtime_context["warnings"]:
+        result["warnings"] = result.get("warnings", []) + runtime_context["warnings"]
+    if runtime_context["notes"]:
+        result["notes"] = result.get("notes", []) + runtime_context["notes"]
+    if runtime_context["errors"]:
+        result["errors"] = result.get("errors", []) + runtime_context["errors"]
+    if override_warnings:
+        result["warnings"] = result.get("warnings", []) + override_warnings
+    if startup_attention_warning:
+        result["warnings"] = result.get("warnings", []) + [startup_attention_warning]
 
     return APIResponseSuccess(data=result)
 
@@ -1354,10 +1151,26 @@ async def training_sample_prompt(request: Request) -> APIResponse:
     except (TypeError, ValueError) as exc:
         return APIResponseFail(message=f"Invalid config value / 配置值无效: {exc}")
 
-    apply_anima_ui_overrides(config)
-    apply_flux_tlora_ui_overrides(config)
-    apply_stable_tlora_ui_overrides(config)
-    normalize_conflicting_network_target_flags(config)
+    override_warnings = apply_training_ui_overrides(config)
+
+    runtime_context = resolve_training_runtime_guard_context(config, config.get("gpu_ids"))
+    if runtime_context["errors"]:
+        return APIResponseFail(message="\n".join(runtime_context["errors"]))
+
+    amd_preview_warnings = list(runtime_context["warnings"])
+    amd_preview_notes = list(runtime_context["notes"])
+
+    if runtime_context["skip_preview_prompt_prep"]:
+        result = build_disabled_sample_prompt_record(
+            config,
+            source="runtime_guard_disabled",
+            detail="实验运行时已强制关闭训练预览图与预览提示词。",
+            warnings=amd_preview_warnings,
+            notes=amd_preview_notes,
+        )
+        if override_warnings:
+            result["warnings"] = [*override_warnings, *result.get("warnings", [])]
+        return APIResponseSuccess(data=result)
 
     try:
         result = build_sample_prompt_record(config)
@@ -1368,6 +1181,13 @@ async def training_sample_prompt(request: Request) -> APIResponse:
     except Exception:
         log.exception("Training sample prompt preview failed")
         return APIResponseFail(message="Sample prompt preview failed.")
+
+    if amd_preview_warnings:
+        result["warnings"] = [*amd_preview_warnings, *result.get("warnings", [])]
+    if amd_preview_notes:
+        result["notes"] = [*amd_preview_notes, *result.get("notes", [])]
+    if override_warnings:
+        result["warnings"] = [*override_warnings, *result.get("warnings", [])]
 
     return APIResponseSuccess(data=result)
 
@@ -1415,30 +1235,22 @@ async def run_script(request: Request):
                 continue
             cmd.append(f"--{k}")
             cmd.append(str(v))
-
-    # Use TaskManager so output is captured and visible via /api/task_output/{id}
     task = tm.create_task(cmd, script_env, cwd=str(repo_root))
     if not task:
-        return APIResponseFail(message="Cannot create script task (another task may be running)")
+        return APIResponseFail(message="Cannot create script task / 无法创建脚本任务")
 
     def _run_script_task():
         try:
             task.execute()
-            task.process.wait()
-            # Give the output reader thread time to flush remaining buffered output
-            import time; time.sleep(0.3)
-            task.status = _TaskStatus.FINISHED if task.status == _TaskStatus.RUNNING else task.status
-            rc = task.process.returncode if task.process else -1
-            if rc != 0:
-                log.warning(f"Script {script_name} exited with code {rc}")
+            result = task.communicate()
+            if result.returncode != 0:
+                log.warning(f"Script {script_name} exited with code {result.returncode}")
             else:
                 log.info(f"Script {script_name} finished successfully")
         except Exception as exc:
             log.error(f"Script {script_name} failed: {exc}")
 
-    coro = asyncio.to_thread(_run_script_task)
-    asyncio.create_task(coro)
-
+    asyncio.create_task(asyncio.to_thread(_run_script_task))
     return APIResponseSuccess(data={"task_id": task.task_id})
 
 
@@ -1749,9 +1561,9 @@ async def captions_backup_restore(req: CaptionBackupRestoreRequest) -> APIRespon
 
 @router.get("/pick_file")
 async def pick_file(picker_type: str):
-    if picker_type in ("folder", "output-folder"):
+    if picker_type in {"folder", "output-folder"}:
         coro = asyncio.to_thread(open_directory_selector, "")
-    elif picker_type in ("model-file", "output-model-file"):
+    elif picker_type in {"model-file", "output-model-file"}:
         file_types = [("checkpoints", "*.safetensors;*.ckpt;*.pt"), ("all files", "*.*")]
         coro = asyncio.to_thread(open_file_selector, "", "Select file", file_types)
     elif picker_type == "text-file":
@@ -1963,15 +1775,18 @@ async def terminate_task(task_id: str):
     return APIResponseSuccess()
 
 
-@router.get("/task_output/{task_id}")
-async def get_task_output(task_id: str, tail: int = 50):
-    """Return recent output lines from a running/finished task."""
-    if task_id not in tm.tasks:
+@router.get("/task_output/{task_id}", response_model_exclude_none=True)
+async def get_task_output(task_id: str, tail: int = 50) -> APIResponse:
+    task = tm.tasks.get(task_id)
+    if task is None:
         return APIResponseFail(message="Task not found")
-    task = tm.tasks[task_id]
-    lines = task.output_lines[-tail:] if hasattr(task, 'output_lines') else []
-    total = len(task.output_lines) if hasattr(task, 'output_lines') else 0
-    return APIResponseSuccess(data={"lines": lines, "total": total})
+
+    safe_tail = max(1, min(int(tail or 50), 1000))
+    lines = task.output_lines[-safe_tail:]
+    return APIResponseSuccess(data={
+        "lines": lines,
+        "total": len(task.output_lines),
+    })
 
 
 @router.get("/gpu_status")
@@ -1979,6 +1794,7 @@ async def get_gpu_status() -> APIResponse:
     """Return real-time GPU VRAM usage."""
     try:
         import torch
+
         if not torch.cuda.is_available():
             return APIResponseSuccess(data={"available": False})
         gpus = []
@@ -1987,14 +1803,16 @@ async def get_gpu_status() -> APIResponse:
             total = props.total_memory
             allocated = torch.cuda.memory_allocated(i)
             reserved = torch.cuda.memory_reserved(i)
-            gpus.append({
-                "index": i,
-                "name": props.name,
-                "total_mb": round(total / 1048576),
-                "allocated_mb": round(allocated / 1048576),
-                "reserved_mb": round(reserved / 1048576),
-                "utilization_pct": round(allocated / total * 100, 1) if total > 0 else 0,
-            })
+            gpus.append(
+                {
+                    "index": i,
+                    "name": props.name,
+                    "total_mb": round(total / 1048576),
+                    "allocated_mb": round(allocated / 1048576),
+                    "reserved_mb": round(reserved / 1048576),
+                    "utilization_pct": round(allocated / total * 100, 1) if total > 0 else 0,
+                }
+            )
         return APIResponseSuccess(data={"available": True, "gpus": gpus})
     except Exception as exc:
         return APIResponseSuccess(data={"available": False, "error": str(exc)})
@@ -2027,7 +1845,6 @@ async def list_dataset_images(folder: str, limit: int = 8) -> APIResponse:
         return APIResponseSuccess(data={"images": images, "total": len(all_images), "first_tag": first_tag})
     except Exception as exc:
         return APIResponseFail(message=str(exc))
-
 
 
 @router.get("/graphic_cards")
@@ -2064,9 +1881,9 @@ async def list_avaliable_cards() -> APIResponse:
 
 @router.get("/schemas/hashes")
 async def list_schema_hashes() -> APIResponse:
-    if os.environ.get("MIKAZUKI_SCHEMA_HOT_RELOAD", "0") == "1":
-        log.info("Hot reloading schemas")
-        await load_schemas()
+    # Schema files are tiny, so reload on request to keep UI edits visible
+    # without requiring a backend restart during development.
+    await load_schemas()
 
     return APIResponseSuccess(data={
         "schemas": [
@@ -2081,6 +1898,8 @@ async def list_schema_hashes() -> APIResponse:
 
 @router.get("/schemas/all")
 async def get_all_schemas() -> APIResponse:
+    await load_schemas()
+
     return APIResponseSuccess(data={
         "schemas": avaliable_schemas
     })

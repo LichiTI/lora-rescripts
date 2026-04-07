@@ -1,20 +1,50 @@
 import asyncio
 import json
 import os
+from typing import Awaitable, Callable
 
 import httpx
-import starlette
 import websockets
 from fastapi import APIRouter, Request, WebSocket
 from httpx import ConnectError
 from starlette.background import BackgroundTask
-from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from starlette.websockets import WebSocketDisconnect
 
 from mikazuki.log import log
 
 router = APIRouter()
 TAGEDITOR_STATUS_FILE = os.environ.get("MIKAZUKI_TAGEDITOR_STATUS_FILE", "")
+DEFAULT_UNAVAILABLE_MESSAGE = (
+    "The requested service not started yet or service started fail. This may cost a while when you first time startup\n"
+    "请求的服务尚未启动或启动失败。若是第一次启动，可能需要等待一段时间后再刷新网页。"
+)
+PROXY_TARGETS = {
+    "tensorboard": ("MIKAZUKI_TENSORBOARD_HOST", "127.0.0.1", "MIKAZUKI_TENSORBOARD_PORT", "6006"),
+    "tageditor": ("MIKAZUKI_TAGEDITOR_HOST", "127.0.0.1", "MIKAZUKI_TAGEDITOR_PORT", "28001"),
+}
+TAGEDITOR_UNAVAILABLE_MESSAGES = {
+    "disabled": (
+        "Tag Editor is disabled for this launch. Restart without --disable-tageditor to use it.\n"
+        "本次启动已禁用标签编辑器。请去掉 --disable-tageditor 后重新启动。"
+    ),
+    "missing_gradio": (
+        "Tag Editor is unavailable because gradio is not installed in the current environment.\n"
+        "标签编辑器当前不可用，因为当前环境没有安装 gradio。"
+    ),
+    "missing_launcher": (
+        "Tag Editor files are missing. Check mikazuki/dataset-tag-editor and try again.\n"
+        "标签编辑器文件缺失。请检查 mikazuki/dataset-tag-editor 目录后重试。"
+    ),
+    "missing_dependencies": (
+        "Tag Editor dependencies are not installed. Run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first. If main Python is 3.13, prepare a separate python_tageditor or venv-tageditor (Python 3.12) environment.\n"
+        "标签编辑器依赖尚未安装。请先运行 install_tageditor.ps1（Windows）或 install_tageditor.sh（Linux）。如果主环境是 Python 3.13，请准备单独的 python_tageditor 或 venv-tageditor（Python 3.12）环境。"
+    ),
+    "starting": (
+        "Tag Editor is still starting or failed to start. If this is the first launch, wait a moment and refresh.\n"
+        "标签编辑器正在启动，或者启动失败。如果是第一次启动，请稍等片刻后刷新页面。"
+    ),
+}
 
 
 def read_tageditor_status() -> dict:
@@ -111,82 +141,61 @@ def build_tageditor_progress_page() -> str:
 
 def get_unavailable_message(url_type: str) -> str:
     if url_type != "tageditor":
-        return (
-            "The requested service not started yet or service started fail. This may cost a while when you first time startup\n"
-            "请求的服务尚未启动或启动失败。若是第一次启动，可能需要等待一段时间后再刷新网页。"
-        )
+        return DEFAULT_UNAVAILABLE_MESSAGE
 
     status = read_tageditor_status()["status"]
-    if status == "disabled":
-        return (
-            "Tag Editor is disabled for this launch. Restart without --disable-tageditor to use it.\n"
-            "本次启动已禁用标签编辑器。请去掉 --disable-tageditor 后重新启动。"
-        )
-    if status == "missing_gradio":
-        return (
-            "Tag Editor is unavailable because gradio is not installed in the current environment.\n"
-            "标签编辑器当前不可用，因为当前环境没有安装 gradio。"
-        )
-    if status == "missing_launcher":
-        return (
-            "Tag Editor files are missing. Check mikazuki/dataset-tag-editor and try again.\n"
-            "标签编辑器文件缺失。请检查 mikazuki/dataset-tag-editor 目录后重试。"
-        )
-    if status == "missing_dependencies":
-        return (
-            "Tag Editor dependencies are not installed. Run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first. If main Python is 3.13, prepare a separate python_tageditor or venv-tageditor (Python 3.12) environment.\n"
-            "标签编辑器依赖尚未安装。请先运行 install_tageditor.ps1（Windows）或 install_tageditor.sh（Linux）。如果主环境是 Python 3.13，请准备单独的 python_tageditor 或 venv-tageditor（Python 3.12）环境。"
-        )
-    if status == "starting":
-        return (
-            "Tag Editor is still starting or failed to start. If this is the first launch, wait a moment and refresh.\n"
-            "标签编辑器正在启动，或者启动失败。如果是第一次启动，请稍等片刻后刷新页面。"
-        )
+    return TAGEDITOR_UNAVAILABLE_MESSAGES.get(status, DEFAULT_UNAVAILABLE_MESSAGE)
 
-    return (
-        "The requested service not started yet or service started fail. This may cost a while when you first time startup\n"
-        "请求的服务尚未启动或启动失败。若是第一次启动，可能需要等待一段时间后再刷新网页。"
+
+def resolve_proxy_target(url_type: str) -> tuple[str, str]:
+    host_key, default_host, port_key, default_port = PROXY_TARGETS[url_type]
+    host = os.environ.get(host_key, default_host)
+    port = os.environ.get(port_key, default_port)
+    return host, port
+
+
+def build_proxy_url(request: Request, full_path: bool) -> httpx.URL:
+    path = request.url.path if full_path else request.path_params.get("path", "")
+    return httpx.URL(path=path, query=request.url.query.encode("utf-8"))
+
+
+def build_proxy_request(client: httpx.AsyncClient, request: Request, url: httpx.URL) -> httpx.Request:
+    return client.build_request(
+        request.method,
+        url,
+        headers=request.headers.raw,
+        content=request.stream() if request.method != "GET" else None,
+    )
+
+
+def build_proxy_error_response(url_type: str, request_method: str):
+    if url_type == "tageditor" and request_method == "GET":
+        return HTMLResponse(content=build_tageditor_progress_page(), status_code=503)
+
+    return PlainTextResponse(content=get_unavailable_message(url_type), status_code=502)
+
+
+def build_proxy_streaming_response(response: httpx.Response) -> StreamingResponse:
+    return StreamingResponse(
+        response.aiter_raw(),
+        status_code=response.status_code,
+        headers=response.headers,
+        background=BackgroundTask(response.aclose),
     )
 
 
 def reverse_proxy_maker(url_type: str, full_path: bool = False):
-    if url_type == "tensorboard":
-        host = os.environ.get("MIKAZUKI_TENSORBOARD_HOST", "127.0.0.1")
-        port = os.environ.get("MIKAZUKI_TENSORBOARD_PORT", "6006")
-    elif url_type == "tageditor":
-        host = os.environ.get("MIKAZUKI_TAGEDITOR_HOST", "127.0.0.1")
-        port = os.environ.get("MIKAZUKI_TAGEDITOR_PORT", "28001")
-
+    host, port = resolve_proxy_target(url_type)
     client = httpx.AsyncClient(base_url=f"http://{host}:{port}/", trust_env=False, timeout=360)
 
     async def _reverse_proxy(request: Request):
-        if full_path:
-            url = httpx.URL(path=request.url.path, query=request.url.query.encode("utf-8"))
-        else:
-            url = httpx.URL(
-                path=request.path_params.get("path", ""),
-                query=request.url.query.encode("utf-8")
-            )
-        rp_req = client.build_request(
-            request.method, url,
-            headers=request.headers.raw,
-            content=request.stream() if request.method != "GET" else None
-        )
+        url = build_proxy_url(request, full_path)
+        rp_req = build_proxy_request(client, request, url)
         try:
             rp_resp = await client.send(rp_req, stream=True)
         except ConnectError:
-            if url_type == "tageditor" and request.method == "GET":
-                return HTMLResponse(content=build_tageditor_progress_page(), status_code=503)
-            return PlainTextResponse(
-                content=get_unavailable_message(url_type),
-                status_code=502
-            )
-        return StreamingResponse(
-            rp_resp.aiter_raw(),
-            status_code=rp_resp.status_code,
-            headers=rp_resp.headers,
-            background=BackgroundTask(rp_resp.aclose),
-        )
+            return build_proxy_error_response(url_type, request.method)
+        return build_proxy_streaming_response(rp_resp)
 
     return _reverse_proxy
 
@@ -196,34 +205,49 @@ async def get_tageditor_status():
     return JSONResponse(read_tageditor_status())
 
 
-async def proxy_ws_forward(ws_a: WebSocket, ws_b: websockets.WebSocketClientProtocol):
+async def relay_websocket_messages(
+    receiver: Callable[[], Awaitable[object]],
+    sender: Callable[[object], Awaitable[object]],
+    disconnect_exceptions: tuple[type[BaseException], ...],
+    error_message: str,
+):
     while True:
         try:
-            data = await ws_a.receive_text()
-            await ws_b.send(data)
-        except starlette.websockets.WebSocketDisconnect as e:
+            data = await receiver()
+            await sender(data)
+        except disconnect_exceptions:
             break
-        except Exception as e:
-            log.error(f"Error when proxy data client -> backend: {e}")
+        except Exception as exc:
+            log.error(f"{error_message}: {exc}")
             break
+
+
+async def proxy_ws_forward(ws_a: WebSocket, ws_b: websockets.WebSocketClientProtocol):
+    await relay_websocket_messages(
+        ws_a.receive_text,
+        ws_b.send,
+        (WebSocketDisconnect,),
+        "Error when proxy data client -> backend",
+    )
 
 
 async def proxy_ws_reverse(ws_a: WebSocket, ws_b: websockets.WebSocketClientProtocol):
-    while True:
-        try:
-            data = await ws_b.recv()
-            await ws_a.send_text(data)
-        except websockets.exceptions.ConnectionClosedOK as e:
-            break
-        except Exception as e:
-            log.error(f"Error when proxy data backend -> client: {e}")
-            break
+    await relay_websocket_messages(
+        ws_b.recv,
+        ws_a.send_text,
+        (websockets.exceptions.ConnectionClosedOK,),
+        "Error when proxy data backend -> client",
+    )
+
+
+def build_tageditor_websocket_uri(path: str) -> str:
+    host, port = resolve_proxy_target("tageditor")
+    return f"ws://{host}:{port}/{path.lstrip('/')}"
 
 
 @router.websocket("/proxy/tageditor/queue/join")
 async def websocket_a(ws_a: WebSocket):
-    # for temp use
-    ws_b_uri = "ws://127.0.0.1:28001/queue/join"
+    ws_b_uri = build_tageditor_websocket_uri("queue/join")
     await ws_a.accept()
     async with websockets.connect(ws_b_uri, timeout=360, ping_timeout=None) as ws_b_client:
         fwd_task = asyncio.create_task(proxy_ws_forward(ws_a, ws_b_client))

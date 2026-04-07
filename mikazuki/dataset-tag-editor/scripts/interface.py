@@ -48,6 +48,47 @@ def write_status(status: str, detail: str = ""):
         pass
 
 
+def normalize_allowed_path(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+
+    normalized = str(path).strip()
+    if not normalized:
+        return None
+
+    try:
+        return str(Path(normalized).expanduser().resolve())
+    except Exception:
+        return str(Path(normalized).expanduser().absolute())
+
+
+def collect_allowed_paths() -> list[str]:
+    allowed_paths: list[str] = []
+    seen: set[str] = set()
+
+    def add_path(path: str | Path | None):
+        normalized = normalize_allowed_path(path)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        allowed_paths.append(normalized)
+
+    raw_allowed_paths = settings.current.allowed_paths.replace("\n", ",")
+    for path in raw_allowed_paths.split(","):
+        add_path(path)
+
+    add_path(utilities.base_dir_path())
+    add_path(state.temp_dir)
+
+    try:
+        general_cfg = tab_main.read_general_config()
+        add_path(general_cfg.dataset_dir)
+    except Exception as exc:
+        logger.warn(f"Cannot read dataset directory from tag editor config: {exc}")
+
+    return allowed_paths
+
+
 def patch_gradio_schema_compat():
     try:
         from gradio_client import utils as client_utils
@@ -418,8 +459,8 @@ def main():
         write_status("building_ui", "Building Gradio blocks...")
         interface = create_ui().queue(64)
 
-        allowed_paths = settings.current.allowed_paths.split(', ')
-        allowed_paths = [str(Path(path).absolute()) for path in allowed_paths] + [utilities.base_dir_path()]
+        allowed_paths = collect_allowed_paths()
+        logger.write(f"Gradio allowed_paths = {allowed_paths}")
         write_status("starting_server", "Starting Gradio server on port 28001...")
         app, _, _ = launch_interface_with_localhost_fallback(allowed_paths)
         write_status("ready", "Tag editor service is ready.")

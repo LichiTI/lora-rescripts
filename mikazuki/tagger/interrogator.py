@@ -65,6 +65,9 @@ available_interrogators = {
         model_path='model.onnx',
         tags_path='selected_tags.csv',
         extra_files=['model.onnx.data', 'tags.json', 'thresholds.json'],
+        # E621 模型使用 RGB 输入，并要求像素值归一化到 [0, 1]。
+        use_rgb=True,
+        normalize_01=True,
     ),
     'cl_tagger_1_01': CLTaggerInterrogator(
         'cl_tagger_1_01',

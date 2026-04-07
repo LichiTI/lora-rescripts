@@ -5,6 +5,7 @@
 
 import math
 import os
+from functools import partial
 from typing import Dict, List, Optional, Tuple, Type, Union
 from diffusers import AutoencoderKL
 from transformers import CLIPTextModel
@@ -20,6 +21,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 RE_UPDOWN = re.compile(r"(up|down)_blocks_(\d+)_(resnets|upsamplers|downsamplers|attentions)_(\d+)_")
+
+
+def _parse_bool_arg(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_pissa_method(value) -> str:
+    method = str(value or "rsvd").strip().lower() or "rsvd"
+    if method not in {"rsvd", "svd"}:
+        return "rsvd"
+    return method
 
 
 class LoRAModule(torch.nn.Module):
@@ -119,6 +137,92 @@ class LoRAModule(torch.nn.Module):
         lx = self.lora_up(lx)
 
         return org_forwarded + lx * self.multiplier * scale
+
+
+class PiSSAModule(LoRAModule):
+    def __init__(
+        self,
+        lora_name,
+        org_module: torch.nn.Module,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=1,
+        dropout=None,
+        rank_dropout=None,
+        module_dropout=None,
+        pissa_method: str = "rsvd",
+        pissa_niter: int = 2,
+        pissa_oversample: int = 8,
+        pissa_apply_conv2d: bool = False,
+    ):
+        super().__init__(lora_name, org_module, multiplier, lora_dim, alpha, dropout, rank_dropout, module_dropout)
+        self.pissa_method = _normalize_pissa_method(pissa_method)
+        self.pissa_niter = max(0, int(pissa_niter if pissa_niter is not None else 2))
+        self.pissa_oversample = max(0, int(pissa_oversample if pissa_oversample is not None else 8))
+        self.pissa_apply_conv2d = _parse_bool_arg(pissa_apply_conv2d, default=False)
+        self._apply_pissa_init(org_module)
+
+    @staticmethod
+    def _reshape_weight_to_matrix(weight: torch.Tensor) -> torch.Tensor:
+        if weight.ndim == 2:
+            return weight
+        if weight.ndim == 4 and tuple(weight.shape[2:]) == (1, 1):
+            return weight.squeeze(3).squeeze(2)
+        raise ValueError("PiSSA only supports Linear and Conv2d 1x1 weights.")
+
+    @staticmethod
+    def _reshape_matrix_to_weight(matrix: torch.Tensor, reference_weight: torch.Tensor) -> torch.Tensor:
+        if reference_weight.ndim == 2:
+            return matrix
+        return matrix.unsqueeze(2).unsqueeze(3)
+
+    @torch.no_grad()
+    def _apply_pissa_init(self, org_module: torch.nn.Module) -> None:
+        weight = org_module.weight.detach()
+        is_linear = weight.ndim == 2
+        is_conv2d_1x1 = weight.ndim == 4 and tuple(weight.shape[2:]) == (1, 1)
+        if not is_linear and not (self.pissa_apply_conv2d and is_conv2d_1x1):
+            return
+
+        compute_device = self.lora_up.weight.device
+        weight_matrix = self._reshape_weight_to_matrix(weight).to(device=compute_device, dtype=torch.float32)
+        out_dim, in_dim = weight_matrix.shape
+        rank = min(self.lora_dim, out_dim, in_dim)
+        if rank <= 0:
+            return
+
+        if self.pissa_method == "rsvd":
+            q = min(rank + self.pissa_oversample, min(out_dim, in_dim))
+            if q <= 0:
+                return
+            U, S, V = torch.svd_lowrank(weight_matrix, q=q, niter=self.pissa_niter)
+            U = U[:, :rank]
+            S = S[:rank]
+            Vh = V[:, :rank].transpose(0, 1)
+        else:
+            U, S, Vh = torch.linalg.svd(weight_matrix, full_matrices=False)
+            U = U[:, :rank]
+            S = S[:rank]
+            Vh = Vh[:rank, :]
+
+        scale = float(self.scale)
+        if scale <= 0:
+            return
+
+        principal = (U * S.unsqueeze(0)) @ Vh
+        residual = weight_matrix - principal
+
+        scaled_s = torch.sqrt((S / scale).clamp_min(0))
+        up_weight = U * scaled_s.unsqueeze(0)
+        down_weight = scaled_s.unsqueeze(1) * Vh
+
+        residual = self._reshape_matrix_to_weight(residual, weight)
+        up_weight = self._reshape_matrix_to_weight(up_weight, self.lora_up.weight)
+        down_weight = self._reshape_matrix_to_weight(down_weight, self.lora_down.weight)
+
+        org_module.weight.copy_(residual.to(device=org_module.weight.device, dtype=org_module.weight.dtype))
+        self.lora_up.weight.copy_(up_weight.to(device=self.lora_up.weight.device, dtype=self.lora_up.weight.dtype))
+        self.lora_down.weight.copy_(down_weight.to(device=self.lora_down.weight.device, dtype=self.lora_down.weight.dtype))
 
 
 class LoRAInfModule(LoRAModule):
@@ -473,6 +577,29 @@ def create_network(
     if module_dropout is not None:
         module_dropout = float(module_dropout)
 
+    pissa_init = _parse_bool_arg(kwargs.get("pissa_init", False), default=False)
+    pissa_method = _normalize_pissa_method(kwargs.get("pissa_method", "rsvd"))
+    pissa_niter = int(kwargs.get("pissa_niter", 2) or 2)
+    pissa_oversample = int(kwargs.get("pissa_oversample", 8) or 8)
+    pissa_apply_conv2d = _parse_bool_arg(kwargs.get("pissa_apply_conv2d", False), default=False)
+
+    module_class: Type[object] = LoRAModule
+    if pissa_init:
+        logger.info(
+            "enable PiSSA initialization: method=%s, niter=%s, oversample=%s, apply_conv2d=%s",
+            pissa_method,
+            pissa_niter,
+            pissa_oversample,
+            pissa_apply_conv2d,
+        )
+        module_class = partial(
+            PiSSAModule,
+            pissa_method=pissa_method,
+            pissa_niter=pissa_niter,
+            pissa_oversample=pissa_oversample,
+            pissa_apply_conv2d=pissa_apply_conv2d,
+        )
+
     # すごく引数が多いな ( ^ω^)･･･
     network = LoRANetwork(
         text_encoder,
@@ -489,6 +616,7 @@ def create_network(
         block_alphas=block_alphas,
         conv_block_dims=conv_block_dims,
         conv_block_alphas=conv_block_alphas,
+        module_class=module_class,
         varbose=True,
         is_sdxl=is_sdxl,
     )

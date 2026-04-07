@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from library import custom_offloading_utils
+from library.sageattention_compat import call_sageattention, get_runtime_sageattention_symbols
 
 try:
     from flash_attn import flash_attn_varlen_func
@@ -38,10 +39,7 @@ except ImportError:
     # flash_attn may not be available but it is not required
     pass
 
-try:
-    from sageattention import sageattn
-except ImportError:
-    pass
+sageattn, _sageattn_varlen = get_runtime_sageattention_symbols()
 
 try:
     from apex.normalization import FusedRMSNorm as RMSNorm
@@ -463,7 +461,7 @@ class JointAttention(nn.Module):
 
             # Fast path: if all tokens are valid, run batched SageAttention directly
             if x_mask.all():
-                output = sageattn(
+                output = call_sageattention(
                     q_transposed, k_transposed, v_transposed,
                     tensor_layout="HND", is_causal=False, sm_scale=softmax_scale,
                 )
@@ -482,7 +480,7 @@ class JointAttention(nn.Module):
                         ))
                         continue
 
-                    batch_output_valid = sageattn(
+                    batch_output_valid = call_sageattention(
                         q_transposed[b:b+1, :, valid_indices, :],
                         k_transposed[b:b+1, :, valid_indices, :],
                         v_transposed[b:b+1, :, valid_indices, :],

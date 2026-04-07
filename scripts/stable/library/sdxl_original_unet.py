@@ -30,12 +30,10 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
 from einops import rearrange
+from library.sageattention_compat import call_sageattention, get_runtime_sageattention_symbols
 from library.utils import setup_logging
 
-try:
-    from sageattention import sageattn
-except ImportError:
-    sageattn = None
+sageattn, _sageattn_varlen = get_runtime_sageattention_symbols()
 
 setup_logging()
 import logging
@@ -577,6 +575,9 @@ class CrossAttention(nn.Module):
     def forward_sageattn(self, x, context=None, mask=None):
         if sageattn is None:
             raise ImportError("No SageAttention / SageAttentionがインストールされていないようです / 未检测到 SageAttention")
+        if mask is not None:
+            logger.warning("SDXL SageAttention 当前不处理 attention mask，已自动回退到 SDPA 路径。")
+            return self.forward_sdpa(x, context=context, mask=mask)
 
         h = self.heads
         q_in = self.to_q(x)
@@ -584,12 +585,18 @@ class CrossAttention(nn.Module):
         context = context.to(x.dtype)
         k_in = self.to_k(context)
         v_in = self.to_v(context)
-        del mask
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q_in, k_in, v_in))
         del q_in, k_in, v_in
 
-        out = sageattn(q.contiguous(), k.contiguous(), v.contiguous())
+        out = call_sageattention(
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            tensor_layout="HND",
+            is_causal=False,
+            sm_scale=q.shape[-1] ** -0.5,
+        )
 
         out = rearrange(out, "b h n d -> b n (h d)", h=h)
         out = self.to_out[0](out)

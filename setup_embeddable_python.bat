@@ -13,6 +13,8 @@ if /i "%~1"=="python-sageattention-latest" set "TARGET_DIR=python-sageattention-
 if /i "%~1"=="python_sageattention_latest" set "TARGET_DIR=python_sageattention_latest"
 if /i "%~1"=="python-sageattention-blackwell" set "TARGET_DIR=python-sageattention-blackwell"
 if /i "%~1"=="python_sageattention_blackwell" set "TARGET_DIR=python_sageattention_blackwell"
+if /i "%~1"=="python_sagebwd_nvidia" set "TARGET_DIR=python_sagebwd_nvidia"
+if /i "%~1"=="python_rocm_amd" set "TARGET_DIR=python_rocm_amd"
 if /i "%~1"=="python" set "TARGET_DIR=python"
 if /i "%~2"=="python_tageditor" set "TARGET_DIR=python_tageditor"
 if /i "%~2"=="python_blackwell" set "TARGET_DIR=python_blackwell"
@@ -22,6 +24,8 @@ if /i "%~2"=="python-sageattention-latest" set "TARGET_DIR=python-sageattention-
 if /i "%~2"=="python_sageattention_latest" set "TARGET_DIR=python_sageattention_latest"
 if /i "%~2"=="python-sageattention-blackwell" set "TARGET_DIR=python-sageattention-blackwell"
 if /i "%~2"=="python_sageattention_blackwell" set "TARGET_DIR=python_sageattention_blackwell"
+if /i "%~2"=="python_sagebwd_nvidia" set "TARGET_DIR=python_sagebwd_nvidia"
+if /i "%~2"=="python_rocm_amd" set "TARGET_DIR=python_rocm_amd"
 if /i "%~2"=="python" set "TARGET_DIR=python"
 
 echo ========================================
@@ -124,13 +128,13 @@ if "%AUTO_MODE%"=="0" pause
 exit /b 0
 
 :copy_bootstrap_runtime_packages
-set "BOOTSTRAP_CANDIDATES=python python_tageditor python_blackwell python-sageattention python_sageattention python-sageattention-latest python_sageattention_latest python-sageattention-blackwell python_sageattention_blackwell"
+set "BOOTSTRAP_CANDIDATES=python python_tageditor python_blackwell python_rocm_amd python-sageattention python_sageattention python-sageattention-latest python_sageattention_latest python-sageattention-blackwell python_sageattention_blackwell python_sagebwd_nvidia"
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
   "$repo = Get-Location;" ^
   "$targetDir = '%TARGET_DIR%';" ^
   "$targetSite = Join-Path (Join-Path $repo $targetDir) 'Lib\site-packages';" ^
   "$patterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-  "$candidates = @('python','python_tageditor','python_blackwell','python-sageattention','python_sageattention','python-sageattention-latest','python_sageattention_latest','python-sageattention-blackwell','python_sageattention_blackwell');" ^
+  "$candidates = @('python','python_tageditor','python_blackwell','python_rocm_amd','python-sageattention','python_sageattention','python-sageattention-latest','python_sageattention_latest','python-sageattention-blackwell','python_sageattention_blackwell','python_sagebwd_nvidia');" ^
   "$copied = $false;" ^
   "foreach($candidate in $candidates){" ^
   "  if($candidate -ieq $targetDir){ continue }" ^

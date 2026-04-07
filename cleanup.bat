@@ -21,6 +21,7 @@ set "SAGEATTENTION2_DIR_PRIMARY=python-sageattention-latest"
 set "SAGEATTENTION2_DIR_LEGACY=python_sageattention_latest"
 set "SAGEATTENTION_BLACKWELL_DIR_PRIMARY=python-sageattention-blackwell"
 set "SAGEATTENTION_BLACKWELL_DIR_LEGACY=python_sageattention_blackwell"
+set "SAGEBWD_NVIDIA_DIR=python_sagebwd_nvidia"
 
 echo [1/7] Removing Python cache...
 for /d /r %%D in (__pycache__) do @if exist "%%~fD" rmdir /s /q "%%~fD" 2>nul
@@ -42,6 +43,7 @@ call :clear_runtime_cache "%SAGEATTENTION2_DIR_PRIMARY%"
 call :clear_runtime_cache "%SAGEATTENTION2_DIR_LEGACY%"
 call :clear_runtime_cache "%SAGEATTENTION_BLACKWELL_DIR_PRIMARY%"
 call :clear_runtime_cache "%SAGEATTENTION_BLACKWELL_DIR_LEGACY%"
+call :clear_runtime_cache "%SAGEBWD_NVIDIA_DIR%"
 
 mkdir "logs" 2>nul
 mkdir "config\autosave" 2>nul
@@ -85,7 +87,8 @@ echo This will physically remove installed runtime packages like torch / torchvi
 echo It also removes YOLO and aesthetic scorer related packages such as opencv-python / matplotlib / polars / PyYAML / open-clip-torch / timm / tqdm.
 echo It keeps only pip / setuptools / wheel bootstrap components so first startup can auto-install dependencies again.
 echo It does not delete the python folder itself; only Lib\site-packages / Scripts / share payload is slimmed.
-set /p "SLIM_MAIN=: "
+echo [Input] Enter Y to slim the main python runtime, or press Enter to keep it.
+set /p "SLIM_MAIN=[4/7 Confirm] > "
 if /i "%SLIM_MAIN%"=="Y" (
     if not exist "%PYTHON_EXE%" (
         echo [Skip] portable main Python not found
@@ -101,7 +104,8 @@ echo [5/7] Slim bundled tag editor Python packages too? (Y/N, default N)
 echo This will physically remove gradio / transformers / timm / torch and other tag editor runtime packages.
 echo It keeps only pip / setuptools / wheel bootstrap components.
 echo It does not delete the python_tageditor folder itself; only runtime payload is slimmed.
-set /p "SLIM_TAGEDITOR=: "
+echo [Input] Enter Y to slim the tag editor runtime, or press Enter to keep it.
+set /p "SLIM_TAGEDITOR=[5/7 Confirm] > "
 if /i "%SLIM_TAGEDITOR%"=="Y" (
     if not exist "%TAGEDITOR_PYTHON_EXE%" (
         echo [Skip] tag editor Python not found
@@ -117,7 +121,8 @@ echo [6/7] Slim bundled Blackwell Python packages too? (Y/N, default N)
 echo This will physically remove torch / torchvision / xformers and other Blackwell runtime packages.
 echo It keeps only pip / setuptools / wheel bootstrap components.
 echo It does not delete the python_blackwell folder itself; only runtime payload is slimmed.
-set /p "SLIM_BLACKWELL=: "
+echo [Input] Enter Y to slim the Blackwell runtime, or press Enter to keep it.
+set /p "SLIM_BLACKWELL=[6/7 Confirm] > "
 if /i "%SLIM_BLACKWELL%"=="Y" (
     if not exist "%BLACKWELL_PYTHON_EXE%" (
         echo [Skip] Blackwell Python not found
@@ -131,11 +136,13 @@ if /i "%SLIM_BLACKWELL%"=="Y" (
 echo.
 echo [7/7] Slim bundled SageAttention Python packages too? (Y/N, default N)
 echo This will physically remove torch / torchvision / triton / sageattention and other SageAttention runtime packages.
+echo It also covers the experimental SageBwd NVIDIA runtime if detected.
 echo It also removes YOLO and aesthetic scorer related packages such as opencv-python / matplotlib / polars / PyYAML / open-clip-torch / timm / tqdm.
 echo It keeps only pip / setuptools / wheel bootstrap components.
-echo It does not delete the SageAttention runtime folders themselves; only runtime payload is slimmed.
+echo It does not delete the SageAttention / SageBwd runtime folders themselves; only runtime payload is slimmed.
 echo If both hyphen and legacy underscore runtime folders exist, all detected SageAttention runtimes will be slimmed here.
-set /p "SLIM_SAGEATTENTION=: "
+echo [Input] Enter Y to slim the SageAttention / SageBwd runtimes, or press Enter to keep them.
+set /p "SLIM_SAGEATTENTION=[7/7 Confirm] > "
 if /i "%SLIM_SAGEATTENTION%"=="Y" (
     call :slim_python_runtime "%SAGEATTENTION_DIR_PRIMARY%" "SageAttention"
     if /i not "%SAGEATTENTION_DIR_PRIMARY%"=="%SAGEATTENTION_DIR_LEGACY%" call :slim_python_runtime "%SAGEATTENTION_DIR_LEGACY%" "SageAttention Legacy"
@@ -143,8 +150,9 @@ if /i "%SLIM_SAGEATTENTION%"=="Y" (
     if /i not "%SAGEATTENTION2_DIR_PRIMARY%"=="%SAGEATTENTION2_DIR_LEGACY%" call :slim_python_runtime "%SAGEATTENTION2_DIR_LEGACY%" "SageAttention2 Legacy"
     call :slim_python_runtime "%SAGEATTENTION_BLACKWELL_DIR_PRIMARY%" "SageAttention Blackwell"
     if /i not "%SAGEATTENTION_BLACKWELL_DIR_PRIMARY%"=="%SAGEATTENTION_BLACKWELL_DIR_LEGACY%" call :slim_python_runtime "%SAGEATTENTION_BLACKWELL_DIR_LEGACY%" "SageAttention Blackwell Legacy"
+    call :slim_python_runtime "%SAGEBWD_NVIDIA_DIR%" "SageBwd NVIDIA"
 ) else (
-    echo [Keep] SageAttention Python packages
+    echo [Keep] SageAttention / SageBwd Python packages
 )
 
 echo.
@@ -152,7 +160,7 @@ echo Cleanup summary:
 echo - Always cleared: __pycache__, *.pyc, logs, config\autosave, tmp, frontend\.vitepress\cache, embedded runtime .cache / torch_compile_debug
 echo - Optional: output, huggingface cache/config, main python deps, tag editor deps, blackwell python deps, SageAttention python deps
 echo - Main/Blackwell python slimming also removes xformers, YOLO extras, and aesthetic scorer extras, and will require reinstall on next startup
-echo - SageAttention python slimming removes triton / sageattention / YOLO extras / aesthetic scorer extras and will require reinstall on next startup
+echo - SageAttention python slimming also covers the experimental SageBwd NVIDIA runtime, removes triton / sageattention-related payloads / YOLO extras / aesthetic scorer extras, and will require reinstall on next startup
 echo - Main remaining bulky folder should drop massively after choosing Y for main python slimming
 echo.
 pause
@@ -181,9 +189,10 @@ call :runtime_is_in_use "%RUNTIME_DIR%"
 if errorlevel 7 (
     echo [Warn] %RUNTIME_LABEL% Python is currently in use.
     call :runtime_list_processes "%RUNTIME_DIR%"
-    echo Force close related processes under %RUNTIME_DIR% and continue cleanup? (Y/N, default N)
+    echo [Confirm] %RUNTIME_LABEL% runtime is busy, so cleanup cannot continue unless those processes are closed first.
+    echo [Confirm] Enter Y to force close processes under %RUNTIME_DIR% and continue cleanup, or press Enter to skip this runtime.
     set "FORCE_CLOSE_RUNTIME="
-    set /p "FORCE_CLOSE_RUNTIME=: "
+    set /p "FORCE_CLOSE_RUNTIME=[Force Close %RUNTIME_LABEL%] > "
     if /i not "%FORCE_CLOSE_RUNTIME%"=="Y" (
         echo [Skip] %RUNTIME_LABEL% Python slimming skipped because the runtime is in use.
         exit /b 0

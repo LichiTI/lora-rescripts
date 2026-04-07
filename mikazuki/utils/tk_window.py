@@ -2,6 +2,7 @@ import os
 import platform
 import subprocess
 import tempfile
+
 from mikazuki.log import log
 
 try:
@@ -22,6 +23,7 @@ def _allow_foreground():
         return
     try:
         import ctypes
+
         ctypes.windll.user32.AllowSetForegroundWindow(-1)
     except Exception:
         pass
@@ -30,7 +32,7 @@ def _allow_foreground():
 def _get_tk_root():
     _allow_foreground()
     root = tkinter.Tk()
-    root.wm_attributes('-topmost', 1)
+    root.wm_attributes("-topmost", 1)
     root.withdraw()
     root.lift()
     root.focus_force()
@@ -57,9 +59,13 @@ def _run_powershell_dialog(script: str) -> str:
             f.write(script)
         completed = subprocess.run(
             [
-                "powershell.exe", "-STA",
-                "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", tmp_path,
+                "powershell.exe",
+                "-STA",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                tmp_path,
             ],
             capture_output=True,
             text=True,
@@ -129,9 +135,7 @@ def _fallback_open_file_selector(initialdir: str, title: str, filetypes) -> str:
         for item in filetypes:
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 patterns = str(item[1])
-                filter_parts.append(
-                    "{0} ({1})|{1}".format(item[0], patterns)
-                )
+                filter_parts.append("{0} ({1})|{1}".format(item[0], patterns))
     filter_text = "|".join(filter_parts) if filter_parts else "All files (*.*)|*.*"
     script = (
         _PWSH_OWNER + "$dlg = New-Object System.Windows.Forms.OpenFileDialog\n"
@@ -159,10 +163,7 @@ def _fallback_open_directory_selector(initialdir: str) -> str:
     return _run_powershell_dialog(script)
 
 
-def open_file_selector(
-        initialdir="",
-        title="Select a file",
-        filetypes="*") -> str:
+def open_file_selector(initialdir="", title="Select a file", filetypes="*") -> str:
     global last_dir
     if last_dir != "":
         initialdir = last_dir

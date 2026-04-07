@@ -34,3 +34,11 @@ huggingface/hub/models*
 huggingface/hub/version_diffusers_cache.txt
 lora-rescripts.zip
 lora-rescripts-v1.0.8-Beta3.zip
+/backup
+<<<<<<< Updated upstream
+/models
+/sucai
+=======
+/sucai
+/models
+>>>>>>> Stashed changes

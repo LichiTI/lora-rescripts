@@ -1,8 +1,13 @@
 import importlib
-import os
-import sys
 
+from mikazuki.utils.device_attention_probe import (
+    build_attention_backend_summary,
+    probe_xformers_runtime,
+    select_xformers_status,
+    short_exc_message,
+)
 from mikazuki.log import log
+from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 from packaging.version import Version
 
 available_devices = []
@@ -18,170 +23,19 @@ xformers_status = {
 }
 
 
-def _infer_attention_runtime_mode() -> str:
-    if os.environ.get("MIKAZUKI_SAGEATTENTION_STARTUP") == "1" or os.environ.get("MIKAZUKI_SAGEATTENTION2_STARTUP") == "1":
-        return "sageattention"
-    if os.environ.get("MIKAZUKI_BLACKWELL_STARTUP") == "1":
-        return "blackwell"
-
-    executable = sys.executable.replace("\\", "/").lower()
-    if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
-        return "sageattention"
-    if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
-        return "sageattention"
-    if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
-        return "sageattention"
-    if "/python_blackwell/" in executable:
-        return "blackwell"
-    return "standard"
+def _is_xpu_available(torch_module) -> bool:
+    try:
+        xpu_module = getattr(torch_module, "xpu", None)
+        is_available = getattr(xpu_module, "is_available", None)
+        return bool(callable(is_available) and is_available())
+    except Exception:
+        return False
 
 
 def get_attention_runtime_mode() -> str:
-    return _infer_attention_runtime_mode()
+    return infer_attention_runtime_mode()
 
 
-def _probe_sageattention_status(torch_module) -> dict:
-    status = {
-        "installed": False,
-        "importable": False,
-        "symbols_ok": False,
-        "reason": "Not checked yet.",
-    }
-
-    try:
-        importlib.import_module("triton")
-    except Exception as exc:
-        status["reason"] = f"triton import failed: {_short_exc_message(exc)}"
-        return status
-
-    try:
-        sage_module = importlib.import_module("sageattention")
-        sageattn = getattr(sage_module, "sageattn", None)
-        sageattn_varlen = getattr(sage_module, "sageattn_varlen", None)
-        status["installed"] = True
-        status["importable"] = True
-        status["symbols_ok"] = callable(sageattn) and callable(sageattn_varlen)
-        if status["symbols_ok"]:
-            status["reason"] = "ok"
-        else:
-            status["reason"] = "required SageAttention symbols are missing."
-    except Exception as exc:
-        status["reason"] = f"sageattention import failed: {_short_exc_message(exc)}"
-
-    if not torch_module.cuda.is_available() and status["reason"] == "ok":
-        status["reason"] = "CUDA is not available."
-
-    return status
-
-
-def _build_attention_backend_summary(torch_module, xformers_info: dict) -> dict:
-    runtime_mode = _infer_attention_runtime_mode()
-    sdpa_available = bool(
-        torch_module.cuda.is_available() and hasattr(torch_module.nn.functional, "scaled_dot_product_attention")
-    )
-    sageattention_status = _probe_sageattention_status(torch_module)
-
-    preferred_backend = "torch"
-    if runtime_mode == "sageattention" and sageattention_status["symbols_ok"] and torch_module.cuda.is_available():
-        preferred_backend = "sageattn"
-    elif xformers_info.get("supported"):
-        preferred_backend = "xformers"
-    elif sdpa_available:
-        preferred_backend = "sdpa"
-
-    if runtime_mode == "sageattention" and preferred_backend == "sageattn":
-        detail = (
-            "SageAttention runtime active. Routes that explicitly enable sageattn will use SageAttention; "
-            "other xformers configs will fall back to SDPA when supported."
-        )
-        detail_zh = (
-            "当前为 SageAttention 专用运行时。显式启用 sageattn 的训练路由会使用 SageAttention；"
-            "其他仍勾选 xformers 的配置在支持时会自动降级到 SDPA。"
-        )
-    elif preferred_backend == "xformers":
-        detail = "xformers is currently the strongest verified attention backend in this runtime."
-        detail_zh = "当前运行时里，xformers 是最优先且已验证可用的 attention 后端。"
-    elif preferred_backend == "sdpa":
-        detail = "SDPA is currently the default fallback attention backend in this runtime."
-        detail_zh = "当前运行时里，SDPA 是默认的回退 attention 后端。"
-    else:
-        detail = "Only the baseline torch attention path is currently available."
-        detail_zh = "当前仅可使用基础的 torch attention 路径。"
-
-    return {
-        "runtime_mode": runtime_mode,
-        "preferred_backend": preferred_backend,
-        "sdpa_available": sdpa_available,
-        "sageattention": sageattention_status,
-        "detail": detail,
-        "detail_zh": detail_zh,
-    }
-
-
-def _short_exc_message(exc) -> str:
-    message = str(exc).strip()
-    if not message:
-        return exc.__class__.__name__
-    return message.splitlines()[0]
-
-
-def _is_inconclusive_xformers_probe_error(reason: str) -> bool:
-    lowered = reason.lower()
-    return (
-        "no operator found" in lowered
-        or "memory_efficient_attention_forward" in lowered
-        or "operator wasn't built" in lowered
-        or "no kernel image is available for execution on the device" in lowered
-        or "no kernel image available for execution on the device" in lowered
-    )
-
-
-def _probe_xformers_runtime(torch_module, device):
-    import xformers.ops as xops
-
-    last_reason = ""
-    tested_dtypes = []
-    tested_shapes = []
-    probe_shapes = [
-        (1, 32, 8, 64),
-        (1, 256, 8, 64),
-        (1, 1024, 8, 64),
-    ]
-
-    for dtype in (torch_module.float16, torch_module.bfloat16):
-        tested_dtypes.append(str(dtype).replace("torch.", ""))
-        for shape in probe_shapes:
-            tested_shapes.append(f"{str(dtype).replace('torch.', '')}:{shape}")
-            try:
-                q = torch_module.randn(shape, device=device, dtype=dtype)
-                k = torch_module.randn(shape, device=device, dtype=dtype)
-                v = torch_module.randn(shape, device=device, dtype=dtype)
-                xops.memory_efficient_attention(q, k, v, attn_bias=None)
-                torch_module.cuda.synchronize(device)
-                return {
-                    "supported": True,
-                    "verified": True,
-                    "reason": f"ok ({str(dtype).replace('torch.', '')}, shape={shape})",
-                }
-            except Exception as exc:
-                last_reason = _short_exc_message(exc)
-
-    capability = torch_module.cuda.get_device_capability(device)
-    if capability[0] >= 12 and _is_inconclusive_xformers_probe_error(last_reason):
-        return {
-            "supported": True,
-            "verified": False,
-            "reason": (
-                "runtime probe was inconclusive on this newer GPU architecture "
-                f"(tested: {', '.join(tested_shapes)}; last error: {last_reason})"
-            ),
-        }
-
-    return {
-        "supported": False,
-        "verified": False,
-        "reason": last_reason or f"runtime probe failed for {', '.join(tested_shapes)}",
-    }
 
 
 def refresh_xformers_status(torch_module=None):
@@ -196,6 +50,16 @@ def refresh_xformers_status(torch_module=None):
     xformers_status["reason"] = "Not checked yet."
     xformers_status["per_gpu"] = {}
 
+    runtime_mode = infer_attention_runtime_mode()
+
+    if runtime_mode in {"intel-xpu", "intel-xpu-sage"} or _is_xpu_available(torch_module):
+        xformers_status["reason"] = "xformers is disabled for Intel XPU runtime."
+        return xformers_status
+
+    if runtime_mode in {"rocm-amd", "rocm-amd-sage"} or bool(getattr(torch_module.version, "hip", None)):
+        xformers_status["reason"] = "xformers is disabled for AMD ROCm runtime."
+        return xformers_status
+
     if not torch_module.cuda.is_available():
         xformers_status["reason"] = "CUDA is not available."
         return xformers_status
@@ -204,7 +68,7 @@ def refresh_xformers_status(torch_module=None):
         import xformers
         import xformers.ops as xops  # noqa: F401
     except Exception as exc:
-        xformers_status["reason"] = f"xformers import failed: {_short_exc_message(exc)}"
+        xformers_status["reason"] = f"xformers import failed: {short_exc_message(exc)}"
         return xformers_status
 
     xformers_status["installed"] = True
@@ -218,7 +82,7 @@ def refresh_xformers_status(torch_module=None):
         device_name = torch_module.cuda.get_device_name(gpu_index)
         try:
             device = torch_module.device(f"cuda:{gpu_index}")
-            probe_result = _probe_xformers_runtime(torch_module, device)
+            probe_result = probe_xformers_runtime(torch_module, device)
             gpu_status = {
                 "name": device_name,
                 "supported": probe_result["supported"],
@@ -237,7 +101,7 @@ def refresh_xformers_status(torch_module=None):
                 if not first_reason:
                     first_reason = f"GPU {gpu_index} ({device_name}): {gpu_status['reason']}"
         except Exception as exc:
-            reason = _short_exc_message(exc)
+            reason = short_exc_message(exc)
             xformers_status["per_gpu"][gpu_index] = {
                 "name": device_name,
                 "supported": False,
@@ -273,56 +137,9 @@ def get_xformers_status(gpu_ids=None):
             xformers_status["supported"] = False
             xformers_status["verified"] = False
             xformers_status["version"] = None
-            xformers_status["reason"] = f"xformers probe failed: {_short_exc_message(exc)}"
+            xformers_status["reason"] = f"xformers probe failed: {short_exc_message(exc)}"
             xformers_status["per_gpu"] = {}
-
-    selected_gpu_ids = []
-    if gpu_ids:
-        for gpu_id in gpu_ids:
-            try:
-                selected_gpu_ids.append(int(gpu_id))
-            except (TypeError, ValueError):
-                continue
-    elif xformers_status["per_gpu"]:
-        selected_gpu_ids = [min(xformers_status["per_gpu"].keys())]
-
-    if not selected_gpu_ids:
-        return {
-            **xformers_status,
-            "selected_gpu_ids": [],
-        }
-
-    selected_info = [
-        xformers_status["per_gpu"].get(gpu_id, {
-            "name": f"GPU {gpu_id}",
-            "supported": False,
-            "verified": False,
-            "reason": "GPU status not found.",
-        })
-        for gpu_id in selected_gpu_ids
-    ]
-
-    selected_supported = all(info["supported"] for info in selected_info)
-    selected_verified = all(info.get("verified", False) for info in selected_info)
-    reason = "ok" if selected_supported else next(
-        f"GPU {gpu_id} ({info['name']}): {info['reason']}"
-        for gpu_id, info in zip(selected_gpu_ids, selected_info)
-        if not info["supported"]
-    )
-    if selected_supported and not selected_verified:
-        reason = next(
-            f"GPU {gpu_id} ({info['name']}): {info['reason']}"
-            for gpu_id, info in zip(selected_gpu_ids, selected_info)
-            if not info.get("verified", False)
-        )
-
-    return {
-        **xformers_status,
-        "selected_gpu_ids": selected_gpu_ids,
-        "selected_supported": selected_supported,
-        "selected_verified": selected_verified,
-        "reason": reason,
-    }
+    return select_xformers_status(xformers_status, gpu_ids)
 
 
 def check_torch_gpu():
@@ -331,7 +148,9 @@ def check_torch_gpu():
         available_devices.clear()
         printable_devices.clear()
         log.info(f'Torch {torch.__version__}')
-        if not torch.cuda.is_available():
+        cuda_available = bool(torch.cuda.is_available())
+        xpu_available = _is_xpu_available(torch)
+        if not cuda_available and not xpu_available:
             log.error("Torch is not able to use GPU, please check your torch installation.\n Use --skip-prepare-environment to disable this check")
             log.error("！！！Torch 无法使用 GPU，您无法正常开始训练！！！\n您的显卡可能并不支持，或是 torch 安装有误。请检查您的 torch 安装。")
             if "cpu" in torch.__version__:
@@ -349,19 +168,33 @@ def check_torch_gpu():
                 f'Torch backend: nVidia CUDA {torch.version.cuda} cuDNN {torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else "N/A"}')
         elif torch.version.hip:
             log.info(f'Torch backend: AMD ROCm HIP {torch.version.hip}')
+        elif xpu_available:
+            log.info("Torch backend: Intel XPU")
 
-        devices = [torch.cuda.device(i) for i in range(torch.cuda.device_count())]
-
-        for pos, device in enumerate(devices):
-            name = torch.cuda.get_device_name(device)
-            memory = torch.cuda.get_device_properties(device).total_memory
-            available_devices.append(device)
-            printable_devices.append(f"GPU {pos}: {name} ({round(memory / (1024**3))} GB)")
-            log.info(
-                f'Torch detected GPU: {name} VRAM {round(memory / 1024 / 1024)} Arch {torch.cuda.get_device_capability(device)} Cores {torch.cuda.get_device_properties(device).multi_processor_count}')
+        if xpu_available and not cuda_available:
+            devices = [torch.device(f"xpu:{i}") for i in range(torch.xpu.device_count())]
+            for pos, device in enumerate(devices):
+                name = torch.xpu.get_device_name(pos)
+                properties = torch.xpu.get_device_properties(pos)
+                memory = properties.total_memory
+                available_devices.append(device)
+                printable_devices.append(f"GPU {pos}: {name} ({round(memory / (1024**3))} GB)")
+                bf16_supported = getattr(torch.xpu, "is_bf16_supported", lambda *args, **kwargs: None)()
+                log.info(
+                    f"Torch detected Intel XPU: {name} VRAM {round(memory / 1024 / 1024)} BF16 {bf16_supported}"
+                )
+        else:
+            devices = [torch.cuda.device(i) for i in range(torch.cuda.device_count())]
+            for pos, device in enumerate(devices):
+                name = torch.cuda.get_device_name(device)
+                memory = torch.cuda.get_device_properties(device).total_memory
+                available_devices.append(device)
+                printable_devices.append(f"GPU {pos}: {name} ({round(memory / (1024**3))} GB)")
+                log.info(
+                    f'Torch detected GPU: {name} VRAM {round(memory / 1024 / 1024)} Arch {torch.cuda.get_device_capability(device)} Cores {torch.cuda.get_device_properties(device).multi_processor_count}')
 
         status = refresh_xformers_status(torch)
-        attention_summary = _build_attention_backend_summary(torch, status)
+        attention_summary = build_attention_backend_summary(torch, status, _is_xpu_available)
         log.info(f"Running on attention backend: {attention_summary['preferred_backend']}")
         log.info(f"当前运行的注意力后端：{attention_summary['preferred_backend']}")
         log.info(
@@ -385,6 +218,13 @@ def check_torch_gpu():
                 )
                 log.info(
                     f"SageAttention 专用运行时中未安装 xformers：{status['reason']}。这属于预期行为；若训练配置仍启用了 xformers，这里会回退到 sdpa。"
+                )
+            elif attention_summary["runtime_mode"] in {"intel-xpu", "intel-xpu-sage"}:
+                log.info(
+                    f"xformers stays disabled in Intel XPU runtime: {status['reason']}"
+                )
+                log.info(
+                    "Intel XPU 运行时默认不启用 xformers，将直接优先使用 SDPA / torch attention。"
                 )
             else:
                 log.warning(

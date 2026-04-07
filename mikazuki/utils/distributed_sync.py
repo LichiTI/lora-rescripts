@@ -6,13 +6,14 @@ import subprocess
 import tempfile
 import re
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Callable, Optional
 
 import toml
 
 from mikazuki.log import log
 from mikazuki.utils.distributed import parse_boolish, safe_int
 from mikazuki.utils.resume_guard import resolve_local_path
+from mikazuki.utils.trainer_registry import resolve_trainer_file_for_training_type
 
 LEGACY_DEFAULT_SYNC_CONFIG_KEYS = (
     "train_batch_size,gradient_accumulation_steps,max_train_epochs,"
@@ -121,7 +122,21 @@ def resolve_trainer_file_from_runtime_config(runtime_train_config: dict, fallbac
     if not model_train_type:
         return fallback_trainer_file
 
-    return MODEL_TRAIN_TYPE_TO_TRAINER_FILE.get(model_train_type, fallback_trainer_file)
+    resolved = MODEL_TRAIN_TYPE_TO_TRAINER_FILE.get(model_train_type, fallback_trainer_file)
+    return resolve_trainer_file_for_training_type(model_train_type, resolved)
+
+
+def count_dataset_files_without_npz(path: Path, *, missing_value: int, not_dir_value: int) -> int:
+    if not path.exists():
+        return missing_value
+    if not path.is_dir():
+        return not_dir_value
+
+    count = 0
+    for candidate in path.rglob("*"):
+        if candidate.is_file() and candidate.suffix.lower() != ".npz":
+            count += 1
+    return count
 
 
 def resolve_worker_sync_runtime(config: dict, distributed_runtime: dict, repo_root: Path) -> dict:
@@ -373,29 +388,44 @@ def get_dataset_dirs_from_toml(toml_path: str, repo_root: Path) -> list[tuple[st
 
 
 def count_local_dataset_files_without_npz(local_dir: Path) -> int:
-    if not local_dir.exists():
-        return 0
-    if not local_dir.is_dir():
-        return -1
-
-    count = 0
-    for path in local_dir.rglob("*"):
-        if path.is_file() and path.suffix.lower() != ".npz":
-            count += 1
-    return count
+    return count_dataset_files_without_npz(local_dir, missing_value=0, not_dir_value=-1)
 
 
 def count_source_dataset_files_without_npz(source_dir: Path) -> int:
-    if not source_dir.exists():
-        return -1
-    if not source_dir.is_dir():
-        return -2
+    return count_dataset_files_without_npz(source_dir, missing_value=-1, not_dir_value=-2)
 
-    count = 0
-    for path in source_dir.rglob("*"):
-        if path.is_file() and path.suffix.lower() != ".npz":
-            count += 1
-    return count
+
+def sync_dataset_dir_if_needed(
+    *,
+    key: str,
+    local_dir: Path,
+    local_count: int,
+    main_count: int,
+    main_dir_label: str | Path,
+    sync_action: Callable[[], tuple[bool, str]],
+) -> tuple[bool, str]:
+    log.info(
+        f"[dataset-sync] {key}: local_count={local_count}, main_count={main_count}, "
+        f"local_dir={local_dir}, main_dir={main_dir_label}"
+    )
+    if local_count == main_count:
+        log.info(f"[dataset-sync] {key}: file count already matched, skip sync")
+        return True, ""
+
+    log.warning(
+        f"[dataset-sync] {key}: count mismatch detected, syncing dataset from main "
+        f"(local={local_count}, main={main_count})"
+    )
+    ok, message = sync_action()
+    if not ok:
+        return False, message
+
+    local_after = count_local_dataset_files_without_npz(local_dir)
+    if local_after != main_count:
+        return False, f"数据集同步后文件数仍不一致: {key}, local_after={local_after}, main={main_count}"
+
+    log.info(f"[dataset-sync] {key}: sync completed, count={local_after}")
+    return True, ""
 
 
 def sync_datasets_when_count_mismatch_from_main(toml_path: str, sync_runtime: dict, repo_root: Path) -> tuple[bool, str]:
@@ -415,25 +445,16 @@ def sync_datasets_when_count_mismatch_from_main(toml_path: str, sync_runtime: di
             source_count = count_source_dataset_files_without_npz(source_dir)
             if source_count < 0:
                 return False, f"主节点共享数据集目录不存在或不是目录: {key} -> {source_dir}"
-            log.info(
-                f"[dataset-sync] {key}: local_count={local_count}, main_count={source_count}, "
-                f"local_dir={local_dir}, main_dir={source_dir}"
+            ok, message = sync_dataset_dir_if_needed(
+                key=key,
+                local_dir=local_dir,
+                local_count=local_count,
+                main_count=source_count,
+                main_dir_label=source_dir,
+                sync_action=lambda: sync_dataset_dir_from_shared_source(source_dir, local_dir),
             )
-            if local_count == source_count:
-                log.info(f"[dataset-sync] {key}: file count already matched, skip sync")
-                continue
-
-            log.warning(
-                f"[dataset-sync] {key}: count mismatch detected, syncing dataset from main "
-                f"(local={local_count}, main={source_count})"
-            )
-            ok, message = sync_dataset_dir_from_shared_source(source_dir, local_dir)
             if not ok:
                 return False, message
-            local_after = count_local_dataset_files_without_npz(local_dir)
-            if local_after != source_count:
-                return False, f"数据集同步后文件数仍不一致: {key}, local_after={local_after}, main={source_count}"
-            log.info(f"[dataset-sync] {key}: sync completed, count={local_after}")
             continue
 
         remote_repo_root = str(sync_runtime.get("sync_main_repo_dir", "") or "").strip()
@@ -441,25 +462,16 @@ def sync_datasets_when_count_mismatch_from_main(toml_path: str, sync_runtime: di
         remote_count = count_remote_dataset_files_without_npz(remote_dir, sync_runtime)
         if remote_count < 0:
             return False, f"无法统计主节点数据集文件数量: {remote_dir}"
-        log.info(
-            f"[dataset-sync] {key}: local_count={local_count}, main_count={remote_count}, "
-            f"local_dir={local_dir}, main_dir={remote_dir}"
+        ok, message = sync_dataset_dir_if_needed(
+            key=key,
+            local_dir=local_dir,
+            local_count=local_count,
+            main_count=remote_count,
+            main_dir_label=remote_dir,
+            sync_action=lambda: sync_dataset_dir_from_remote(remote_dir, local_dir, sync_runtime),
         )
-        if local_count == remote_count:
-            log.info(f"[dataset-sync] {key}: file count already matched, skip sync")
-            continue
-
-        log.warning(
-            f"[dataset-sync] {key}: count mismatch detected, syncing dataset from main "
-            f"(local={local_count}, main={remote_count})"
-        )
-        ok, message = sync_dataset_dir_from_remote(remote_dir, local_dir, sync_runtime)
         if not ok:
             return False, message
-        local_after = count_local_dataset_files_without_npz(local_dir)
-        if local_after != remote_count:
-            return False, f"数据集同步后文件数仍不一致: {key}, local_after={local_after}, main={remote_count}"
-        log.info(f"[dataset-sync] {key}: sync completed, count={local_after}")
 
     return True, ""
 
@@ -529,31 +541,53 @@ def count_remote_dataset_files_without_npz(remote_dir: str, sync_runtime: dict) 
         return -2
 
 
+def build_rsync_ssh_exec(sync_runtime: dict) -> str:
+    return " ".join(
+        [
+            "ssh",
+            "-p",
+            str(int(sync_runtime.get("sync_ssh_port", 22) or 22)),
+            *build_ssh_options(sync_runtime),
+        ]
+    )
+
+
+def build_rsync_dir_command(
+    remote_host: str,
+    remote_path: str,
+    local_path: Path,
+    sync_runtime: dict,
+    *,
+    delete: bool = False,
+    exclude_npz: bool = False,
+) -> list[str]:
+    cmd = ["rsync", "-a", "--partial"]
+    if delete:
+        cmd.append("--delete")
+    if exclude_npz:
+        cmd.extend(["--exclude", "*.npz", "--exclude", "*.NPZ"])
+    cmd.extend(
+        [
+            "-e",
+            build_rsync_ssh_exec(sync_runtime),
+            f"{remote_host}:{remote_path.rstrip('/')}/",
+            f"{str(local_path)}/",
+        ]
+    )
+    return cmd
+
+
 def sync_dataset_dir_from_remote(remote_dir: str, local_dir: Path, sync_runtime: dict) -> tuple[bool, str]:
     remote_host = str(sync_runtime.get("remote_host", "") or "").strip()
     if shutil.which("rsync") is not None:
-        ssh_exec = " ".join(
-            [
-                "ssh",
-                "-p",
-                str(int(sync_runtime.get("sync_ssh_port", 22) or 22)),
-                *build_ssh_options(sync_runtime),
-            ]
+        cmd = build_rsync_dir_command(
+            remote_host,
+            remote_dir,
+            local_dir,
+            sync_runtime,
+            delete=True,
+            exclude_npz=True,
         )
-        cmd = [
-            "rsync",
-            "-a",
-            "--partial",
-            "--delete",
-            "--exclude",
-            "*.npz",
-            "--exclude",
-            "*.NPZ",
-            "-e",
-            ssh_exec,
-            f"{remote_host}:{remote_dir.rstrip('/')}/",
-            f"{str(local_dir)}/",
-        ]
         if sync_runtime.get("sync_use_password_auth"):
             cmd = build_sshpass_wrapper(cmd, sync_runtime)
             if cmd is None:
@@ -864,23 +898,7 @@ def copy_remote_path(remote_path: str, local_path: Path, sync_runtime: dict) -> 
         return scp_remote_file(remote_host, remote_path, local_path, sync_runtime)
 
     if shutil.which("rsync") is not None:
-        ssh_exec = " ".join(
-            [
-                "ssh",
-                "-p",
-                str(int(sync_runtime.get("sync_ssh_port", 22) or 22)),
-                *build_ssh_options(sync_runtime),
-            ]
-        )
-        cmd = [
-            "rsync",
-            "-a",
-            "--partial",
-            "-e",
-            ssh_exec,
-            f"{remote_host}:{remote_path.rstrip('/')}/",
-            f"{str(local_path)}/",
-        ]
+        cmd = build_rsync_dir_command(remote_host, remote_path, local_path, sync_runtime)
         cmd = build_sshpass_wrapper(cmd, sync_runtime)
         if cmd is not None:
             local_path.mkdir(parents=True, exist_ok=True)

@@ -98,6 +98,7 @@ Schema.intersect([
             network_dim: Schema.number().min(1).default(32).description("网络维度，常用 4~128，不是越大越好, 低dim可以降低显存占用"),
             network_alpha: Schema.number().min(1).default(32).description("常用值：等于 network_dim 或 network_dim*1/2 或 1。使用较小的 alpha 需要提升学习率"),
             network_dropout: Schema.number().step(0.01).default(0).description('dropout 概率 （与 lycoris 不兼容，需要用 lycoris 自带的）'),
+            pissa_init: Schema.boolean().default(false).description("启用 PiSSA 初始化（实验性，仅在 network_module=networks.lora 时生效）"),
             dim_from_weights: Schema.boolean().default(false).description("从已有 network_weights 自动推断 rank / dim"),
             scale_weight_norms: Schema.number().step(0.01).min(0).description("最大范数正则化。如果使用，推荐为 1"),
             dora_wd: Schema.boolean().default(false).description('启用 DoRA 训练'),
@@ -105,6 +106,19 @@ Schema.intersect([
             enable_block_weights: Schema.boolean().default(false).description('启用分层学习率训练（只支持网络模块 networks.lora）'),
             enable_base_weight: Schema.boolean().default(false).description('启用基础权重（差异炼丹）'),
         }).description("网络设置"),
+
+        Schema.union([
+            Schema.object({
+                network_module: Schema.const("networks.lora").required(),
+                pissa_init: Schema.const(true).required(),
+                pissa_method: Schema.union(["rsvd", "svd"]).default("rsvd").description("PiSSA 分解方式。推荐保持 rSVD 默认值"),
+                pissa_niter: Schema.number().min(0).step(1).default(2).description("PiSSA rSVD 幂迭代次数（高级参数，通常保持默认）"),
+                pissa_oversample: Schema.number().min(0).step(1).default(8).description("PiSSA rSVD 过采样维度（高级参数，通常保持默认）"),
+                pissa_apply_conv2d: Schema.boolean().default(false).description("PiSSA 额外作用于 1x1 Conv（实验性，默认只初始化 Linear）"),
+                pissa_export_mode: Schema.union(["LoRA无损兼容导出", "LoRA快速近似导出"]).default("LoRA无损兼容导出").description("PiSSA 模型保存为标准 LoRA 时的导出方式"),
+            }),
+            Schema.object({}),
+        ]),
 
         // lycoris 参数
         SHARED_SCHEMAS.LYCORIS_MAIN,

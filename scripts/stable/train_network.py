@@ -2067,5 +2067,12 @@ if __name__ == "__main__":
     train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
+    model_train_type = str(getattr(args, "model_train_type", "") or "").strip().lower()
+    if model_train_type == "sdxl-lora":
+        raise ValueError(
+            "model_train_type=sdxl-lora must use scripts/stable/sdxl_train_network.py, "
+            "not scripts/stable/train_network.py."
+        )
+
     trainer = NetworkTrainer()
     trainer.train(args)

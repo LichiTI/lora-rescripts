@@ -3,7 +3,6 @@
 import argparse
 from collections import defaultdict
 import gc
-import importlib
 import math
 import os
 import sys
@@ -18,6 +17,7 @@ from PIL import Image
 
 from library.device_utils import init_ipex, clean_memory_on_device, synchronize_device
 from library import anima_models, anima_utils, train_util, qwen_image_autoencoder_kl
+from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
 
 init_ipex()
 
@@ -232,8 +232,24 @@ def _infer_anima_runtime_mode() -> str:
         return "sageattention"
     if os.environ.get("MIKAZUKI_BLACKWELL_STARTUP") == "1":
         return "blackwell"
+    if os.environ.get("MIKAZUKI_INTEL_XPU_SAGE_STARTUP") == "1":
+        return "intel-xpu-sage"
+    if os.environ.get("MIKAZUKI_INTEL_XPU_STARTUP") == "1":
+        return "intel-xpu"
+    if os.environ.get("MIKAZUKI_ROCM_AMD_SAGE_STARTUP") == "1":
+        return "rocm-amd-sage"
+    if os.environ.get("MIKAZUKI_ROCM_AMD_STARTUP") == "1":
+        return "rocm-amd"
 
     executable = sys.executable.replace("\\", "/").lower()
+    if "/python_rocm_amd_sage/" in executable or "/python-rocm-amd-sage/" in executable:
+        return "rocm-amd-sage"
+    if "/python_xpu_intel_sage/" in executable or "/python-xpu-intel-sage/" in executable:
+        return "intel-xpu-sage"
+    if "/python_xpu_intel/" in executable or "/python-xpu-intel/" in executable:
+        return "intel-xpu"
+    if "/python_rocm_amd/" in executable or "/python-rocm-amd/" in executable:
+        return "rocm-amd"
     if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
         return "sageattention"
     if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
@@ -246,16 +262,12 @@ def _infer_anima_runtime_mode() -> str:
 
 
 def _has_working_sageattention() -> bool:
-    if not torch.cuda.is_available():
+    cuda_available = bool(torch.cuda.is_available())
+    xpu_available = bool(hasattr(torch, "xpu") and torch.xpu.is_available())
+    if not cuda_available and not xpu_available:
         return False
 
-    try:
-        importlib.import_module("triton")
-        sage_module = importlib.import_module("sageattention")
-    except Exception:
-        return False
-
-    return callable(getattr(sage_module, "sageattn", None)) and callable(getattr(sage_module, "sageattn_varlen", None))
+    return bool(probe_runtime_sageattention().get("ready"))
 
 
 def _has_importable_xformers() -> bool:
@@ -274,7 +286,13 @@ def resolve_default_anima_attn_mode() -> str:
     runtime_mode = _infer_anima_runtime_mode()
     if runtime_mode == "sageattention" and _has_working_sageattention():
         return "sageattn"
+    if runtime_mode == "intel-xpu-sage" and _has_working_sageattention():
+        return "sageattn"
+    if runtime_mode == "rocm-amd-sage" and _has_working_sageattention():
+        return "sageattn"
     if runtime_mode == "blackwell":
+        return "torch"
+    if runtime_mode in {"intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage"}:
         return "torch"
     if _has_importable_xformers():
         return "xformers"
@@ -673,7 +691,14 @@ def log_anima_runtime_summary(args: argparse.Namespace, *, route_label: str = "A
 
 
 def should_use_anima_pinned_memory(accelerator: Optional[Accelerator]) -> bool:
-    return bool(accelerator is not None and accelerator.device.type == "cuda" and torch.cuda.is_available())
+    if accelerator is None:
+        return False
+
+    runtime_mode = _infer_anima_runtime_mode()
+    if runtime_mode in {"rocm-amd", "rocm-amd-sage"} and os.name == "nt":
+        return False
+
+    return bool(accelerator.device.type == "cuda" and torch.cuda.is_available())
 
 
 def should_use_anima_non_blocking(accelerator: Optional[Accelerator]) -> bool:

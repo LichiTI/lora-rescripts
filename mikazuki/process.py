@@ -14,13 +14,13 @@ from mikazuki.app.models import APIResponse
 from mikazuki.launch_utils import base_dir_path
 from mikazuki.log import log
 from mikazuki.tasks import tm
-from mikazuki.utils.distributed import pick_training_mesh_iface, resolve_distributed_runtime
 from mikazuki.utils.batch_semantics import resolve_per_device_batch_from_global
-from mikazuki.utils.distributed_sync import (
-    apply_worker_sync_from_main,
-    clear_dataset_npz_cache,
-    resolve_trainer_file_from_runtime_config,
-    resolve_worker_sync_runtime,
+from mikazuki.utils.distributed_sync import resolve_trainer_file_from_runtime_config
+from mikazuki.utils.training_process_runtime import (
+    apply_training_device_visibility,
+    apply_training_process_sync_guards,
+    resolve_mesh_network_interface,
+    resolve_training_process_runtime,
 )
 from mikazuki.utils.resume_guard import validate_resume_launch_guard
 from mikazuki.utils.tensorboard_runs import (
@@ -211,69 +211,24 @@ def run_train(
     ensure_repo_on_pythonpath(customize_env)
     apply_windows_accelerate_env(customize_env)
 
-    if direct_python_trainer:
-        summary = trainer_definition.direct_launch_summary or "当前训练直接由独立 Python 训练器启动，不走 accelerate 分布式包装。"
+    direct_launch_summary = (
+        trainer_definition.direct_launch_summary
+        if trainer_definition and trainer_definition.direct_launch_summary
+        else "当前训练直接由独立 Python 训练器启动，不走 accelerate 分布式包装。"
+    )
+    distributed_runtime, worker_sync_runtime, runtime_error = resolve_training_process_runtime(
+        config_data,
+        gpu_ids,
+        direct_python_trainer=direct_python_trainer,
+        direct_launch_summary=direct_launch_summary,
+        customize_env=customize_env,
+    )
+    if runtime_error is not None:
+        return runtime_error
 
-        distributed_runtime = {
-            "enabled": False,
-            "is_multi_machine": False,
-            "total_num_processes": 1,
-            "env_overrides": {},
-            "warnings": [],
-            "notes": [],
-            "summary": summary,
-        }
-        worker_sync_runtime = {
-            "enabled": False,
-            "is_worker": False,
-            "warnings": [],
-            "notes": [],
-        }
-    else:
-        try:
-            distributed_runtime = resolve_distributed_runtime(config_data, gpu_ids)
-        except ValueError as exc:
-            log.warning(f"[distributed] {exc}")
-            return APIResponse(status="error", message=str(exc))
-        except Exception as exc:
-            log.error(f"[distributed] failed to resolve distributed runtime: {exc}")
-            return APIResponse(status="error", message="分布式运行时解析失败，请检查日志。")
-
-        customize_env.update(distributed_runtime.get("env_overrides", {}))
-        for warning in distributed_runtime.get("warnings", []):
-            log.warning(f"[distributed] {warning}")
-        for note in distributed_runtime.get("notes", []):
-            log.info(f"[distributed] {note}")
-
-        try:
-            worker_sync_runtime = resolve_worker_sync_runtime(config_data, distributed_runtime, base_dir_path())
-        except ValueError as exc:
-            log.warning(f"[distributed-sync] {exc}")
-            return APIResponse(status="error", message=str(exc))
-        except Exception as exc:
-            log.error(f"[distributed-sync] failed to resolve worker sync runtime: {exc}")
-            return APIResponse(status="error", message="分布式同步运行时解析失败，请检查日志。")
-
-        for warning in worker_sync_runtime.get("warnings", []):
-            log.warning(f"[distributed-sync] {warning}")
-        for note in worker_sync_runtime.get("notes", []):
-            log.info(f"[distributed-sync] {note}")
-
-    if worker_sync_runtime.get("enabled"):
-        sync_ok, sync_message = apply_worker_sync_from_main(toml_path, worker_sync_runtime, base_dir_path())
-        if not sync_ok:
-            log.warning(f"[distributed-sync] {sync_message}")
-            return APIResponse(status="error", message=sync_message)
-        try:
-            config_data = toml.load(toml_path)
-        except Exception as exc:
-            return APIResponse(status="error", message=f"同步后重新读取训练配置失败: {exc}")
-
-    if bool(config_data.get("clear_dataset_npz_before_train")) and not worker_sync_runtime.get("is_worker"):
-        cache_ok, cache_message = clear_dataset_npz_cache(toml_path, base_dir_path())
-        if not cache_ok:
-            log.warning(f"[cache-reset] {cache_message}")
-            return APIResponse(status="error", message=cache_message)
+    config_data, sync_error = apply_training_process_sync_guards(toml_path, config_data, worker_sync_runtime)
+    if sync_error is not None:
+        return sync_error
 
     guard_ok, guard_message = validate_resume_launch_guard(config_data, base_dir_path())
     if not guard_ok:
@@ -338,12 +293,7 @@ def run_train(
                 int(world_effective_batch),
             )
 
-    if gpu_ids:
-        customize_env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
-        log.info(f"Using GPU(s) / 使用 GPU: {gpu_ids}")
-        log.info(f"Final training GPU selection / 最终参与训练的 GPU: {', '.join(gpu_ids)}")
-    else:
-        log.info("Final training GPU selection / 最终参与训练的 GPU: default visible CUDA device")
+    apply_training_device_visibility(customize_env, gpu_ids)
 
     if direct_python_trainer:
         script_runner = get_script_runner_path()
@@ -378,17 +328,7 @@ def run_train(
             trainer_cli_args=["--train_batch_size", str(int(launch_train_batch_override))],
         )
 
-    if distributed_runtime.get("is_multi_machine"):
-        mesh_iface = pick_training_mesh_iface(
-            str(distributed_runtime.get("nccl_socket_ifname", "") or ""),
-            str(distributed_runtime.get("gloo_socket_ifname", "") or ""),
-            str(distributed_runtime.get("main_process_ip", "") or ""),
-        )
-        if mesh_iface:
-            customize_env["MIKAZUKI_MESH_NET_IFACE"] = mesh_iface
-            log.info(f"[mesh-net] selected local training interface: {mesh_iface}")
-        else:
-            log.warning("[mesh-net] distributed training detected but unable to resolve local training interface")
+    resolve_mesh_network_interface(customize_env, distributed_runtime)
 
     if not (task := tm.create_task(args, customize_env, cwd=base_dir_path())):
         return APIResponse(status="error", message="Failed to create task / 无法创建训练任务")

@@ -34,6 +34,7 @@ from packaging.version import Version
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
 from library.strategy_base import LatentsCachingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy, TextEncodingStrategy
+from mikazuki.utils.amd_sageattention import load_runtime_sageattention_symbols
 
 init_ipex()
 
@@ -3476,6 +3477,26 @@ def get_git_revision_hash() -> str:
 
 
 #     diffusers.models.attention.CrossAttention.forward = forward_xformers
+def enable_sageattention(*named_models):
+    logger.info("Enable SageAttention")
+    logger.info("Training attention backend: sageattn")
+    logger.info("当前训练使用的注意力后端：sageattn")
+    try:
+        _sageattn, _, _sageattention_source = load_runtime_sageattention_symbols()  # noqa: F841
+    except Exception:
+        raise ImportError("No SageAttention / SageAttentionがインストールされていないようです / 未检测到 SageAttention")
+
+    for model_name, model in named_models:
+        if model is None:
+            raise ValueError(f"{model_name} is missing / {model_name} が存在しません / {model_name} 不存在")
+        if not hasattr(model, "set_use_sageattn"):
+            raise ValueError(
+                f"SageAttention is not supported by {model_name} / "
+                f"{model_name} は SageAttention をサポートしていません / {model_name} 当前不支持 SageAttention"
+            )
+        model.set_use_sageattn(True)
+
+
 def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdpa, sageattn=False):
     if mem_eff_attn:
         logger.info("Enable memory efficient attention for U-Net")
@@ -3483,21 +3504,7 @@ def replace_unet_modules(unet: UNet2DConditionModel, mem_eff_attn, xformers, sdp
         logger.info("当前训练使用的注意力后端：mem_eff_attn")
         unet.set_use_memory_efficient_attention(False, True)
     elif sageattn:
-        logger.info("Enable SageAttention for U-Net")
-        logger.info("Training attention backend: sageattn")
-        logger.info("当前训练使用的注意力后端：sageattn")
-        try:
-            from sageattention import sageattn as _sageattn  # noqa: F401
-        except ImportError:
-            raise ImportError("No SageAttention / SageAttentionがインストールされていないようです / 未检测到 SageAttention")
-
-        if not hasattr(unet, "set_use_sageattn"):
-            raise ValueError(
-                "SageAttention is not supported by this U-Net implementation / "
-                "このU-Net実装はSageAttentionをサポートしていません / 当前 U-Net 实现不支持 SageAttention"
-            )
-
-        unet.set_use_sageattn(True)
+        enable_sageattention(("U-Net", unet))
     elif xformers:
         logger.info("Enable xformers for U-Net")
         logger.info("Training attention backend: xformers")
@@ -5566,6 +5573,17 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
                 optimizer_class = experimental.DAdaptAdamPreprint
                 logger.info(f"use D-Adaptation AdamPreprint optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptAdaGrad".lower():
+                if "eps" not in optimizer_kwargs:
+                    optimizer_kwargs["eps"] = 1e-6
+                    logger.info(
+                        "DAdaptAdaGrad requires eps > 0; defaulting to eps=1e-6 for compatibility."
+                    )
+                elif float(optimizer_kwargs["eps"]) <= 0:
+                    logger.warning(
+                        f"DAdaptAdaGrad received non-positive eps={optimizer_kwargs['eps']}. "
+                        "Automatically overriding to eps=1e-6."
+                    )
+                    optimizer_kwargs["eps"] = 1e-6
                 optimizer_class = dadaptation.DAdaptAdaGrad
                 logger.info(f"use D-Adaptation AdaGrad optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptAdam".lower():

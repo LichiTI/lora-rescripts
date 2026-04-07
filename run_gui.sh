@@ -232,6 +232,61 @@ get_python_minor_version() {
     "$python_bin" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null
 }
 
+runtime_uses_sageattention() {
+    local current_runtime_name="$1"
+    [[ "$current_runtime_name" == "sageattention" || "$current_runtime_name" == "sageattention2" ]]
+}
+
+selected_runtime_dependencies_ready() {
+    local current_runtime_name="$1"
+    local python_bin="$2"
+    local marker_path="$3"
+
+    if ! test_modules_ready "$python_bin" "${main_modules[@]}"; then
+        return 1
+    fi
+
+    if [[ -n "$marker_path" && ! -f "$marker_path" ]]; then
+        return 1
+    fi
+
+    if runtime_uses_sageattention "$current_runtime_name" && ! test_sageattention_runtime_ready "$python_bin"; then
+        return 1
+    fi
+
+    return 0
+}
+
+install_selected_runtime_dependencies() {
+    local current_runtime_name="$1"
+
+    if [[ "$current_runtime_name" == "sageattention" || "$prefer_sageattention_runtime" -eq 1 ]]; then
+        echo "SageAttention experimental dependencies are not installed yet. Running install_sageattention.sh..."
+        bash "$script_dir/install_sageattention.sh"
+        return $?
+    fi
+
+    if [[ "$current_runtime_name" == "sageattention2" || "$prefer_sageattention2_runtime" -eq 1 ]]; then
+        echo "SageAttention2 experimental dependencies are not installed yet. Running install_sageattention2.sh..."
+        bash "$script_dir/install_sageattention2.sh"
+        return $?
+    fi
+
+    echo "Dependencies are not installed yet. Running install.bash..."
+    bash "$script_dir/install.bash"
+}
+
+get_selected_runtime_install_failure_message() {
+    local current_runtime_name="$1"
+
+    if runtime_uses_sageattention "$current_runtime_name"; then
+        echo "SageAttention dependency installation failed."
+        return 0
+    fi
+
+    echo "Dependency installation failed."
+}
+
 select_main_python() {
     if [[ "$prefer_sageattention_runtime" -eq 1 ]]; then
         if [[ -x "$sage_python" ]]; then
@@ -402,41 +457,16 @@ set_dedicated_runtime_caches "$runtime_name" "$python_exe"
 
 main_install_needed=0
 
-if ! test_modules_ready "$python_exe" "${main_modules[@]}"; then
-    main_install_needed=1
-fi
-
-if [[ "$main_install_needed" -eq 0 && -n "$deps_marker" && ! -f "$deps_marker" ]]; then
-    main_install_needed=1
-fi
-
-if [[ "$main_install_needed" -eq 0 && ( "$runtime_name" == "sageattention" || "$runtime_name" == "sageattention2" ) ]] && ! test_sageattention_runtime_ready "$python_exe"; then
+if ! selected_runtime_dependencies_ready "$runtime_name" "$python_exe" "$deps_marker"; then
     main_install_needed=1
 fi
 
 if [[ "$main_install_needed" -eq 1 ]]; then
-    if [[ "$runtime_name" == "sageattention" || "$prefer_sageattention_runtime" -eq 1 ]]; then
-        echo "SageAttention experimental dependencies are not installed yet. Running install_sageattention.sh..."
-        bash "$script_dir/install_sageattention.sh"
-    elif [[ "$runtime_name" == "sageattention2" || "$prefer_sageattention2_runtime" -eq 1 ]]; then
-        echo "SageAttention2 experimental dependencies are not installed yet. Running install_sageattention2.sh..."
-        bash "$script_dir/install_sageattention2.sh"
-    else
-        echo "Dependencies are not installed yet. Running install.bash..."
-        bash "$script_dir/install.bash"
-    fi
+    install_selected_runtime_dependencies "$runtime_name"
     select_main_python
     set_dedicated_runtime_caches "$runtime_name" "$python_exe"
-    if ! test_modules_ready "$python_exe" "${main_modules[@]}"; then
-        echo "Dependency installation failed." >&2
-        exit 1
-    fi
-    if [[ -n "$deps_marker" && ! -f "$deps_marker" ]]; then
-        echo "Dependency installation failed." >&2
-        exit 1
-    fi
-    if [[ ( "$runtime_name" == "sageattention" || "$runtime_name" == "sageattention2" ) ]] && ! test_sageattention_runtime_ready "$python_exe"; then
-        echo "SageAttention dependency installation failed." >&2
+    if ! selected_runtime_dependencies_ready "$runtime_name" "$python_exe" "$deps_marker"; then
+        get_selected_runtime_install_failure_message "$runtime_name" >&2
         exit 1
     fi
 fi

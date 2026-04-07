@@ -18,7 +18,7 @@
 
 _✨ Enjoy Stable Diffusion Train！ ✨_
 
-**v1.1.5 Beta10**
+**v1.2.1 Beta16**
 
 Fork from 秋葉 `aaaki/lora-scripts`  
 Modify By `Lulynx`
@@ -60,12 +60,15 @@ LoRA & Dreambooth training GUI & scripts preset & one key training environment f
 
 ## Recent Updates
 
-### v1.1.5 Beta10
+### v1.2.1 Beta16
 
-- improved Anima training throughput and runtime stability with lighter cache handling, better tensor transfer paths, and clearer runtime diagnostics
-- improved SageAttention real-world performance visibility for Anima, with step profiler support and more transparent backend summary logging
-- fixed multiple Anima edge cases around preview prompts, empty token paths, legacy text cache rebuilding, and `save_every_n_epochs=0`
-- added advanced Anima debug options for profiler window and NaN check interval tuning
+- added experimental dedicated runtime routes for SageAttention, Intel XPU, AMD ROCm, and AMD ROCm / Intel XPU Sage startup flows on Windows, with clearer launcher checks and isolated runtime selection
+- improved training startup safety with runtime-aware attention fallback guards, dependency preflight, resume-state protection, dataset cache checks, and more explicit startup warnings
+- improved external config import compatibility by keeping legacy field mapping, filling known missing values with safer defaults, and reducing layout breakage from non-native config files
+- added laptop-friendly cooldown controls and optional `nvidia-smi` GPU power limit support for long-running training sessions on thermally constrained devices
+- added YOLO workflow integration with local Ultralytics support, runtime dependency installers, custom or auto-generated dataset yaml handling, and better startup validation
+- added aesthetic scorer training, inference, and labeling-related backend support, together with runtime dependency management and workflow-side preparation tools
+- refactored large parts of the training launch path into smaller runtime helper modules to make future hardware adaptation and bug fixing easier to maintain
 
 ## ✨NEW: Train WebUI
 

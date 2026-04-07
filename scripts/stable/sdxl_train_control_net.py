@@ -236,10 +236,8 @@ def train(args):
         accelerator.wait_for_everyone()
 
     # モデルに xformers とか memory efficient attention を組み込む
-    # train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
     if getattr(args, "sageattn", False):
-        unet.set_use_sageattn(True)
-        control_net.set_use_sageattn(True)
+        train_util.enable_sageattention(("U-Net", unet), ("ControlNet", control_net))
     elif args.xformers:
         unet.set_use_memory_efficient_attention(True, False)
         control_net.set_use_memory_efficient_attention(True, False)

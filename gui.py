@@ -1,7 +1,6 @@
 import argparse
 import json
 import importlib.util
-import locale
 import os
 import platform
 import subprocess
@@ -18,6 +17,10 @@ from mikazuki.utils.backend_status import BACKEND_STATUS_FILE_ENV, write_backend
 APP_NAME = "SD-reScripts"
 APP_VERSION = "v1.1.5 Beta10"
 ALLOW_SYSTEM_PYTHON_ENV = "MIKAZUKI_ALLOW_SYSTEM_PYTHON"
+REPO_ROOT = base_dir_path()
+LOG_DIR = REPO_ROOT / "logs"
+TAGEDITOR_ROOT = REPO_ROOT / "mikazuki" / "dataset-tag-editor"
+TAGEDITOR_LAUNCH = TAGEDITOR_ROOT / "scripts" / "launch.py"
 
 parser = argparse.ArgumentParser(description="GUI for stable diffusion training")
 parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -33,8 +36,28 @@ parser.add_argument("--tensorboard-port", type=int, default=6006, help="Port to 
 parser.add_argument("--localization", type=str)
 parser.add_argument("--dev", action="store_true")
 
-TAGEDITOR_STATUS_FILE = base_dir_path() / "tmp" / "tageditor_status.json"
-BACKEND_STATUS_FILE = base_dir_path() / "tmp" / "backend_status.json"
+TAGEDITOR_STATUS_FILE = REPO_ROOT / "tmp" / "tageditor_status.json"
+BACKEND_STATUS_FILE = REPO_ROOT / "tmp" / "backend_status.json"
+PROJECT_LOCAL_MAIN_PYTHON_ROOTS = [
+    (REPO_ROOT / "python").resolve(),
+    (REPO_ROOT / "python_blackwell").resolve(),
+    (REPO_ROOT / "python_sagebwd_nvidia").resolve(),
+    (REPO_ROOT / "python-sagebwd-nvidia").resolve(),
+    (REPO_ROOT / "python-sageattention").resolve(),
+    (REPO_ROOT / "python-sageattention-latest").resolve(),
+    (REPO_ROOT / "python-sageattention-blackwell").resolve(),
+    (REPO_ROOT / "python_sageattention").resolve(),
+    (REPO_ROOT / "python_sageattention_latest").resolve(),
+    (REPO_ROOT / "python_sageattention_blackwell").resolve(),
+    (REPO_ROOT / "venv").resolve(),
+]
+DEDICATED_TAGEDITOR_PYTHONS = [
+    REPO_ROOT / "python_tageditor" / "python.exe",
+    REPO_ROOT / "python_tageditor" / "bin" / "python",
+    REPO_ROOT / "venv-tageditor" / "Scripts" / "python.exe",
+    REPO_ROOT / "venv-tageditor" / "bin" / "python",
+]
+TAGEDITOR_REQUIRED_MODULES = ["gradio", "transformers", "timm", "print_color"]
 
 
 def write_tageditor_status(status: str, detail: str = ""):
@@ -42,14 +65,6 @@ def write_tageditor_status(status: str, detail: str = ""):
     status_dir.mkdir(parents=True, exist_ok=True)
     with open(TAGEDITOR_STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump({"status": status, "detail": detail}, f, ensure_ascii=False)
-
-
-def get_system_locale():
-    try:
-        system_locale = locale.getlocale()[0]
-    except (ValueError, TypeError):
-        system_locale = None
-    return system_locale
 
 
 def path_is_within(path: Path, parent: Path) -> bool:
@@ -61,20 +76,8 @@ def path_is_within(path: Path, parent: Path) -> bool:
 
 
 def using_project_local_main_python() -> bool:
-    repo_root = base_dir_path().resolve()
     executable = Path(sys.executable).resolve()
-    allowed_roots = [
-        (repo_root / "python").resolve(),
-        (repo_root / "python_blackwell").resolve(),
-        (repo_root / "python-sageattention").resolve(),
-        (repo_root / "python-sageattention-latest").resolve(),
-        (repo_root / "python-sageattention-blackwell").resolve(),
-        (repo_root / "python_sageattention").resolve(),
-        (repo_root / "python_sageattention_latest").resolve(),
-        (repo_root / "python_sageattention_blackwell").resolve(),
-        (repo_root / "venv").resolve(),
-    ]
-    return any(path_is_within(executable, root) for root in allowed_roots)
+    return any(path_is_within(executable, root) for root in PROJECT_LOCAL_MAIN_PYTHON_ROOTS)
 
 
 def ensure_project_local_main_python():
@@ -90,8 +93,8 @@ def ensure_project_local_main_python():
 
     raise RuntimeError(
         "This build is locked to project-local Python by default. "
-        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python, ./python_blackwell, ./python-sageattention, ./python-sageattention-latest, ./python-sageattention-blackwell, or ./venv. "
-        "Legacy ./python_sageattention, ./python_sageattention_latest, and ./python_sageattention_blackwell folders are also accepted. "
+        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python, ./python_blackwell, ./python_sagebwd_nvidia, ./python-sageattention, ./python-sageattention-latest, ./python-sageattention-blackwell, or ./venv. "
+        "Legacy ./python-sagebwd-nvidia, ./python_sageattention, ./python_sageattention_latest, and ./python_sageattention_blackwell folders are also accepted. "
         "For development only, set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to override this guard intentionally."
     )
 
@@ -109,92 +112,82 @@ def run_tensorboard():
             "-m",
             "tensorboard.main",
             "--logdir",
-            str(base_dir_path() / "logs"),
+            str(LOG_DIR),
             "--host",
             args.tensorboard_host,
             "--port",
             str(args.tensorboard_port),
         ],
-        cwd=base_dir_path(),
+        cwd=REPO_ROOT,
     )
+
+
+def update_tageditor_status(status: str, detail: str = "") -> None:
+    os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = status
+    write_tageditor_status(status, detail)
+
+
+def resolve_tag_editor_python():
+    dedicated_python = next((path for path in DEDICATED_TAGEDITOR_PYTHONS if path.exists()), None)
+    if dedicated_python is not None:
+        return str(dedicated_python), "dedicated", ""
+
+    missing_modules = [name for name in TAGEDITOR_REQUIRED_MODULES if importlib.util.find_spec(name) is None]
+    if missing_modules:
+        return None, "missing_dependencies", f"Missing modules: {', '.join(missing_modules)}"
+
+    return sys.executable, "main", ""
 
 
 @catch_exception
 def run_tag_editor():
-    tag_editor_root = base_dir_path() / "mikazuki/dataset-tag-editor"
-    tag_editor_launch = base_dir_path() / "mikazuki/dataset-tag-editor/scripts/launch.py"
-    dedicated_tag_editor_pythons = [
-        base_dir_path() / "python_tageditor/python.exe",
-        base_dir_path() / "python_tageditor/bin/python",
-        base_dir_path() / "venv-tageditor/Scripts/python.exe",
-        base_dir_path() / "venv-tageditor/bin/python",
-    ]
-    if not tag_editor_launch.exists():
+    if not TAGEDITOR_LAUNCH.exists():
         log.warning("tag editor launcher is missing, skip starting tag editor.")
-        os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "missing_launcher"
-        write_tageditor_status("missing_launcher", "Tag editor launcher is missing.")
+        update_tageditor_status("missing_launcher", "Tag editor launcher is missing.")
         return
 
-    python_exe = sys.executable
-    dedicated_python = next((path for path in dedicated_tag_editor_pythons if path.exists()), None)
-    if dedicated_python is not None:
-        python_exe = str(dedicated_python)
-        os.environ["MIKAZUKI_TAGEDITOR_RUNTIME"] = "dedicated"
-    else:
-        required_modules = ["gradio", "transformers", "timm", "print_color"]
-        missing_modules = [name for name in required_modules if importlib.util.find_spec(name) is None]
-        if missing_modules:
-            log.warning(
-                "tag editor dependencies are missing (%s), run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first.",
-                ", ".join(missing_modules),
-            )
-            os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "missing_dependencies"
-            write_tageditor_status("missing_dependencies", f"Missing modules: {', '.join(missing_modules)}")
-            return
-        os.environ["MIKAZUKI_TAGEDITOR_RUNTIME"] = "main"
+    python_exe, runtime_kind, detail = resolve_tag_editor_python()
+    if python_exe is None:
+        log.warning(
+            "tag editor dependencies are missing (%s), run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first.",
+            detail.removeprefix("Missing modules: "),
+        )
+        update_tageditor_status("missing_dependencies", detail)
+        return
 
+    os.environ["MIKAZUKI_TAGEDITOR_RUNTIME"] = runtime_kind
     log.info("Starting tageditor...")
-    os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "starting"
-    write_tageditor_status("starting", "Launching tag editor subprocess...")
+    update_tageditor_status("starting", "Launching tag editor subprocess...")
     cmd = [
         python_exe,
-        tag_editor_launch,
+        TAGEDITOR_LAUNCH,
         "--port", "28001",
         "--shadow-gradio-output",
         "--root-path", "/proxy/tageditor"
     ]
     localization = args.localization or "zh-Hans"
     cmd.extend(["--localization", localization])
-    subprocess.Popen(cmd, cwd=tag_editor_root)
+    subprocess.Popen(cmd, cwd=TAGEDITOR_ROOT)
 
 
-def launch():
-    ensure_project_local_main_python()
-    log.info(f"Starting {APP_NAME} Mikazuki GUI...")
-    log.info(f"Base directory: {base_dir_path()}, Working directory: {os.getcwd()}")
-    log.info(f"{platform.system()} Python {platform.python_version()} {sys.executable}")
-
+def apply_listen_host_overrides() -> None:
     if args.listen:
         args.host = "0.0.0.0"
         args.tensorboard_host = "0.0.0.0"
 
-    if not args.skip_prepare_environment:
-        prepare_environment(
-            disable_auto_mirror=args.disable_auto_mirror,
-            prepare_onnxruntime=not args.skip_prepare_onnxruntime,
-        )
 
-    if not check_port_avaliable(args.port):
-        avaliable = find_avaliable_ports(30000, 30000+20)
-        if avaliable:
-            args.port = avaliable
-        else:
-            log.error("port finding fallback error")
+def resolve_server_port() -> None:
+    if check_port_avaliable(args.port):
+        return
 
-    git_version = git_tag(base_dir_path())
-    version_suffix = f" ({git_version})" if git_version != "<none>" else ""
-    log.info(f"{APP_NAME} Version: {APP_VERSION}{version_suffix}")
+    avaliable = find_avaliable_ports(30000, 30000 + 20)
+    if avaliable:
+        args.port = avaliable
+    else:
+        log.error("port finding fallback error")
 
+
+def apply_runtime_environment() -> None:
     os.environ["MIKAZUKI_HOST"] = args.host
     os.environ["MIKAZUKI_PORT"] = str(args.port)
     os.environ["MIKAZUKI_TENSORBOARD_HOST"] = args.tensorboard_host
@@ -204,18 +197,47 @@ def launch():
     os.environ["MIKAZUKI_DEV"] = "1" if args.dev else "0"
     os.environ["MIKAZUKI_TAGEDITOR_STATUS_FILE"] = str(TAGEDITOR_STATUS_FILE)
     os.environ[BACKEND_STATUS_FILE_ENV] = str(BACKEND_STATUS_FILE)
-    os.environ["MIKAZUKI_TAGEDITOR_STATUS"] = "disabled" if args.disable_tageditor else "unknown"
+
+
+def initialize_launch_statuses() -> None:
     write_backend_status("starting", "后端启动中，正在加载运行环境与前端资源。")
     if args.disable_tageditor:
-        write_tageditor_status("disabled", "Tag editor is disabled for this launch.")
+        update_tageditor_status("disabled", "Tag editor is disabled for this launch.")
     else:
-        write_tageditor_status("queued", "Tag editor will be started shortly.")
+        update_tageditor_status("queued", "Tag editor will be started shortly.")
 
+
+def start_optional_services() -> None:
     if not args.disable_tageditor:
         run_tag_editor()
 
     if not args.disable_tensorboard:
         run_tensorboard()
+
+
+def launch():
+    ensure_project_local_main_python()
+    log.info(f"Starting {APP_NAME} Mikazuki GUI...")
+    log.info(f"Base directory: {REPO_ROOT}, Working directory: {os.getcwd()}")
+    log.info(f"{platform.system()} Python {platform.python_version()} {sys.executable}")
+
+    apply_listen_host_overrides()
+
+    if not args.skip_prepare_environment:
+        prepare_environment(
+            disable_auto_mirror=args.disable_auto_mirror,
+            prepare_onnxruntime=not args.skip_prepare_onnxruntime,
+        )
+
+    resolve_server_port()
+
+    git_version = git_tag(REPO_ROOT)
+    version_suffix = f" ({git_version})" if git_version != "<none>" else ""
+    log.info(f"{APP_NAME} Version: {APP_VERSION}{version_suffix}")
+
+    apply_runtime_environment()
+    initialize_launch_statuses()
+    start_optional_services()
 
     import uvicorn
     log.info(f"Server started at http://{args.host}:{args.port}")

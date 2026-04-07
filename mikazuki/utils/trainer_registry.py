@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -17,6 +18,10 @@ from mikazuki.utils.direct_trainers import (
 TrainerConfigValidator = Callable[[dict], Optional[str]]
 TrainerWarningBuilder = Callable[[dict], list[str]]
 TrainerPreflightBuilder = Callable[[dict, list[str], list[str], list[str]], Optional[dict]]
+
+
+AMD_ANIMA_LORA_TRAINER_FILE = "./scripts/stable/anima_train_network_amd.py"
+INTEL_ANIMA_LORA_TRAINER_FILE = "./scripts/stable/anima_train_network_intel.py"
 
 
 @dataclass(frozen=True)
@@ -77,18 +82,71 @@ TRAINER_REGISTRY = {
 }
 
 
+def is_rocm_amd_runtime_requested() -> bool:
+    preferred_runtime = str(os.environ.get("MIKAZUKI_PREFERRED_RUNTIME", "") or "").strip().lower()
+    if preferred_runtime == "rocm-amd":
+        return True
+    if str(os.environ.get("MIKAZUKI_ROCM_AMD_STARTUP", "") or "").strip() == "1":
+        return True
+    if str(os.environ.get("MIKAZUKI_AMD_EXPERIMENTAL", "") or "").strip() == "1":
+        return True
+    return False
+
+
+def is_intel_xpu_runtime_requested() -> bool:
+    preferred_runtime = str(os.environ.get("MIKAZUKI_PREFERRED_RUNTIME", "") or "").strip().lower()
+    if preferred_runtime in {"intel-xpu", "intel-xpu-sage"}:
+        return True
+    if str(os.environ.get("MIKAZUKI_INTEL_XPU_STARTUP", "") or "").strip() == "1":
+        return True
+    if str(os.environ.get("MIKAZUKI_INTEL_XPU_SAGE_STARTUP", "") or "").strip() == "1":
+        return True
+    if str(os.environ.get("MIKAZUKI_INTEL_XPU_EXPERIMENTAL", "") or "").strip() == "1":
+        return True
+    if str(os.environ.get("MIKAZUKI_INTEL_XPU_SAGE_EXPERIMENTAL", "") or "").strip() == "1":
+        return True
+    return False
+
+
+def resolve_trainer_file_for_training_type(training_type: str, fallback_trainer_file: str) -> str:
+    normalized = str(training_type or "").strip().lower()
+    if normalized == "anima-lora":
+        if is_rocm_amd_runtime_requested():
+            return AMD_ANIMA_LORA_TRAINER_FILE
+        if is_intel_xpu_runtime_requested():
+            return INTEL_ANIMA_LORA_TRAINER_FILE
+    return fallback_trainer_file
+
+
 def get_trainer_definition(training_type: str) -> TrainerDefinition | None:
     normalized = str(training_type or "").strip().lower()
     if not normalized:
         return None
-    return TRAINER_REGISTRY.get(normalized)
+    definition = TRAINER_REGISTRY.get(normalized)
+    if definition is None:
+        return None
+
+    resolved_trainer_file = resolve_trainer_file_for_training_type(normalized, definition.trainer_file)
+    if resolved_trainer_file == definition.trainer_file:
+        return definition
+
+    return replace(definition, trainer_file=resolved_trainer_file)
 
 
 def get_trainer_definition_by_file(trainer_file: str) -> TrainerDefinition | None:
     trainer_name = Path(str(trainer_file or "")).name.lower()
     if not trainer_name:
         return None
-    for definition in TRAINER_REGISTRY.values():
+
+    if trainer_name == Path(AMD_ANIMA_LORA_TRAINER_FILE).name.lower():
+        return replace(TRAINER_REGISTRY["anima-lora"], trainer_file=AMD_ANIMA_LORA_TRAINER_FILE)
+    if trainer_name == Path(INTEL_ANIMA_LORA_TRAINER_FILE).name.lower():
+        return replace(TRAINER_REGISTRY["anima-lora"], trainer_file=INTEL_ANIMA_LORA_TRAINER_FILE)
+
+    for training_type in TRAINER_REGISTRY:
+        definition = get_trainer_definition(training_type)
+        if definition is None:
+            continue
         if Path(definition.trainer_file).name.lower() == trainer_name:
             return definition
     return None

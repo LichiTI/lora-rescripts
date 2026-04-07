@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import sys
 from importlib import metadata
 from typing import Iterable
+
+from mikazuki.utils.amd_sageattention import is_amd_rocm_sage_runtime, probe_runtime_sageattention
+from mikazuki.utils.runtime_dependency_rules import collect_training_dependency_requirements
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name
+from mikazuki.utils.sagebwd_runtime import is_sagebwd_nvidia_runtime, probe_runtime_sagebwd
 
 
 PACKAGE_REGISTRY = {
@@ -160,18 +164,6 @@ PACKAGE_REGISTRY = {
     },
 }
 
-BUILTIN_LR_SCHEDULERS = {
-    "linear",
-    "cosine",
-    "cosine_with_restarts",
-    "polynomial",
-    "constant",
-    "constant_with_warmup",
-}
-
-CUSTOM_SCHEDULER_PREFIX = "__custom__:"
-
-
 def _short_exc_message(exc: Exception) -> str:
     message = str(exc).strip()
     if not message:
@@ -186,25 +178,6 @@ def _metadata_version(package_name: str) -> str | None:
         return None
 
 
-def _infer_environment_name() -> str:
-    executable = sys.executable.replace("\\", "/").lower()
-    if "/python_blackwell/" in executable:
-        return "blackwell"
-    if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
-        return "sageattention2"
-    if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
-        return "sageattention"
-    if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
-        return "sageattention"
-    if "/python_tageditor/" in executable or "/venv-tageditor/" in executable:
-        return "tageditor"
-    if "/venv/" in executable:
-        return "venv"
-    if "/python/" in executable:
-        return "portable"
-    return "system"
-
-
 def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict:
     package_info = PACKAGE_REGISTRY.get(
         module_name,
@@ -216,6 +189,37 @@ def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict
     )
     package_name = package_info["package_name"]
     display_name = package_info["display_name"]
+    if module_name == "sageattention" and is_sagebwd_nvidia_runtime():
+        probe = probe_runtime_sagebwd()
+        reason = "SageBwd pre-prepared runtime: current build keeps Sage/SageBwd disabled here until the official SageBwd code is released."
+        if probe.get("importable"):
+            reason = (
+                f"{reason} Probe source={probe.get('source', '') or 'unknown'}; "
+                f"native_backward={bool(probe.get('native_backward'))}."
+            )
+        return {
+            "module_name": module_name,
+            "package_name": package_name,
+            "display_name": display_name,
+            "required_by_default": bool(package_info.get("required_by_default", False)),
+            "installed": bool(probe.get("importable")),
+            "importable": bool(probe.get("importable")),
+            "version": _metadata_version(package_name),
+            "reason": reason,
+        }
+    if module_name == "sageattention" and is_amd_rocm_sage_runtime():
+        probe = probe_runtime_sageattention()
+        return {
+            "module_name": module_name,
+            "package_name": package_name,
+            "display_name": display_name,
+            "required_by_default": bool(package_info.get("required_by_default", False)),
+            "installed": bool(probe.get("importable")),
+            "importable": bool(probe.get("ready")),
+            "version": _metadata_version(package_name),
+            "reason": str(probe.get("reason", "") or ""),
+        }
+
     version = _metadata_version(package_name)
     spec = importlib.util.find_spec(module_name)
     installed = spec is not None or version is not None
@@ -257,147 +261,12 @@ def build_runtime_status_payload(module_names: Iterable[str] | None = None, prob
         if package["required_by_default"]
     )
     return {
-        "environment": _infer_environment_name(),
+        "environment": infer_runtime_environment_name(),
         "python_executable": sys.executable,
         "python_version": sys.version.split()[0],
         "required_ready": required_ready,
         "packages": packages,
     }
-
-
-def _append_requirement(target: dict[str, list[str]], module_name: str, reason: str) -> None:
-    if module_name not in target:
-        target[module_name] = []
-    if reason not in target[module_name]:
-        target[module_name].append(reason)
-
-
-def _config_flag_enabled(value) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _add_optimizer_requirement(target: dict[str, list[str]], optimizer_type: str) -> None:
-    if not optimizer_type:
-        return
-
-    normalized = optimizer_type.strip()
-    lower_name = normalized.lower()
-
-    if "." in normalized:
-        module_name = normalized.split(".", 1)[0]
-        _append_requirement(target, module_name, f"optimizer_type={normalized}")
-        return
-
-    if normalized == "Lion":
-        _append_requirement(target, "lion_pytorch", f"optimizer_type={normalized}")
-    elif normalized == "AdaFactor":
-        _append_requirement(target, "transformers", f"optimizer_type={normalized}")
-    elif lower_name.endswith("8bit"):
-        _append_requirement(target, "bitsandbytes", f"optimizer_type={normalized}")
-    elif lower_name.startswith("dadapt"):
-        _append_requirement(target, "dadaptation", f"optimizer_type={normalized}")
-    elif normalized == "Prodigy":
-        _append_requirement(target, "prodigyopt", f"optimizer_type={normalized}")
-    elif lower_name.endswith("schedulefree"):
-        _append_requirement(target, "schedulefree", f"optimizer_type={normalized}")
-
-
-def _add_scheduler_requirement(target: dict[str, list[str]], scheduler_type: str) -> None:
-    normalized = scheduler_type.strip()
-    if not normalized:
-        return
-
-    if normalized.startswith(CUSTOM_SCHEDULER_PREFIX):
-        normalized = normalized[len(CUSTOM_SCHEDULER_PREFIX):]
-
-    if normalized in BUILTIN_LR_SCHEDULERS:
-        return
-
-    if "." not in normalized:
-        return
-
-    module_name = normalized.split(".", 1)[0]
-    _append_requirement(target, module_name, f"lr_scheduler_type={normalized}")
-
-
-def _add_attention_requirement(target: dict[str, list[str]], config: dict) -> None:
-    attn_mode = str(config.get("attn_mode", "")).strip().lower()
-    if attn_mode == "sageattn":
-        _append_requirement(target, "sageattention", "attn_mode=sageattn")
-        return
-
-    if _config_flag_enabled(config.get("use_sage_attn")):
-        _append_requirement(target, "sageattention", "use_sage_attn=true")
-    if _config_flag_enabled(config.get("sageattn")):
-        _append_requirement(target, "sageattention", "sageattn=true")
-
-
-def _add_network_module_requirement(target: dict[str, list[str]], config: dict) -> None:
-    network_module = str(config.get("network_module", "")).strip()
-    if not network_module:
-        return
-
-    lower_name = network_module.lower()
-    if lower_name.startswith("lycoris."):
-        _append_requirement(target, "lycoris", f"network_module={network_module}")
-
-
-def _add_anima_requirement(target: dict[str, list[str]], config: dict) -> None:
-    model_train_type = str(config.get("model_train_type", "")).strip().lower()
-    if not model_train_type.startswith("anima"):
-        return
-
-    _append_requirement(target, "safetensors", f"model_train_type={model_train_type}")
-    _append_requirement(target, "sentencepiece", f"model_train_type={model_train_type}")
-
-
-def _add_yolo_requirement(target: dict[str, list[str]], config: dict) -> None:
-    model_train_type = str(config.get("model_train_type", "")).strip().lower()
-    if model_train_type != "yolo":
-        return
-
-    for module_name in (
-        "cv2",
-        "matplotlib",
-        "scipy",
-        "polars",
-        "requests",
-        "psutil",
-        "torchvision",
-        "PIL",
-        "yaml",
-    ):
-        _append_requirement(target, module_name, f"model_train_type={model_train_type}")
-
-
-def _add_aesthetic_requirement(target: dict[str, list[str]], config: dict) -> None:
-    model_train_type = str(config.get("model_train_type", "")).strip().lower()
-    if model_train_type != "aesthetic-scorer":
-        return
-
-    for module_name in (
-        "open_clip",
-        "timm",
-        "transformers",
-        "safetensors",
-        "PIL",
-        "tqdm",
-    ):
-        _append_requirement(target, module_name, f"model_train_type={model_train_type}")
-
-
-def collect_training_dependency_requirements(config: dict) -> dict[str, list[str]]:
-    requirements: dict[str, list[str]] = {}
-    _add_optimizer_requirement(requirements, str(config.get("optimizer_type", "")).strip())
-    _add_scheduler_requirement(requirements, str(config.get("lr_scheduler_type", "")).strip())
-    _add_attention_requirement(requirements, config)
-    _add_network_module_requirement(requirements, config)
-    _add_anima_requirement(requirements, config)
-    _add_yolo_requirement(requirements, config)
-    _add_aesthetic_requirement(requirements, config)
-    return requirements
 
 
 def analyze_training_runtime_dependencies(config: dict) -> dict:
