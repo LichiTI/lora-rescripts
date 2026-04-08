@@ -21,6 +21,8 @@ _UNSAFE_OPTIMIZER_KEYWORDS = (
     "ademamix",
 )
 
+_PYTORCH_OPTIMIZER_PREFIX = "pytorch_optimizer."
+
 _SUPPORTED_AMD_ANIMA_TRAINING_TYPES = {
     "anima-lora",
     "sdxl-lora",
@@ -203,6 +205,12 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
         return "AdamW", "AMD 实验路线未指定 optimizer_type，已自动改用 AdamW。"
 
     lowered = normalized.lower()
+    if lowered.startswith(_PYTORCH_OPTIMIZER_PREFIX):
+        return (
+            "AdamW",
+            f"AMD 实验路线当前禁用 {normalized}。Windows ROCm 运行时里的 pytorch_optimizer 会依赖不完整的 torch.distributed，已自动回退为 AdamW。",
+        )
+
     if lowered in _SAFE_OPTIMIZER_NAMES:
         return normalized, None
 
@@ -213,6 +221,28 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
         return normalized, None
 
     return "AdamW", f"AMD 实验路线暂未验证 optimizer_type={normalized}，已自动回退为 AdamW。"
+
+
+def apply_amd_runtime_optimizer_guard(config: dict) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "warnings": [],
+        "notes": [],
+        "errors": [],
+    }
+
+    if not is_amd_rocm_runtime_requested():
+        return result
+
+    if parse_boolish(config.get("use_8bit_adam")):
+        config["use_8bit_adam"] = False
+        result["warnings"].append("AMD 实验路线已自动禁用 use_8bit_adam。")
+
+    normalized_optimizer, optimizer_warning = _normalize_optimizer_type(str(config.get("optimizer_type", "") or ""))
+    config["optimizer_type"] = normalized_optimizer
+    if optimizer_warning:
+        result["warnings"].append(optimizer_warning)
+
+    return result
 
 
 def _is_anima_training_type(training_type: str) -> bool:
@@ -641,11 +671,6 @@ def apply_amd_anima_runtime_config_guard(config: dict, runtime_probe: dict[str, 
             result["warnings"].append(
                 f"AMD 实验路线当前未检测到可用的 SageAttention 构建（{sage_probe['reason'] or 'runtime probe failed'}），已自动回退为 SDPA。"
             )
-
-    normalized_optimizer, optimizer_warning = _normalize_optimizer_type(str(config.get("optimizer_type", "") or ""))
-    config["optimizer_type"] = normalized_optimizer
-    if optimizer_warning:
-        result["warnings"].append(optimizer_warning)
 
     mixed_precision = str(config.get("mixed_precision", "") or "").strip().lower()
     if not mixed_precision:

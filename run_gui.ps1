@@ -101,7 +101,9 @@ $preferIntelXpuSageRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "intel-xpu-sage
 $preferRocmAmdRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "rocm-amd"
 $preferRocmAmdSageRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "rocm-amd-sage"
 $rocmAmdRecommendedGraphicsDriverVersion = "26.2.2"
-$mainRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$baseRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers")
+$mainRuntimeModules = @($baseRuntimeModules + @("lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer"))
+$amdRuntimeModules = @($baseRuntimeModules + @("cv2"))
 $blackwellPreferredProfile = "czmahi-20250502"
 $sageAttentionPreferredProfile = "triton-v1"
 $sageAttention2PreferredProfile = "triton-v2"
@@ -811,18 +813,18 @@ function Get-SageAttentionExpectedPackageVersions {
 function Get-ROCmAmdExpectedPackageVersions {
     return @{
         PythonMinor = "3.12"
-        Torch = "2.9.1+rocm7.2.1"
-        TorchVision = "0.24.1+rocm7.2.1"
-        HipPrefix = "7.2.1"
+        TorchPrefix = "2.9.1+"
+        TorchVisionPrefix = "0.24.1+"
+        HipPrefix = "7.2"
     }
 }
 
 function Get-ROCmAmdSageExpectedPackageVersions {
     return @{
         PythonMinor = "3.12"
-        Torch = "2.9.1+rocm7.2.1"
-        TorchVision = "0.24.1+rocm7.2.1"
-        HipPrefix = "7.2.1"
+        TorchPrefix = "2.9.1+"
+        TorchVisionPrefix = "0.24.1+"
+        HipPrefix = "7.2"
     }
 }
 
@@ -831,6 +833,18 @@ function Get-IntelXpuExpectedPackageVersions {
         PythonMinors = @("3.10", "3.11")
         Torch = ""
         TorchVision = ""
+    }
+}
+
+function Get-MainRuntimeModulesForRuntime {
+    param(
+        [string]$RuntimeName
+    )
+
+    switch ($RuntimeName) {
+        "rocm-amd" { return $amdRuntimeModules }
+        "rocm-amd-sage" { return $amdRuntimeModules }
+        default { return $mainRuntimeModules }
     }
 }
 
@@ -1351,11 +1365,11 @@ function Test-BlackwellRuntimeReady {
     if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
         $issues.Add((Get-ConsoleText -Key 'issue_python_minor_mismatch' -Tokens @{ actual = $probe.python_minor; expected = $Expected.PythonMinor })) | Out-Null
     }
-    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
-        $issues.Add((Get-ConsoleText -Key 'issue_torch_mismatch' -Tokens @{ actual = $probe.torch_version; expected = $Expected.Torch })) | Out-Null
+    if ($Expected.TorchPrefix -and ([string]::IsNullOrWhiteSpace($probe.torch_version) -or -not $probe.torch_version.StartsWith($Expected.TorchPrefix))) {
+        $issues.Add((Get-ConsoleText -Key 'issue_torch_mismatch' -Tokens @{ actual = $probe.torch_version; expected = "$($Expected.TorchPrefix)*" })) | Out-Null
     }
-    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
-        $issues.Add((Get-ConsoleText -Key 'issue_torchvision_mismatch' -Tokens @{ actual = $probe.torchvision_version; expected = $Expected.TorchVision })) | Out-Null
+    if ($Expected.TorchVisionPrefix -and ([string]::IsNullOrWhiteSpace($probe.torchvision_version) -or -not $probe.torchvision_version.StartsWith($Expected.TorchVisionPrefix))) {
+        $issues.Add((Get-ConsoleText -Key 'issue_torchvision_mismatch' -Tokens @{ actual = $probe.torchvision_version; expected = "$($Expected.TorchVisionPrefix)*" })) | Out-Null
     }
     if ($Expected.Xformers -and $probe.xformers_version -ne $Expected.Xformers) {
         $issues.Add((Get-ConsoleText -Key 'issue_xformers_mismatch' -Tokens @{ actual = $probe.xformers_version; expected = $Expected.Xformers })) | Out-Null
@@ -1391,11 +1405,11 @@ function Test-SageAttentionRuntimeReady {
     if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
         $issues.Add((Get-ConsoleText -Key 'issue_python_minor_mismatch' -Tokens @{ actual = $probe.python_minor; expected = $Expected.PythonMinor })) | Out-Null
     }
-    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
-        $issues.Add((Get-ConsoleText -Key 'issue_torch_mismatch' -Tokens @{ actual = $probe.torch_version; expected = $Expected.Torch })) | Out-Null
+    if ($Expected.TorchPrefix -and ([string]::IsNullOrWhiteSpace($probe.torch_version) -or -not $probe.torch_version.StartsWith($Expected.TorchPrefix))) {
+        $issues.Add((Get-ConsoleText -Key 'issue_torch_mismatch' -Tokens @{ actual = $probe.torch_version; expected = "$($Expected.TorchPrefix)*" })) | Out-Null
     }
-    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
-        $issues.Add((Get-ConsoleText -Key 'issue_torchvision_mismatch' -Tokens @{ actual = $probe.torchvision_version; expected = $Expected.TorchVision })) | Out-Null
+    if ($Expected.TorchVisionPrefix -and ([string]::IsNullOrWhiteSpace($probe.torchvision_version) -or -not $probe.torchvision_version.StartsWith($Expected.TorchVisionPrefix))) {
+        $issues.Add((Get-ConsoleText -Key 'issue_torchvision_mismatch' -Tokens @{ actual = $probe.torchvision_version; expected = "$($Expected.TorchVisionPrefix)*" })) | Out-Null
     }
     if ($Expected.SageAttention -and $probe.sageattention_version -ne $Expected.SageAttention) {
         $issues.Add((Get-ConsoleText -Key 'issue_sageattention_mismatch' -Tokens @{ actual = $probe.sageattention_version; expected = $Expected.SageAttention })) | Out-Null
@@ -2111,10 +2125,11 @@ elseif ($runtimeName -eq "intel-xpu-sage") {
     Write-IntelXpuWindowsPrereqNotice
 }
 Set-DedicatedRuntimeCaches -RuntimeName $runtimeName -PythonExe $pythonExe
+$selectedMainRuntimeModules = Get-MainRuntimeModulesForRuntime -RuntimeName $runtimeName
 $runtimeState = Get-SelectedRuntimeValidationState `
     -PythonExe $pythonExe `
     -RuntimeName $runtimeName `
-    -MainModules $mainRuntimeModules `
+    -MainModules $selectedMainRuntimeModules `
     -BlackwellExpected $blackwellExpectedPackages `
     -SageAttentionExpected $sageAttentionExpectedPackages `
     -SageAttention2Expected $sageAttention2ExpectedPackages `
@@ -2135,10 +2150,11 @@ if (-not (Test-SelectedRuntimeBootstrapReady -DepsMarker $depsMarker -State $run
     $depsMarker = $mainPython.DepsMarker
     $runtimeName = $mainPython.Runtime
     Set-DedicatedRuntimeCaches -RuntimeName $runtimeName -PythonExe $pythonExe
+    $selectedMainRuntimeModules = Get-MainRuntimeModulesForRuntime -RuntimeName $runtimeName
     $runtimeState = Get-SelectedRuntimeValidationState `
         -PythonExe $pythonExe `
         -RuntimeName $runtimeName `
-        -MainModules $mainRuntimeModules `
+        -MainModules $selectedMainRuntimeModules `
         -BlackwellExpected $blackwellExpectedPackages `
         -SageAttentionExpected $sageAttentionExpectedPackages `
         -SageAttention2Expected $sageAttention2ExpectedPackages `

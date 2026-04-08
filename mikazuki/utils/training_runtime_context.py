@@ -6,6 +6,7 @@ from typing import Any, Optional
 from mikazuki.utils.amd_rocm_guard import (
     apply_amd_anima_runtime_config_guard,
     apply_amd_anima_topology_guard,
+    apply_amd_runtime_optimizer_guard,
 )
 from mikazuki.utils.attention_runtime_guard import apply_anima_runtime_attention_backend
 from mikazuki.utils.devices import printable_devices
@@ -112,6 +113,7 @@ def resolve_training_runtime_guard_context(
 
     apply_anima_runtime_attention_backend(config, gpu_ids)
 
+    amd_optimizer_guard = apply_amd_runtime_optimizer_guard(config)
     amd_runtime_config_guard = apply_amd_anima_runtime_config_guard(config, amd_topology_guard.get("probe"))
     intel_runtime_config_guard = apply_intel_anima_runtime_config_guard(config, intel_topology_guard.get("probe"))
 
@@ -125,6 +127,7 @@ def resolve_training_runtime_guard_context(
     for guard_result in (
         amd_topology_guard,
         intel_topology_guard,
+        amd_optimizer_guard,
         amd_runtime_config_guard,
         intel_runtime_config_guard,
     ):
@@ -145,5 +148,6 @@ def resolve_training_runtime_guard_context(
         "amd_topology_guard": amd_topology_guard,
         "intel_topology_guard": intel_topology_guard,
         "amd_runtime_config_guard": amd_runtime_config_guard,
+        "amd_optimizer_guard": amd_optimizer_guard,
         "intel_runtime_config_guard": intel_runtime_config_guard,
     }

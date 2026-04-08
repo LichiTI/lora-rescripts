@@ -18,34 +18,36 @@ $mainRequiredModules = @(
     "toml",
     "transformers",
     "diffusers",
-    "lion_pytorch",
-    "dadaptation",
-    "schedulefree",
-    "prodigyopt",
-    "prodigyplus",
-    "pytorch_optimizer",
     "cv2"
 )
 
 $expectedRuntime = @{
     PythonMinor = "3.12"
-    Torch = "2.9.1+rocm7.2.1"
-    TorchVision = "0.24.1+rocm7.2.1"
-    TorchAudio = "2.9.1+rocm7.2.1"
-    HipPrefix = "7.2.1"
+    TorchPrefix = "2.9.1+"
+    TorchVisionPrefix = "0.24.1+"
+    TorchAudioPrefix = "2.9.1+"
+    HipPrefix = "7.2"
 }
 
-$rocmWheelBase = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1"
+$rocmWheelBase = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2"
 $rocmSdkPackages = @(
-    "$rocmWheelBase/rocm_sdk_core-7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/rocm_sdk_libraries_custom-7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/rocm_sdk_devel-7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/rocm-7.2.1.tar.gz"
+    "$rocmWheelBase/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl",
+    "$rocmWheelBase/rocm_sdk_libraries_custom-7.2.0.dev0-py3-none-win_amd64.whl",
+    "$rocmWheelBase/rocm_sdk_devel-7.2.0.dev0-py3-none-win_amd64.whl",
+    "$rocmWheelBase/rocm-7.2.0.dev0.tar.gz"
 )
 $rocmTorchPackages = @(
-    "$rocmWheelBase/torch-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/torchvision-0.24.1+rocm7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/torchaudio-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl"
+    "$rocmWheelBase/torch-2.9.1+rocmsdk20260116-cp312-cp312-win_amd64.whl",
+    "$rocmWheelBase/torchvision-0.24.1+rocmsdk20260116-cp312-cp312-win_amd64.whl",
+    "$rocmWheelBase/torchaudio-2.9.1+rocmsdk20260116-cp312-cp312-win_amd64.whl"
+)
+$rocmTorchPythonDeps = @(
+    "filelock",
+    "typing-extensions>=4.10.0",
+    "sympy>=1.13.3",
+    "networkx>=2.5.1",
+    "jinja2",
+    "fsspec>=0.8.5"
 )
 $transformersConstraint = "transformers>=4.55.5,<5"
 $incompatiblePackages = @(
@@ -125,6 +127,49 @@ raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+}
+
+function Get-MissingModulesReport {
+    param (
+        [string]$PythonExe,
+        [string[]]$Modules
+    )
+
+    if (-not $Modules -or $Modules.Count -eq 0) {
+        return @()
+    }
+
+    $report = @()
+    foreach ($moduleName in $Modules) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $output = & $PythonExe -c "import importlib, sys; importlib.import_module(sys.argv[1])" $moduleName 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($exitCode -eq 0) {
+            continue
+        }
+
+        $reason = ""
+        if ($output) {
+            $reason = (($output | ForEach-Object { [string]$_ }) -join " ").Trim()
+        }
+        if ([string]::IsNullOrWhiteSpace($reason)) {
+            $reason = "python exited with code $exitCode while importing $moduleName"
+        }
+
+        $report += [pscustomobject]@{
+            module = $moduleName
+            reason = $reason
+        }
+    }
+
+    return $report
 }
 
 function Invoke-PythonJsonProbe {
@@ -257,14 +302,14 @@ function Assert-ROCmAmdRuntimeReady {
     if ($Expected.PythonMinor -and $probe.python_minor -ne $Expected.PythonMinor) {
         $issues.Add("Python minor is $($probe.python_minor), expected $($Expected.PythonMinor)") | Out-Null
     }
-    if ($Expected.Torch -and $probe.torch_version -ne $Expected.Torch) {
-        $issues.Add("Torch is $($probe.torch_version), expected $($Expected.Torch)") | Out-Null
+    if ($Expected.TorchPrefix -and ([string]::IsNullOrWhiteSpace($probe.torch_version) -or -not $probe.torch_version.StartsWith($Expected.TorchPrefix))) {
+        $issues.Add("Torch is $($probe.torch_version), expected prefix $($Expected.TorchPrefix)") | Out-Null
     }
-    if ($Expected.TorchVision -and $probe.torchvision_version -ne $Expected.TorchVision) {
-        $issues.Add("TorchVision is $($probe.torchvision_version), expected $($Expected.TorchVision)") | Out-Null
+    if ($Expected.TorchVisionPrefix -and ([string]::IsNullOrWhiteSpace($probe.torchvision_version) -or -not $probe.torchvision_version.StartsWith($Expected.TorchVisionPrefix))) {
+        $issues.Add("TorchVision is $($probe.torchvision_version), expected prefix $($Expected.TorchVisionPrefix)") | Out-Null
     }
-    if ($Expected.TorchAudio -and $probe.torchaudio_version -ne $Expected.TorchAudio) {
-        $issues.Add("TorchAudio is $($probe.torchaudio_version), expected $($Expected.TorchAudio)") | Out-Null
+    if ($Expected.TorchAudioPrefix -and ([string]::IsNullOrWhiteSpace($probe.torchaudio_version) -or -not $probe.torchaudio_version.StartsWith($Expected.TorchAudioPrefix))) {
+        $issues.Add("TorchAudio is $($probe.torchaudio_version), expected prefix $($Expected.TorchAudioPrefix)") | Out-Null
     }
     if ($Expected.HipPrefix -and ([string]::IsNullOrWhiteSpace($probe.hip_version) -or -not $probe.hip_version.StartsWith($Expected.HipPrefix))) {
         $issues.Add("HIP runtime is $($probe.hip_version), expected prefix $($Expected.HipPrefix)") | Out-Null
@@ -311,7 +356,8 @@ function New-FilteredRequirementsFile {
             $normalizedRequirement -like "sageattention*" -or
             $normalizedRequirement -like "triton*" -or
             $normalizedRequirement -like "triton-windows*" -or
-            $normalizedRequirement -like "pytorch-triton-rocm*"
+            $normalizedRequirement -like "pytorch-triton-rocm*" -or
+            $normalizedRequirement -like "pytorch-optimizer*"
         ) {
             continue
         }
@@ -354,7 +400,7 @@ if (-not (Test-Path $requirementsPath)) {
 }
 
 Write-Host -ForegroundColor Yellow "AMD 官方当前仍将 Windows ROCm 训练标记为实验/不支持状态。本安装器仅为项目实验性 AMD 训练壳提供独立运行时。"
-Write-Host -ForegroundColor Yellow "AMD 官方当前公开的 Windows PyTorch 安装页写的是：AMD 显卡驱动至少为 26.2.2。"
+Write-Host -ForegroundColor Yellow "AMD 官方当前公开的 Windows PyTorch 安装页会随 ROCm Windows 7.2 系列更新包名与版本后缀；本安装器已按当前公开索引适配。AMD 显卡驱动至少请保持在官方文档要求之上。"
 Write-Host -ForegroundColor Yellow "如果系统同时暴露了核显和独显，训练启动时请优先确认最终选中了显存更大的离散 AMD GPU。当前实验路线会默认尝试自动选这张卡。"
 Write-Host -ForegroundColor Yellow "官方参考："
 Write-Host -ForegroundColor Yellow "- https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installryz/windows/install-pytorch.html"
@@ -377,8 +423,12 @@ try {
         & $rocmAmdPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary @rocmSdkPackages
     }
 
+    Invoke-Step "Installing shared Python dependencies required by ROCm PyTorch wheels..." {
+        & $rocmAmdPython -m pip install --upgrade --no-warn-script-location --prefer-binary @rocmTorchPythonDeps
+    }
+
     Invoke-Step "Installing PyTorch ROCm wheels for AMD runtime..." {
-        & $rocmAmdPython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary @rocmTorchPackages
+        & $rocmAmdPython -m pip install --upgrade --force-reinstall --no-deps --no-warn-script-location --prefer-binary @rocmTorchPackages
     }
 
     $filteredRequirementsPath = New-FilteredRequirementsFile -SourcePath $requirementsPath
@@ -392,6 +442,20 @@ try {
     }
 
     if (-not (Test-ModulesReady -PythonExe $rocmAmdPython -Modules $mainRequiredModules)) {
+        $missingModules = @(Get-MissingModulesReport -PythonExe $rocmAmdPython -Modules $mainRequiredModules)
+        if ($missingModules.Count -gt 0) {
+            $details = $missingModules | ForEach-Object {
+                $moduleName = [string]$_.module
+                $reason = [string]$_.reason
+                if ([string]::IsNullOrWhiteSpace($reason)) {
+                    $moduleName
+                }
+                else {
+                    "${moduleName}: ${reason}"
+                }
+            }
+            throw "Project dependencies did not finish installing correctly in python_rocm_amd. Missing/broken modules: $($details -join '; ')"
+        }
         throw "Project dependencies did not finish installing correctly in python_rocm_amd. One or more required runtime modules are still missing."
     }
 

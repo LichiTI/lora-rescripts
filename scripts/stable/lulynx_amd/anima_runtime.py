@@ -265,6 +265,12 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
         return "AdamW", "AMD 实验核心未指定 optimizer_type，已自动改用 AdamW。"
 
     lowered = normalized.lower()
+    if lowered.startswith("pytorch_optimizer."):
+        return (
+            "AdamW",
+            f"AMD 实验核心当前禁用 {normalized}。Windows ROCm 运行时里的 pytorch_optimizer 会依赖不完整的 torch.distributed，已自动回退为 AdamW。",
+        )
+
     if lowered in _SAFE_OPTIMIZER_NAMES:
         return normalized, None
 

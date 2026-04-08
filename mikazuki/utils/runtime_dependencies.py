@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import sys
 from importlib import metadata
 from typing import Iterable
 
 from mikazuki.utils.amd_sageattention import is_amd_rocm_sage_runtime, probe_runtime_sageattention
 from mikazuki.utils.runtime_dependency_rules import collect_training_dependency_requirements
-from mikazuki.utils.runtime_mode import infer_runtime_environment_name
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime
 from mikazuki.utils.sagebwd_runtime import is_sagebwd_nvidia_runtime, probe_runtime_sagebwd
 
 
@@ -164,6 +165,13 @@ PACKAGE_REGISTRY = {
     },
 }
 
+
+def _is_required_by_default(module_name: str, package_info: dict, runtime_name: str) -> bool:
+    required_by_default = bool(package_info.get("required_by_default", False))
+    if module_name == "pytorch_optimizer" and is_amd_rocm_runtime(runtime_name):
+        return False
+    return required_by_default
+
 def _short_exc_message(exc: Exception) -> str:
     message = str(exc).strip()
     if not message:
@@ -179,6 +187,7 @@ def _metadata_version(package_name: str) -> str | None:
 
 
 def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict:
+    runtime_name = infer_runtime_environment_name()
     package_info = PACKAGE_REGISTRY.get(
         module_name,
         {
@@ -189,6 +198,7 @@ def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict
     )
     package_name = package_info["package_name"]
     display_name = package_info["display_name"]
+    required_by_default = _is_required_by_default(module_name, package_info, runtime_name)
     if module_name == "sageattention" and is_sagebwd_nvidia_runtime():
         probe = probe_runtime_sagebwd()
         reason = "SageBwd pre-prepared runtime: current build keeps Sage/SageBwd disabled here until the official SageBwd code is released."
@@ -201,7 +211,7 @@ def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict
             "module_name": module_name,
             "package_name": package_name,
             "display_name": display_name,
-            "required_by_default": bool(package_info.get("required_by_default", False)),
+            "required_by_default": required_by_default,
             "installed": bool(probe.get("importable")),
             "importable": bool(probe.get("importable")),
             "version": _metadata_version(package_name),
@@ -213,11 +223,26 @@ def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict
             "module_name": module_name,
             "package_name": package_name,
             "display_name": display_name,
-            "required_by_default": bool(package_info.get("required_by_default", False)),
+            "required_by_default": required_by_default,
             "installed": bool(probe.get("importable")),
             "importable": bool(probe.get("ready")),
             "version": _metadata_version(package_name),
             "reason": str(probe.get("reason", "") or ""),
+        }
+
+    if module_name == "pytorch_optimizer" and is_amd_rocm_runtime(runtime_name):
+        version = _metadata_version(package_name)
+        spec = importlib.util.find_spec(module_name)
+        installed = spec is not None or version is not None
+        return {
+            "module_name": module_name,
+            "package_name": package_name,
+            "display_name": display_name,
+            "required_by_default": required_by_default,
+            "installed": installed,
+            "importable": False,
+            "version": version,
+            "reason": "AMD Windows ROCm 运行时当前不把 pytorch-optimizer 作为可用基线；该包依赖的 torch.distributed 能力在此环境下不完整。",
         }
 
     version = _metadata_version(package_name)
@@ -241,7 +266,7 @@ def inspect_runtime_package(module_name: str, probe_import: bool = True) -> dict
         "module_name": module_name,
         "package_name": package_name,
         "display_name": display_name,
-        "required_by_default": bool(package_info.get("required_by_default", False)),
+        "required_by_default": required_by_default,
         "installed": installed,
         "importable": importable,
         "version": version,

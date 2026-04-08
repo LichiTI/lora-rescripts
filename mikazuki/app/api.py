@@ -72,6 +72,7 @@ from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
 )
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime
 from mikazuki.utils.attention_runtime_guard import (
     apply_sageattention_route_guard,
     apply_sageattention_runtime_override,
@@ -135,6 +136,17 @@ avaliable_scripts = [
 avaliable_schemas = []
 avaliable_presets = []
 
+AMD_UI_SAFE_OPTIMIZERS = (
+    "AdamW",
+    "AdaFactor",
+    "Lion",
+    "SGDNesterov",
+)
+AMD_SCHEMA_OPTIMIZER_PATTERN = re.compile(
+    r'(?P<indent>[ \t]*)optimizer_type:\s*Schema\.union\(\[(?P<body>.*?)\]\)\.default\("(?P<default>[^"]+)"\)\.description\("优化器设置"\)',
+    re.DOTALL,
+)
+
 script_positional_args = {
     "networks/convert_hunyuan_image_lora_to_comfy.py": ["src_path", "dst_path"],
     "networks/convert_anima_lora_to_comfy.py": ["src_path", "dst_path"],
@@ -142,6 +154,23 @@ script_positional_args = {
     "tools/resize_images_to_resolution.py": ["src_img_folder", "dst_img_folder"],
     "tools/convert_diffusers20_original_sd.py": ["model_to_load", "model_to_save"],
 }
+
+
+def apply_runtime_schema_overrides(content: str) -> str:
+    if not is_amd_rocm_runtime(infer_runtime_environment_name()):
+        return content
+
+    def replace_optimizer_block(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        option_indent = indent + "    "
+        options = "\n".join(f'{option_indent}"{item}",' for item in AMD_UI_SAFE_OPTIMIZERS)
+        return (
+            f'{indent}optimizer_type: Schema.union([\n'
+            f'{options}\n'
+            f'{indent}]).default("AdamW").description("优化器设置（AMD 路线仅显示已验证选项）")'
+        )
+
+    return AMD_SCHEMA_OPTIMIZER_PATTERN.sub(replace_optimizer_block, content)
 
 async def load_schemas():
     avaliable_schemas.clear()
@@ -154,7 +183,7 @@ async def load_schemas():
 
     for schema_path in schemas:
         with open(schema_path, encoding="utf-8") as f:
-            content = f.read()
+            content = apply_runtime_schema_overrides(f.read())
             avaliable_schemas.append({
                 "name": schema_path.stem,
                 "schema": content,
