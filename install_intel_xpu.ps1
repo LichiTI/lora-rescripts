@@ -19,11 +19,6 @@ $mainRequiredModules = @(
     "transformers",
     "diffusers",
     "lion_pytorch",
-    "dadaptation",
-    "schedulefree",
-    "prodigyopt",
-    "prodigyplus",
-    "pytorch_optimizer",
     "cv2"
 )
 $incompatiblePackages = @(
@@ -133,7 +128,12 @@ function New-FilteredRequirementsFile {
             $normalizedRequirement -like "sageattention*" -or
             $normalizedRequirement -like "triton*" -or
             $normalizedRequirement -like "triton-windows*" -or
-            $normalizedRequirement -like "pytorch-triton-rocm*"
+            $normalizedRequirement -like "pytorch-triton-rocm*" -or
+            $normalizedRequirement -like "dadaptation*" -or
+            $normalizedRequirement -like "schedulefree*" -or
+            $normalizedRequirement -like "prodigyopt*" -or
+            $normalizedRequirement -like "prodigy-plus-schedule-free*" -or
+            $normalizedRequirement -like "pytorch-optimizer*"
         ) {
             continue
         }

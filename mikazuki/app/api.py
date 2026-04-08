@@ -72,7 +72,7 @@ from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
 )
-from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime, is_intel_xpu_runtime
 from mikazuki.utils.attention_runtime_guard import (
     apply_sageattention_route_guard,
     apply_sageattention_runtime_override,
@@ -136,7 +136,7 @@ avaliable_scripts = [
 avaliable_schemas = []
 avaliable_presets = []
 
-AMD_UI_SAFE_OPTIMIZERS = (
+EXPERIMENTAL_SAFE_OPTIMIZERS = (
     "AdamW",
     "AdaFactor",
     "Lion",
@@ -157,17 +157,18 @@ script_positional_args = {
 
 
 def apply_runtime_schema_overrides(content: str) -> str:
-    if not is_amd_rocm_runtime(infer_runtime_environment_name()):
+    runtime_name = infer_runtime_environment_name()
+    if not (is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name)):
         return content
 
     def replace_optimizer_block(match: re.Match[str]) -> str:
         indent = match.group("indent")
         option_indent = indent + "    "
-        options = "\n".join(f'{option_indent}"{item}",' for item in AMD_UI_SAFE_OPTIMIZERS)
+        options = "\n".join(f'{option_indent}"{item}",' for item in EXPERIMENTAL_SAFE_OPTIMIZERS)
         return (
             f'{indent}optimizer_type: Schema.union([\n'
             f'{options}\n'
-            f'{indent}]).default("AdamW").description("优化器设置（AMD 路线仅显示已验证选项）")'
+            f'{indent}]).default("AdamW").description("优化器设置（实验路线仅显示已验证选项）")'
         )
 
     return AMD_SCHEMA_OPTIMIZER_PATTERN.sub(replace_optimizer_block, content)

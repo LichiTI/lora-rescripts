@@ -19,6 +19,8 @@ _UNSAFE_OPTIMIZER_KEYWORDS = (
     "ademamix",
 )
 
+_PYTORCH_OPTIMIZER_PREFIX = "pytorch_optimizer."
+
 _SUPPORTED_INTEL_ANIMA_TRAINING_TYPES = {
     "anima-lora",
     "sdxl-lora",
@@ -142,6 +144,12 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
         return "AdamW", "Intel XPU 实验路线未指定 optimizer_type，已自动改用 AdamW。"
 
     lowered = normalized.lower()
+    if lowered.startswith(_PYTORCH_OPTIMIZER_PREFIX):
+        return (
+            "AdamW",
+            f"Intel XPU 实验路线当前暂不启用 {normalized}，已自动回退为 AdamW。",
+        )
+
     if lowered in _SAFE_OPTIMIZER_NAMES:
         return normalized, None
 

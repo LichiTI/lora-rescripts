@@ -20,11 +20,6 @@ $mainRequiredModules = @(
     "transformers",
     "diffusers",
     "lion_pytorch",
-    "dadaptation",
-    "schedulefree",
-    "prodigyopt",
-    "prodigyplus",
-    "pytorch_optimizer",
     "cv2",
     "sageattention"
 )
@@ -134,7 +129,12 @@ function New-FilteredRequirementsFile {
             $normalizedRequirement -like "xformers*" -or
             $normalizedRequirement -like "triton-windows*" -or
             $normalizedRequirement -like "pytorch-triton-rocm*" -or
-            $normalizedRequirement -like "intel-extension-for-pytorch*"
+            $normalizedRequirement -like "intel-extension-for-pytorch*" -or
+            $normalizedRequirement -like "dadaptation*" -or
+            $normalizedRequirement -like "schedulefree*" -or
+            $normalizedRequirement -like "prodigyopt*" -or
+            $normalizedRequirement -like "prodigy-plus-schedule-free*" -or
+            $normalizedRequirement -like "pytorch-optimizer*"
         ) {
             continue
         }

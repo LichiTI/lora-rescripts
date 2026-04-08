@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime, is_intel_xpu_runtime
 
 
 BUILTIN_LR_SCHEDULERS = {
@@ -34,7 +34,8 @@ def add_optimizer_requirement(target: dict[str, list[str]], optimizer_type: str)
 
     normalized = optimizer_type.strip()
     lower_name = normalized.lower()
-    if is_amd_rocm_runtime(infer_runtime_environment_name()) and lower_name.startswith("pytorch_optimizer."):
+    runtime_name = infer_runtime_environment_name()
+    if (is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name)) and lower_name.startswith("pytorch_optimizer."):
         return
 
     if "." in normalized:

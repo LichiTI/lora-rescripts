@@ -8,7 +8,7 @@ from typing import Iterable
 
 from mikazuki.utils.amd_sageattention import is_amd_rocm_sage_runtime, probe_runtime_sageattention
 from mikazuki.utils.runtime_dependency_rules import collect_training_dependency_requirements
-from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime, is_intel_xpu_runtime
 from mikazuki.utils.sagebwd_runtime import is_sagebwd_nvidia_runtime, probe_runtime_sagebwd
 
 
@@ -169,6 +169,8 @@ PACKAGE_REGISTRY = {
 def _is_required_by_default(module_name: str, package_info: dict, runtime_name: str) -> bool:
     required_by_default = bool(package_info.get("required_by_default", False))
     if module_name == "pytorch_optimizer" and is_amd_rocm_runtime(runtime_name):
+        return False
+    if module_name in {"dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer"} and is_intel_xpu_runtime(runtime_name):
         return False
     return required_by_default
 

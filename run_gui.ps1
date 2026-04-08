@@ -103,6 +103,8 @@ $preferRocmAmdSageRuntime = $Env:MIKAZUKI_PREFERRED_RUNTIME -eq "rocm-amd-sage"
 $rocmAmdRecommendedGraphicsDriverVersion = "26.2.2"
 $baseRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers")
 $mainRuntimeModules = @($baseRuntimeModules + @("lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer"))
+$intelRuntimeModules = @($baseRuntimeModules + @("lion_pytorch", "cv2"))
+$intelSageRuntimeModules = @($intelRuntimeModules + @("sageattention"))
 $amdRuntimeModules = @($baseRuntimeModules + @("cv2"))
 $blackwellPreferredProfile = "czmahi-20250502"
 $sageAttentionPreferredProfile = "triton-v1"
@@ -842,6 +844,8 @@ function Get-MainRuntimeModulesForRuntime {
     )
 
     switch ($RuntimeName) {
+        "intel-xpu" { return $intelRuntimeModules }
+        "intel-xpu-sage" { return $intelSageRuntimeModules }
         "rocm-amd" { return $amdRuntimeModules }
         "rocm-amd-sage" { return $amdRuntimeModules }
         default { return $mainRuntimeModules }
