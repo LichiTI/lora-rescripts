@@ -7,7 +7,11 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$intelRuntimeDir = Join-Path $repoRoot "python_xpu_intel"
+$null = . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$intelRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "intel-xpu"
+$intelRuntimeDirName = $intelRuntimeInfo.DirectoryName
+$intelRuntimeDir = $intelRuntimeInfo.DirectoryPath
 $intelPython = Join-Path $intelRuntimeDir "python.exe"
 $intelMarker = Join-Path $intelRuntimeDir ".deps_installed"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
@@ -90,13 +94,26 @@ function Test-ModulesReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $PythonExe -c "import importlib, sys; failed=[];
-for name in sys.argv[1:]:
+        & $PythonExe -c "import importlib, sys;
+repo_root = sys.argv[1]
+if repo_root and repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+try:
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+except Exception:
+    install_experimental_runtime_import_guards = None
+if install_experimental_runtime_import_guards is not None:
+    try:
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
+failed=[];
+for name in sys.argv[2:]:
     try:
         importlib.import_module(name)
     except Exception:
         failed.append(name)
-raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
+raise SystemExit(1 if failed else 0)" $repoRoot @Modules 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     }
     finally {
@@ -229,10 +246,10 @@ if (-not (Test-Path $intelPython)) {
 }
 
 if (-not (Test-PipReady -PythonExe $intelPython)) {
-    Write-Host -ForegroundColor Yellow "python_xpu_intel 尚未初始化，正在运行 setup_embeddable_python.bat..."
-    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_xpu_intel
+    Write-Host -ForegroundColor Yellow "$intelRuntimeDirName 尚未初始化，正在运行 setup_embeddable_python.bat..."
+    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $intelRuntimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $intelPython)) {
-        throw "python_xpu_intel 初始化失败，缺少可用的 pip。"
+        throw "$intelRuntimeDirName 初始化失败，缺少可用的 pip。"
     }
 }
 
@@ -275,7 +292,7 @@ if (-not (Test-ModulesReady -PythonExe $intelPython -Modules $mainRequiredModule
 Invoke-Step -Message "Verifying Intel XPU runtime / 校验 Intel XPU 运行时" -Action {
     $probe = Invoke-PythonRuntimeProbe -PythonExe $intelPython
     if (-not $probe) {
-        throw "无法读取 python_xpu_intel 运行时信息。"
+        throw "无法读取 $intelRuntimeDirName 运行时信息。"
     }
     if ($expectedRuntime.PythonMinors -and $expectedRuntime.PythonMinors.Count -gt 0 -and $probe.python_minor -notin $expectedRuntime.PythonMinors) {
         throw "Intel XPU runtime uses Python $($probe.python_minor), but the current supported target is $($expectedRuntime.PythonMinors -join '/')."

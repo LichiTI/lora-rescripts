@@ -229,6 +229,7 @@ Schema.intersect([
             Schema.object({
                 model_train_type: Schema.const("sdxl-finetune").required(),
                 sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+                flashattn: Schema.boolean().default(false).description("启用 FlashAttention 2（实验性，需要 FlashAttention 运行时）"),
             }),
             Schema.object({}),
         ]),

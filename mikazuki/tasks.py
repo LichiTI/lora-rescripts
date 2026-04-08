@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import threading
 import uuid
 from enum import Enum
@@ -36,6 +37,7 @@ class Task:
         self.task_id = task_id
         self.lock = threading.Lock()
         self.output_lines: list[str] = []
+        self.output_total = 0
         self.max_output_lines = 5000
         self.command = command
         self.status = TaskStatus.CREATED
@@ -43,18 +45,106 @@ class Task:
         self.cwd = str(Path(cwd).resolve()) if cwd else str(base_dir_path())
         self._output_thread = None
         self.process = None
+        self._last_output_was_progress = False
+        self._console_progress_active = False
+        self._console_progress_width = 0
+        self._last_console_progress_line = ""
 
-    def _append_output_line(self, line: str):
+    def _append_output_line(self, line: str, *, progress: bool = False):
         with self.lock:
-            self.output_lines.append(line)
+            # tqdm and similar tools redraw the same console line via carriage returns.
+            # Keep the latest progress snapshot visible without appending thousands of lines.
+            if progress and self._last_output_was_progress and self.output_lines:
+                self.output_lines[-1] = line
+            elif not progress and self._last_output_was_progress and self.output_lines and self.output_lines[-1] == line:
+                pass
+            else:
+                self.output_lines.append(line)
             if len(self.output_lines) > self.max_output_lines:
                 self.output_lines = self.output_lines[-self.max_output_lines :]
+            self.output_total += 1
+            self._last_output_was_progress = progress
 
     def _decode_output(self, raw: bytes) -> str:
         try:
             return raw.decode("utf-8")
         except UnicodeDecodeError:
             return raw.decode("gbk", errors="replace")
+
+    def _emit_console_line(self, line: str, *, progress: bool = False):
+        stdout = sys.stdout
+        is_tty = bool(stdout and hasattr(stdout, "isatty") and stdout.isatty())
+
+        if progress:
+            if is_tty:
+                clear_padding = ""
+                if self._console_progress_width > len(line):
+                    clear_padding = " " * (self._console_progress_width - len(line))
+                stdout.write("\r" + line + clear_padding)
+                stdout.flush()
+                self._console_progress_width = max(self._console_progress_width, len(line))
+            else:
+                if line != self._last_console_progress_line:
+                    print(line, flush=True)
+                    self._last_console_progress_line = line
+            self._console_progress_active = True
+            return
+
+        if self._console_progress_active and is_tty:
+            stdout.write("\n")
+            stdout.flush()
+
+        print(line, flush=True)
+        self._console_progress_active = False
+        self._console_progress_width = 0
+        self._last_console_progress_line = ""
+
+    def _finalize_console_progress(self):
+        stdout = sys.stdout
+        is_tty = bool(stdout and hasattr(stdout, "isatty") and stdout.isatty())
+        if self._console_progress_active and is_tty:
+            stdout.write("\n")
+            stdout.flush()
+        self._console_progress_active = False
+        self._console_progress_width = 0
+        self._last_console_progress_line = ""
+
+    def _consume_output_buffer(self, buf: bytes) -> bytes:
+        while True:
+            cr_idx = buf.find(b"\r")
+            lf_idx = buf.find(b"\n")
+            if cr_idx == -1 and lf_idx == -1:
+                return buf
+
+            if cr_idx == -1:
+                idx = lf_idx
+            elif lf_idx == -1:
+                idx = cr_idx
+            else:
+                idx = min(cr_idx, lf_idx)
+
+            is_progress = buf[idx : idx + 1] == b"\r"
+            delimiter_length = 1
+            if is_progress and idx + 1 < len(buf) and buf[idx + 1 : idx + 2] == b"\n":
+                is_progress = False
+                delimiter_length = 2
+
+            raw_line = buf[:idx]
+            buf = buf[idx + delimiter_length :]
+
+            line = self._decode_output(raw_line).rstrip()
+            if not line:
+                continue
+            self._emit_console_line(line, progress=is_progress)
+            self._append_output_line(line, progress=is_progress)
+
+    def get_output_snapshot(self, tail: int | None = None) -> tuple[list[str], int]:
+        with self.lock:
+            if tail is None:
+                lines = list(self.output_lines)
+            else:
+                lines = list(self.output_lines[-tail:])
+            return lines, self.output_total
 
     def _read_output(self):
         if self.process is None or self.process.stdout is None:
@@ -70,29 +160,14 @@ class Task:
             if not chunk:
                 break
             buf += chunk
-            while b"\n" in buf:
-                idx = buf.find(b"\n")
-                raw_line = buf[:idx]
-                buf = buf[idx + 1 :]
-                if raw_line.endswith(b"\r"):
-                    raw_line = raw_line[:-1]
-                if b"\r" in raw_line:
-                    raw_line = raw_line.rsplit(b"\r", 1)[-1]
-                line = self._decode_output(raw_line).rstrip()
-                if not line:
-                    continue
-                print(line, flush=True)
-                self._append_output_line(line)
+            buf = self._consume_output_buffer(buf)
 
         if buf:
-            if buf.endswith(b"\r"):
-                buf = buf[:-1]
-            if b"\r" in buf:
-                buf = buf.rsplit(b"\r", 1)[-1]
             line = self._decode_output(buf).rstrip()
             if line:
-                print(line, flush=True)
+                self._emit_console_line(line)
                 self._append_output_line(line)
+        self._finalize_console_progress()
 
     def _join_output_thread(self):
         if self._output_thread is not None:
@@ -125,7 +200,8 @@ class Task:
         retcode = self.process.poll()
         if self.status == TaskStatus.RUNNING:
             self.status = TaskStatus.FINISHED
-        stdout = "\n".join(self.output_lines)
+        stdout_lines, _ = self.get_output_snapshot()
+        stdout = "\n".join(stdout_lines)
         return CompletedProcess(self.process.args, retcode, stdout, None)
 
     def wait(self):

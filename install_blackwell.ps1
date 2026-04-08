@@ -13,8 +13,13 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$blackwellPython = Join-Path $repoRoot "python_blackwell\python.exe"
-$blackwellMarker = Join-Path $repoRoot "python_blackwell\.deps_installed"
+. (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$blackwellRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "blackwell"
+$blackwellRuntimeDirName = $blackwellRuntimeInfo.DirectoryName
+$blackwellRuntimeDir = $blackwellRuntimeInfo.DirectoryPath
+$blackwellPython = Join-Path $blackwellRuntimeDir "python.exe"
+$blackwellMarker = Join-Path $blackwellRuntimeDir ".deps_installed"
 $mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
@@ -198,7 +203,7 @@ function Assert-BlackwellRuntimeReady {
 
     $probe = Get-BlackwellRuntimeProbe -PythonExe $PythonExe
     if (-not $probe) {
-        throw "Could not probe python_blackwell runtime details after installation."
+        throw "Could not probe $blackwellRuntimeDirName runtime details after installation."
     }
 
     $issues = New-Object System.Collections.Generic.List[string]
@@ -297,16 +302,17 @@ Expected:
 - $blackwellPython
 
 Recommended fix:
-1. Extract a Python 3.12 embeddable package into .\python_blackwell
+1. Extract a Python 3.12 embeddable package into:
+   - $blackwellRuntimeDir
 2. Run install_blackwell.ps1 again
 "@
 }
 
 if (-not (Test-PipReady -PythonExe $blackwellPython)) {
-    Write-Host -ForegroundColor Yellow "python_blackwell is not initialized yet. Running setup_embeddable_python.bat..."
-    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_blackwell
+    Write-Host -ForegroundColor Yellow "$blackwellRuntimeDirName is not initialized yet. Running setup_embeddable_python.bat..."
+    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $blackwellRuntimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $blackwellPython)) {
-        throw "Failed to initialize python_blackwell."
+        throw "Failed to initialize $blackwellRuntimeDirName."
     }
 }
 
@@ -363,12 +369,12 @@ if ($optionalTorchaudioArgs) {
     } "Optional torchaudio installation failed. This does not block SD training/inference in this project."
 }
 
-Invoke-Step "Installing project dependencies into python_blackwell..." {
+Invoke-Step "Installing project dependencies into $blackwellRuntimeDirName..." {
     & $blackwellPython -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
 }
 
 if (-not (Test-ModulesReady -PythonExe $blackwellPython -Modules $mainRequiredModules)) {
-    throw "Project dependencies did not finish installing correctly in python_blackwell. One or more required runtime modules are still missing."
+    throw "Project dependencies did not finish installing correctly in $blackwellRuntimeDirName. One or more required runtime modules are still missing."
 }
 
 if (-not $SkipXformers) {

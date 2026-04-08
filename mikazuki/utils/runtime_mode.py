@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import Mapping
 
+from mikazuki.utils.runtime_paths import executable_matches_runtime
 
-RUNTIME_ENVIRONMENT_ALIASES = {
-    "sageattention2": "sageattention",
-    "sageattention-blackwell": "sageattention",
-}
+
+RUNTIME_ENVIRONMENT_ALIASES = {}
 
 INTEL_XPU_RUNTIME_NAMES = {"intel-xpu", "intel-xpu-sage"}
 AMD_ROCM_RUNTIME_NAMES = {"rocm-amd", "rocm-amd-sage"}
-SAGEATTENTION_RUNTIME_NAMES = {"sageattention", "sageattention2", "sageattention-blackwell"}
+SAGEATTENTION_RUNTIME_NAMES = {"sageattention"}
 
 
 def normalize_runtime_name(runtime_name: str) -> str:
@@ -21,31 +19,27 @@ def normalize_runtime_name(runtime_name: str) -> str:
 
 
 def infer_runtime_environment_name(executable: str | None = None) -> str:
-    normalized_executable = str(executable or sys.executable).replace("\\", "/").lower()
-
-    if "/python_sagebwd_nvidia/" in normalized_executable or "/python-sagebwd-nvidia/" in normalized_executable:
+    if executable_matches_runtime(executable, "sagebwd-nvidia"):
         return "sagebwd-nvidia"
-    if "/python_xpu_intel_sage/" in normalized_executable or "/python-xpu-intel-sage/" in normalized_executable:
+    if executable_matches_runtime(executable, "flashattention"):
+        return "flashattention"
+    if executable_matches_runtime(executable, "intel-xpu-sage"):
         return "intel-xpu-sage"
-    if "/python_xpu_intel/" in normalized_executable or "/python-xpu-intel/" in normalized_executable:
+    if executable_matches_runtime(executable, "intel-xpu"):
         return "intel-xpu"
-    if "/python_rocm_amd_sage/" in normalized_executable or "/python-rocm-amd-sage/" in normalized_executable:
+    if executable_matches_runtime(executable, "rocm-amd-sage"):
         return "rocm-amd-sage"
-    if "/python_rocm_amd/" in normalized_executable or "/python-rocm-amd/" in normalized_executable:
+    if executable_matches_runtime(executable, "rocm-amd"):
         return "rocm-amd"
-    if "/python_blackwell/" in normalized_executable:
+    if executable_matches_runtime(executable, "blackwell"):
         return "blackwell"
-    if "/python-sageattention-latest/" in normalized_executable or "/python_sageattention_latest/" in normalized_executable:
-        return "sageattention2"
-    if "/python-sageattention-blackwell/" in normalized_executable or "/python_sageattention_blackwell/" in normalized_executable:
-        return "sageattention-blackwell"
-    if "/python-sageattention/" in normalized_executable or "/python_sageattention/" in normalized_executable:
+    if executable_matches_runtime(executable, "sageattention"):
         return "sageattention"
-    if "/python_tageditor/" in normalized_executable or "/venv-tageditor/" in normalized_executable:
+    if executable_matches_runtime(executable, "tageditor") or executable_matches_runtime(executable, "venv-tageditor"):
         return "tageditor"
-    if "/venv/" in normalized_executable:
+    if executable_matches_runtime(executable, "venv"):
         return "venv"
-    if "/python/" in normalized_executable:
+    if executable_matches_runtime(executable, "portable"):
         return "portable"
     return "system"
 
@@ -55,10 +49,9 @@ def infer_attention_runtime_mode(environ: Mapping[str, str] | None = None, execu
 
     if str(env.get("MIKAZUKI_SAGEBWD_STARTUP", "") or "").strip() == "1":
         return "sagebwd-nvidia"
-    if (
-        str(env.get("MIKAZUKI_SAGEATTENTION_STARTUP", "") or "").strip() == "1"
-        or str(env.get("MIKAZUKI_SAGEATTENTION2_STARTUP", "") or "").strip() == "1"
-    ):
+    if str(env.get("MIKAZUKI_FLASHATTENTION_STARTUP", "") or "").strip() == "1":
+        return "flashattention"
+    if str(env.get("MIKAZUKI_SAGEATTENTION_STARTUP", "") or "").strip() == "1":
         return "sageattention"
     if str(env.get("MIKAZUKI_BLACKWELL_STARTUP", "") or "").strip() == "1":
         return "blackwell"

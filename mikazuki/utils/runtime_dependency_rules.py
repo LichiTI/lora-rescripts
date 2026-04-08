@@ -37,6 +37,15 @@ def add_optimizer_requirement(target: dict[str, list[str]], optimizer_type: str)
     runtime_name = infer_runtime_environment_name()
     if (is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name)) and lower_name.startswith("pytorch_optimizer."):
         return
+    if (
+        is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name)
+    ) and (
+        lower_name.startswith("bitsandbytes.")
+        or "8bit" in lower_name
+        or "paged" in lower_name
+        or "ademamix" in lower_name
+    ):
+        return
 
     if "." in normalized:
         module_name = normalized.split(".", 1)[0]
@@ -74,10 +83,17 @@ def add_scheduler_requirement(target: dict[str, list[str]], scheduler_type: str)
 
 def add_attention_requirement(target: dict[str, list[str]], config: dict) -> None:
     attn_mode = str(config.get("attn_mode", "")).strip().lower()
+    if attn_mode == "flash":
+        append_requirement(target, "flash_attn", "attn_mode=flash")
+        return
     if attn_mode == "sageattn":
         append_requirement(target, "sageattention", "attn_mode=sageattn")
         return
 
+    if config_flag_enabled(config.get("use_flash_attn")):
+        append_requirement(target, "flash_attn", "use_flash_attn=true")
+    if config_flag_enabled(config.get("flashattn")):
+        append_requirement(target, "flash_attn", "flashattn=true")
     if config_flag_enabled(config.get("use_sage_attn")):
         append_requirement(target, "sageattention", "use_sage_attn=true")
     if config_flag_enabled(config.get("sageattn")):

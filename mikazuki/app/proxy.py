@@ -40,6 +40,10 @@ TAGEDITOR_UNAVAILABLE_MESSAGES = {
         "Tag Editor dependencies are not installed. Run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first. If main Python is 3.13, prepare a separate python_tageditor or venv-tageditor (Python 3.12) environment.\n"
         "标签编辑器依赖尚未安装。请先运行 install_tageditor.ps1（Windows）或 install_tageditor.sh（Linux）。如果主环境是 Python 3.13，请准备单独的 python_tageditor 或 venv-tageditor（Python 3.12）环境。"
     ),
+    "dedicated_runtime_required": (
+        "Tag Editor is not auto-started in AMD ROCm / Intel XPU experimental runtimes. Prepare a separate python_tageditor or venv-tageditor with install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) if you need it.\n"
+        "AMD ROCm / Intel XPU 实验运行时下不会自动启动标签编辑器。如需使用，请先运行 install_tageditor.ps1（Windows）或 install_tageditor.sh（Linux），准备单独的 python_tageditor 或 venv-tageditor。"
+    ),
     "starting": (
         "Tag Editor is still starting or failed to start. If this is the first launch, wait a moment and refresh.\n"
         "标签编辑器正在启动，或者启动失败。如果是第一次启动，请稍等片刻后刷新页面。"
@@ -113,6 +117,7 @@ def build_tageditor_progress_page() -> str:
       ready: "Ready",
       failed: "Startup failed",
       missing_dependencies: "Dependencies missing",
+      dedicated_runtime_required: "Dedicated runtime required",
       missing_launcher: "Launcher missing",
       disabled: "Disabled"
     };

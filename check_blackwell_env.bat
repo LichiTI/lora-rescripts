@@ -9,10 +9,12 @@ echo.
 
 cd /d "%~dp0"
 
-set "PYTHON_EXE=%~dp0python_blackwell\python.exe"
+set "PYTHON_EXE=%~dp0env\python_blackwell\python.exe"
+
+if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%~dp0python_blackwell\python.exe"
 
 if not exist "%PYTHON_EXE%" (
-    echo [ERROR] python_blackwell not found.
+    echo [ERROR] env\python_blackwell or python_blackwell not found.
     echo Expected: %PYTHON_EXE%
     echo.
     pause

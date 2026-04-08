@@ -7,7 +7,11 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$rocmAmdRuntimeDir = Join-Path $repoRoot "python_rocm_amd"
+$null = . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$rocmAmdRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "rocm-amd"
+$rocmAmdRuntimeDirName = $rocmAmdRuntimeInfo.DirectoryName
+$rocmAmdRuntimeDir = $rocmAmdRuntimeInfo.DirectoryPath
 $rocmAmdPython = Join-Path $rocmAmdRuntimeDir "python.exe"
 $rocmAmdMarker = Join-Path $rocmAmdRuntimeDir ".deps_installed"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
@@ -115,13 +119,26 @@ function Test-ModulesReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $PythonExe -c "import importlib, sys; failed=[];
-for name in sys.argv[1:]:
+        & $PythonExe -c "import importlib, sys;
+repo_root = sys.argv[1]
+if repo_root and repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+try:
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+except Exception:
+    install_experimental_runtime_import_guards = None
+if install_experimental_runtime_import_guards is not None:
+    try:
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
+failed=[];
+for name in sys.argv[2:]:
     try:
         importlib.import_module(name)
     except Exception:
         failed.append(name)
-raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
+raise SystemExit(1 if failed else 0)" $repoRoot @Modules 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     }
     finally {
@@ -144,7 +161,20 @@ function Get-MissingModulesReport {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            $output = & $PythonExe -c "import importlib, sys; importlib.import_module(sys.argv[1])" $moduleName 2>&1
+            $output = & $PythonExe -c "import importlib, sys;
+repo_root = sys.argv[1]
+if repo_root and repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+try:
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+except Exception:
+    install_experimental_runtime_import_guards = None
+if install_experimental_runtime_import_guards is not None:
+    try:
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
+importlib.import_module(sys.argv[2])" $repoRoot $moduleName 2>&1
             $exitCode = $LASTEXITCODE
         }
         finally {
@@ -295,7 +325,7 @@ function Assert-ROCmAmdRuntimeReady {
 
     $probe = Get-ROCmAmdRuntimeProbe -PythonExe $PythonExe
     if (-not $probe) {
-        throw "Could not probe python_rocm_amd runtime details after installation."
+        throw "Could not probe $rocmAmdRuntimeDirName runtime details after installation."
     }
 
     $issues = New-Object System.Collections.Generic.List[string]
@@ -374,13 +404,13 @@ function New-FilteredRequirementsFile {
 
 if (-not (Test-Path $rocmAmdPython)) {
     throw @"
-python_rocm_amd\python.exe was not found.
+$rocmAmdRuntimeDirName\python.exe was not found.
 
 Expected path:
 - $rocmAmdPython
 
 Recommended fix:
-1. Prepare a dedicated Python 3.12 runtime in .\python_rocm_amd
+1. Prepare a dedicated Python 3.12 runtime in $rocmAmdRuntimeDir
 2. Rerun this installer
 "@
 }
@@ -388,10 +418,10 @@ Recommended fix:
 Set-Location $repoRoot
 
 if (-not (Test-PipReady -PythonExe $rocmAmdPython)) {
-    Write-Host -ForegroundColor Yellow "python_rocm_amd 尚未完成 pip 初始化，正在尝试自动修复。"
-    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_rocm_amd
+    Write-Host -ForegroundColor Yellow "$rocmAmdRuntimeDirName 尚未完成 pip 初始化，正在尝试自动修复。"
+    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $rocmAmdRuntimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $rocmAmdPython)) {
-        throw "python_rocm_amd pip 初始化失败，请先修复该运行时。"
+        throw "$rocmAmdRuntimeDirName pip 初始化失败，请先修复该运行时。"
     }
 }
 
@@ -454,9 +484,9 @@ try {
                     "${moduleName}: ${reason}"
                 }
             }
-            throw "Project dependencies did not finish installing correctly in python_rocm_amd. Missing/broken modules: $($details -join '; ')"
+            throw "Project dependencies did not finish installing correctly in $rocmAmdRuntimeDirName. Missing/broken modules: $($details -join '; ')"
         }
-        throw "Project dependencies did not finish installing correctly in python_rocm_amd. One or more required runtime modules are still missing."
+        throw "Project dependencies did not finish installing correctly in $rocmAmdRuntimeDirName. One or more required runtime modules are still missing."
     }
 
     Assert-ROCmAmdRuntimeReady -PythonExe $rocmAmdPython -Expected $expectedRuntime

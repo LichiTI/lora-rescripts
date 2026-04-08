@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import json
 import os
 import subprocess
@@ -8,17 +9,13 @@ import sys
 import threading
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from mikazuki import launch_utils
 from mikazuki.utils.runtime_dependencies import analyze_training_runtime_dependencies
-from scripts.stable.lulynx.aesthetic_fusion.inference import (
-    DEFAULT_IMAGE_EXTENSIONS,
-    TARGETS,
-    score_bucket,
-)
 
 
 def _now() -> str:
@@ -73,6 +70,49 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except Exception:
         return None
+
+
+@lru_cache(maxsize=1)
+def _load_aesthetic_inference_symbols():
+    repo_root = str(launch_utils.base_dir_path())
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    try:
+        module = importlib.import_module("scripts.stable.lulynx.aesthetic_fusion.inference")
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "Aesthetic inference helper is unavailable because the local scripts package could not be imported. "
+            "Please confirm the release package contains ./scripts/stable/lulynx/aesthetic_fusion/inference.py. "
+            "/ 美学推理模块当前不可用：无法导入本地 scripts 包，请确认发行包内包含 "
+            "./scripts/stable/lulynx/aesthetic_fusion/inference.py。"
+        ) from exc
+
+    default_image_extensions = getattr(module, "DEFAULT_IMAGE_EXTENSIONS", None)
+    targets = getattr(module, "TARGETS", None)
+    score_bucket = getattr(module, "score_bucket", None)
+    if default_image_extensions is None or targets is None or not callable(score_bucket):
+        raise ValueError(
+            "Aesthetic inference symbols are incomplete in the current build. "
+            "/ 当前发行包中的美学推理模块缺少必需符号。"
+        )
+
+    return tuple(default_image_extensions), tuple(targets), score_bucket
+
+
+def _get_aesthetic_targets() -> tuple[str, ...]:
+    _, targets, _ = _load_aesthetic_inference_symbols()
+    return targets
+
+
+def _get_aesthetic_default_image_extensions() -> tuple[str, ...]:
+    default_image_extensions, _, _ = _load_aesthetic_inference_symbols()
+    return default_image_extensions
+
+
+def _score_bucket(score: float | None):
+    _, _, score_bucket = _load_aesthetic_inference_symbols()
+    return score_bucket(score)
 
 
 class AestheticInferManager:
@@ -185,12 +225,13 @@ class AestheticInferManager:
         if organize_mode not in {"copy", "move", "hardlink", "symlink"}:
             return False, f"organize_mode 不支持: {organize_mode}", None
 
-        organize_dimensions = [item.lower() for item in _normalize_text_list(payload.get("organize_dimensions"), list(TARGETS))]
-        invalid_dimensions = [item for item in organize_dimensions if item not in TARGETS]
+        targets = _get_aesthetic_targets()
+        organize_dimensions = [item.lower() for item in _normalize_text_list(payload.get("organize_dimensions"), list(targets))]
+        invalid_dimensions = [item for item in organize_dimensions if item not in targets]
         if invalid_dimensions:
             return False, f"organize_dimensions 包含非法项: {invalid_dimensions}", None
 
-        image_extensions = _normalize_text_list(payload.get("image_extensions"), list(DEFAULT_IMAGE_EXTENSIONS))
+        image_extensions = _normalize_text_list(payload.get("image_extensions"), list(_get_aesthetic_default_image_extensions()))
         device = _normalize_text(payload.get("device")) or ""
 
         return True, "", {
@@ -215,7 +256,10 @@ class AestheticInferManager:
         }
 
     def start(self, payload: dict[str, Any]) -> tuple[bool, str, dict[str, Any] | None]:
-        ok, message, normalized = self._normalize_start_payload(payload)
+        try:
+            ok, message, normalized = self._normalize_start_payload(payload)
+        except (RuntimeError, ValueError) as exc:
+            return False, str(exc), None
         if not ok or normalized is None:
             return False, message, None
 
@@ -433,7 +477,7 @@ class AestheticInferManager:
 
     def _format_record(self, row: dict[str, Any]) -> dict[str, Any]:
         formatted = dict(row)
-        for key in TARGETS:
+        for key in _get_aesthetic_targets():
             formatted[key] = _safe_float(formatted.get(key))
         formatted["in_domain_prob"] = _safe_float(formatted.get("in_domain_prob"))
         formatted["in_domain_pred"] = _safe_int(formatted.get("in_domain_pred"))
@@ -451,14 +495,14 @@ class AestheticInferManager:
             "color": "色彩",
             "sexual": "色情",
         }
-        for key in TARGETS:
+        for key in _get_aesthetic_targets():
             score = formatted.get(key)
             score_heads.append(
                 {
                     "key": key,
                     "name": names.get(key, key),
                     "score": score,
-                    "bucket": score_bucket(score) if score is not None else None,
+                "bucket": _score_bucket(score) if score is not None else None,
                 }
             )
         formatted["score_heads"] = score_heads

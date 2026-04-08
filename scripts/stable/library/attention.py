@@ -8,6 +8,7 @@ import sys
 import torch
 from typing import Optional, Union
 from library.sageattention_compat import call_sageattention, get_runtime_sageattention_source, get_runtime_sageattention_symbols
+from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,11 @@ def _warn_once(message: str) -> None:
     logger.warning(message)
 
 
+@lru_cache(maxsize=16)
+def _info_once(message: str) -> None:
+    logger.info(message)
+
+
 def _short_exc_message(exc: Exception) -> str:
     message = str(exc).strip()
     if not message:
@@ -107,17 +113,13 @@ def _short_exc_message(exc: Exception) -> str:
 
 def _get_tensor_runtime(q: torch.Tensor) -> str:
     device_type = q.device.type
+    active_runtime = infer_attention_runtime_mode()
     if device_type == "xpu":
+        if active_runtime == "intel-xpu-sage":
+            return "intel-xpu-sage"
         return "intel-xpu"
     if device_type == "cuda" and bool(getattr(torch.version, "hip", None)):
-        preferred_runtime = str(os.environ.get("MIKAZUKI_PREFERRED_RUNTIME", "") or "").strip().lower()
-        executable = sys.executable.replace("\\", "/").lower()
-        if (
-            preferred_runtime == "rocm-amd-sage"
-            or os.environ.get("MIKAZUKI_ROCM_AMD_SAGE_STARTUP") == "1"
-            or "/python_rocm_amd_sage/" in executable
-            or "/python-rocm-amd-sage/" in executable
-        ):
+        if active_runtime == "rocm-amd-sage":
             return "rocm-amd-sage"
         return "rocm-amd"
     if device_type == "cuda":
@@ -174,6 +176,14 @@ def _log_sageattention_fallback(q: torch.Tensor, exc: Exception) -> None:
     runtime_name = _get_tensor_runtime(q)
     _warn_once(
         f"{runtime_name} 实验运行时中的 SageAttention 调用失败，已自动回退为 SDPA。"
+        f"失败信息：{_short_exc_message(exc)}"
+    )
+
+
+def _log_flashattention_fallback(q: torch.Tensor, exc: Exception) -> None:
+    runtime_name = _get_tensor_runtime(q)
+    _warn_once(
+        f"{runtime_name} 运行时中的 FlashAttention 调用失败，已自动回退为 torch attention。"
         f"失败信息：{_short_exc_message(exc)}"
     )
 
@@ -481,6 +491,9 @@ def _execute_attention_impl(
             x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
 
     elif attn_params.attn_mode == "flash":
+        _info_once(
+            "Unified attention backend active: flash / 公共 attention 已进入 FlashAttention 内核路径。"
+        )
         if attn_params.split_attn:
             x = []
             for i in range(len(q)):
@@ -570,7 +583,11 @@ def attention(
     try:
         x = _execute_attention_impl(q, k, v, attn_params, drop_rate)
     except Exception as exc:
-        if attn_params.attn_mode == "sageattn" and _should_try_sageattention_fallback(q):
+        if attn_params.attn_mode == "flash":
+            _log_flashattention_fallback(q, exc)
+            fallback_params = _clone_attention_params(attn_params, attn_mode="torch")
+            x = _execute_attention_impl(q, k, v, fallback_params, drop_rate)
+        elif attn_params.attn_mode == "sageattn" and _should_try_sageattention_fallback(q):
             _log_sageattention_fallback(q, exc)
             fallback_params = _clone_attention_params(attn_params, attn_mode="torch")
             x = _execute_attention_impl(q, k, v, fallback_params, drop_rate)

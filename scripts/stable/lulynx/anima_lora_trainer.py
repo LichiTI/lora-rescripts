@@ -559,6 +559,7 @@ class AnimaNetworkTrainer:
             "ss_weighting_scheme": str(args.weighting_scheme),
             "ss_discrete_flow_shift": str(args.discrete_flow_shift),
             "ss_attn_mode": str(args.attn_mode),
+            "ss_attention_backend": str(train_util.resolve_attention_backend(args)),
         }
         if args.pretrained_model_name_or_path is not None:
             metadata["ss_sd_model_name"] = str(args.pretrained_model_name_or_path)

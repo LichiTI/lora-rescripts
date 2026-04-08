@@ -1,6 +1,7 @@
 # Anima Training Utilities
 
 import argparse
+import importlib
 from collections import defaultdict
 import gc
 import math
@@ -18,6 +19,8 @@ from PIL import Image
 from library.device_utils import init_ipex, clean_memory_on_device, synchronize_device
 from library import anima_models, anima_utils, train_util, qwen_image_autoencoder_kl
 from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
+from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
+from mikazuki.utils.runtime_safe_preview import clamp_safe_preview_request
 
 init_ipex()
 
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 # Anima-specific training arguments
-ANIMA_SUPPORTED_ATTN_MODES = ("torch", "xformers", "sageattn")
+ANIMA_SUPPORTED_ATTN_MODES = ("torch", "xformers", "sageattn", "flash")
 
 
 class _AnimaTimingSection:
@@ -228,37 +231,7 @@ class AnimaStepTimingProfiler:
 
 
 def _infer_anima_runtime_mode() -> str:
-    if os.environ.get("MIKAZUKI_SAGEATTENTION_STARTUP") == "1" or os.environ.get("MIKAZUKI_SAGEATTENTION2_STARTUP") == "1":
-        return "sageattention"
-    if os.environ.get("MIKAZUKI_BLACKWELL_STARTUP") == "1":
-        return "blackwell"
-    if os.environ.get("MIKAZUKI_INTEL_XPU_SAGE_STARTUP") == "1":
-        return "intel-xpu-sage"
-    if os.environ.get("MIKAZUKI_INTEL_XPU_STARTUP") == "1":
-        return "intel-xpu"
-    if os.environ.get("MIKAZUKI_ROCM_AMD_SAGE_STARTUP") == "1":
-        return "rocm-amd-sage"
-    if os.environ.get("MIKAZUKI_ROCM_AMD_STARTUP") == "1":
-        return "rocm-amd"
-
-    executable = sys.executable.replace("\\", "/").lower()
-    if "/python_rocm_amd_sage/" in executable or "/python-rocm-amd-sage/" in executable:
-        return "rocm-amd-sage"
-    if "/python_xpu_intel_sage/" in executable or "/python-xpu-intel-sage/" in executable:
-        return "intel-xpu-sage"
-    if "/python_xpu_intel/" in executable or "/python-xpu-intel/" in executable:
-        return "intel-xpu"
-    if "/python_rocm_amd/" in executable or "/python-rocm-amd/" in executable:
-        return "rocm-amd"
-    if "/python-sageattention-latest/" in executable or "/python_sageattention_latest/" in executable:
-        return "sageattention"
-    if "/python-sageattention-blackwell/" in executable or "/python_sageattention_blackwell/" in executable:
-        return "sageattention"
-    if "/python-sageattention/" in executable or "/python_sageattention/" in executable:
-        return "sageattention"
-    if "/python_blackwell/" in executable:
-        return "blackwell"
-    return "standard"
+    return infer_attention_runtime_mode()
 
 
 def _has_working_sageattention() -> bool:
@@ -282,6 +255,33 @@ def _has_importable_xformers() -> bool:
     return True
 
 
+def _has_importable_flashattention() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    if bool(getattr(torch.version, "hip", None)):
+        return False
+
+    try:
+        device_index = torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(device_index)
+    except Exception:
+        capability = None
+
+    if capability is not None and capability < (8, 0):
+        return False
+
+    try:
+        importlib.import_module("flash_attn")
+        flash_interface = importlib.import_module("flash_attn.flash_attn_interface")
+    except Exception:
+        return False
+
+    return all(
+        getattr(flash_interface, symbol_name, None) is not None
+        for symbol_name in ("flash_attn_func", "flash_attn_varlen_func")
+    )
+
+
 def resolve_default_anima_attn_mode() -> str:
     runtime_mode = _infer_anima_runtime_mode()
     if runtime_mode == "sageattention" and _has_working_sageattention():
@@ -290,6 +290,8 @@ def resolve_default_anima_attn_mode() -> str:
         return "sageattn"
     if runtime_mode == "rocm-amd-sage" and _has_working_sageattention():
         return "sageattn"
+    if runtime_mode == "flashattention" and _has_importable_flashattention():
+        return "flash"
     if runtime_mode == "blackwell":
         return "torch"
     if runtime_mode in {"intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage"}:
@@ -495,10 +497,10 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--attn_mode",
-        choices=["torch", "xformers", "sageattn", "sdpa", "flash"],  # "sdpa" and "flash" are legacy compatibility values
+        choices=["torch", "xformers", "sageattn", "sdpa", "flash"],  # "sdpa" is a legacy compatibility value
         default=None,
-        help="Attention implementation to use. Default is None (auto-resolve from the active runtime/startup script). xformers requires --split_attn. sageattn can be used when the active runtime has SageAttention installed. Legacy 'flash' values will automatically fall back to the runtime default backend. This option overrides --xformers or --sdpa."
-        " / 使用するAttentionの実装。デフォルトは None（当前运行时 / 启动脚本自动决定）です。xformersは--split_attnの指定が必要です。sageattn は、現在の运行时已安装 SageAttention 时可用于训练。旧版の flash 値は自動的に当前运行时默认后端へ回退します。この选项会覆盖 --xformers 或 --sdpa。",
+        help="Attention implementation to use. Default is None (auto-resolve from the active runtime/startup script). xformers requires --split_attn. sageattn can be used when the active runtime has SageAttention installed. flash uses FlashAttention 2 when flash-attn is available; if the kernel call fails at runtime, training will warn and fall back to torch attention automatically. This option overrides --xformers or --sdpa."
+        " / 使用するAttentionの実装。デフォルトは None（当前运行时 / 启动脚本自动决定）です。xformersは--split_attnの指定が必要です。sageattn は、当前运行时已安装 SageAttention 时可用于训练。flash 会在检测到 flash-attn 时启用 FlashAttention 2；若运行时内核调用失败，会给出警告并自动回退到 torch attention。这个选项会覆盖 --xformers 或 --sdpa。",
     )
     parser.add_argument(
         "--split_attn",
@@ -621,8 +623,6 @@ def normalize_anima_attn_mode(attn_mode: Optional[str], fallback: Optional[str] 
     normalized_fallback = str(fallback or resolve_default_anima_attn_mode()).strip().lower() or "torch"
     if normalized_fallback == "sdpa":
         normalized_fallback = "torch"
-    if normalized_fallback == "flash":
-        normalized_fallback = resolve_default_anima_attn_mode()
     if normalized_fallback not in ANIMA_SUPPORTED_ATTN_MODES:
         raise ValueError(f"Unsupported Anima attention fallback: {fallback}")
 
@@ -631,8 +631,6 @@ def normalize_anima_attn_mode(attn_mode: Optional[str], fallback: Optional[str] 
         return normalized_fallback
     if normalized == "sdpa":
         return "torch"
-    if normalized == "flash":
-        return normalized_fallback
     if normalized not in ANIMA_SUPPORTED_ATTN_MODES:
         raise ValueError(
             f"Unsupported Anima attention mode: {attn_mode}. "
@@ -1397,6 +1395,23 @@ def _sample_image_inference(
     flow_shift = prompt_dict.get("flow_shift", getattr(args, "discrete_flow_shift", 3.0) or 3.0)
     sample_sampler = prompt_dict.get("sample_sampler", getattr(args, "sample_sampler", "euler"))
     sample_scheduler = getattr(args, "sample_scheduler", "simple")
+
+    safe_preview_request = clamp_safe_preview_request(
+        args,
+        width=int(width),
+        height=int(height),
+        steps=int(sample_steps),
+        cfg=float(scale),
+    )
+    width = safe_preview_request["width"]
+    height = safe_preview_request["height"]
+    sample_steps = safe_preview_request["steps"]
+    scale = safe_preview_request["cfg"]
+    if safe_preview_request["changed"]:
+        logger.info(
+            "Safe preview adjusted the current Anima preview request: %s",
+            ", ".join(safe_preview_request["changes"]),
+        )
 
     if prompt_replacement is not None:
         prompt = prompt.replace(prompt_replacement[0], prompt_replacement[1])

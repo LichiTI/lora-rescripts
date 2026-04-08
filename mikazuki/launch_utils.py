@@ -16,6 +16,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import Version
 
 from mikazuki.log import log
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime, is_intel_xpu_runtime
 
 python_bin = sys.executable
 
@@ -66,7 +67,14 @@ def prepare_submodules():
 
 def git_tag(path: str) -> str:
     try:
-        return subprocess.check_output(["git", "-C", path, "describe", "--tags"]).strip().decode("utf-8")
+        return (
+            subprocess.check_output(
+                ["git", "-C", path, "describe", "--tags"],
+                stderr=subprocess.DEVNULL,
+            )
+            .strip()
+            .decode("utf-8")
+        )
     except Exception as e:
         return "<none>"
 
@@ -190,6 +198,11 @@ def validate_requirements(requirements_file: str):
 
 def setup_windows_bitsandbytes():
     if sys.platform != "win32":
+        return
+
+    runtime_name = infer_runtime_environment_name()
+    if is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name):
+        log.info(f"Skipping Windows bitsandbytes bootstrap for experimental runtime: {runtime_name}")
         return
 
     min_bnb_version = Version("0.46.0")

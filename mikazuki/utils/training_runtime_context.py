@@ -8,7 +8,7 @@ from mikazuki.utils.amd_rocm_guard import (
     apply_amd_anima_topology_guard,
     apply_amd_runtime_optimizer_guard,
 )
-from mikazuki.utils.attention_runtime_guard import apply_anima_runtime_attention_backend
+from mikazuki.utils.attention_runtime_guard import apply_anima_runtime_attention_backend, apply_sdxl_runtime_attention_backend
 from mikazuki.utils.devices import printable_devices
 from mikazuki.utils.intel_xpu_guard import (
     apply_intel_anima_runtime_config_guard,
@@ -112,6 +112,7 @@ def resolve_training_runtime_guard_context(
             config.pop("gpu_ids", None)
 
     apply_anima_runtime_attention_backend(config, gpu_ids)
+    flashattention_runtime_message = apply_sdxl_runtime_attention_backend(config, gpu_ids)
 
     amd_optimizer_guard = apply_amd_runtime_optimizer_guard(config)
     amd_runtime_config_guard = apply_amd_anima_runtime_config_guard(config, amd_topology_guard.get("probe"))
@@ -123,6 +124,8 @@ def resolve_training_runtime_guard_context(
 
     if gpu_filter_warning:
         warnings.append(gpu_filter_warning)
+    if flashattention_runtime_message:
+        warnings.append(flashattention_runtime_message)
 
     for guard_result in (
         amd_topology_guard,

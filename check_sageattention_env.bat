@@ -9,15 +9,12 @@ echo.
 
 cd /d "%~dp0"
 
-set "SAGE_RUNTIME_DIR=python-sageattention"
-if /i "%~1"=="--blackwell" set "SAGE_RUNTIME_DIR=python-sageattention-blackwell"
+set "SAGE_RUNTIME_DIR=env\python-sageattention"
 
 if not exist "%~dp0%SAGE_RUNTIME_DIR%\python.exe" (
-    if /i "%~1"=="--blackwell" (
-        if exist "%~dp0python_sageattention_blackwell\python.exe" set "SAGE_RUNTIME_DIR=python_sageattention_blackwell"
-    ) else (
-        if exist "%~dp0python_sageattention\python.exe" set "SAGE_RUNTIME_DIR=python_sageattention"
-    )
+    if exist "%~dp0python-sageattention\python.exe" set "SAGE_RUNTIME_DIR=python-sageattention"
+    if exist "%~dp0env\python_sageattention\python.exe" set "SAGE_RUNTIME_DIR=env\python_sageattention"
+    if exist "%~dp0python_sageattention\python.exe" set "SAGE_RUNTIME_DIR=python_sageattention"
 )
 
 set "PYTHON_EXE=%~dp0%SAGE_RUNTIME_DIR%\python.exe"

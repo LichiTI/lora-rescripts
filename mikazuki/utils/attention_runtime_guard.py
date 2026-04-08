@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 from typing import Optional
 
@@ -15,16 +16,65 @@ SAGEATTENTION_SUPPORTED_TRAINING_TYPES = {
     "sdxl-textual-inversion",
 }
 
+FLASHATTENTION_SUPPORTED_TRAINING_TYPES = {
+    "sdxl-lora",
+    "sdxl-finetune",
+    "sdxl-controlnet",
+    "sdxl-controlnet-lllite",
+    "sdxl-textual-inversion",
+}
+
+
+def _flag_enabled(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _has_importable_flashattention() -> bool:
+    try:
+        import torch
+    except Exception:
+        return False
+
+    if not torch.cuda.is_available():
+        return False
+    if bool(getattr(torch.version, "hip", None)):
+        return False
+
+    try:
+        capability = torch.cuda.get_device_capability(torch.cuda.current_device())
+    except Exception:
+        capability = None
+
+    if capability is not None and capability < (8, 0):
+        return False
+
+    try:
+        importlib.import_module("flash_attn")
+        flash_interface = importlib.import_module("flash_attn.flash_attn_interface")
+    except Exception:
+        return False
+
+    return all(
+        getattr(flash_interface, symbol_name, None) is not None
+        for symbol_name in ("flash_attn_func", "flash_attn_varlen_func")
+    )
+
 
 def resolve_anima_runtime_attention_backend(gpu_ids=None) -> str:
     runtime_mode = get_attention_runtime_mode()
-    if runtime_mode in {"sageattention", "sagebwd-nvidia"}:
+    if runtime_mode in {"sageattention", "sagebwd-nvidia", "intel-xpu-sage", "rocm-amd-sage"}:
         return "sageattn"
-    if runtime_mode == "intel-xpu-sage":
-        return "sageattn"
+    if runtime_mode == "flashattention":
+        return "flash" if _has_importable_flashattention() else "torch"
     if runtime_mode == "blackwell":
         return "torch"
-    if runtime_mode in {"intel-xpu", "intel-xpu-sage", "rocm-amd"}:
+    if runtime_mode in {"intel-xpu", "rocm-amd"}:
         return "torch"
 
     xformers_info = get_xformers_status(gpu_ids)
@@ -38,7 +88,13 @@ def apply_anima_runtime_attention_backend(config: dict, gpu_ids=None) -> None:
     if not model_train_type.startswith("anima"):
         return
 
-    resolved_backend = resolve_anima_runtime_attention_backend(gpu_ids)
+    requested_backend = str(config.get("attn_mode", "") or "").strip().lower()
+    if requested_backend in {"sdpa"}:
+        resolved_backend = "torch"
+    elif requested_backend in {"torch", "xformers", "sageattn", "flash"}:
+        resolved_backend = requested_backend
+    else:
+        resolved_backend = resolve_anima_runtime_attention_backend(gpu_ids)
     config["attn_mode"] = resolved_backend
 
     if "xformers" in config:
@@ -49,6 +105,44 @@ def apply_anima_runtime_attention_backend(config: dict, gpu_ids=None) -> None:
         config["sageattn"] = resolved_backend == "sageattn"
     if "use_sage_attn" in config:
         config["use_sage_attn"] = resolved_backend == "sageattn"
+
+
+def apply_sdxl_runtime_attention_backend(config: dict, gpu_ids=None) -> Optional[str]:
+    training_type = str(config.get("model_train_type", "") or "").strip().lower()
+    if training_type not in FLASHATTENTION_SUPPORTED_TRAINING_TYPES:
+        return None
+    if get_attention_runtime_mode() != "flashattention":
+        return None
+    if not _has_importable_flashattention():
+        return None
+    if _flag_enabled(config.get("mem_eff_attn")):
+        return None
+    if is_sageattention_requested(config):
+        return None
+    if not _flag_enabled(config.get("xformers")) and _flag_enabled(config.get("sdpa")):
+        return None
+
+    changed = False
+    if "xformers" in config and _flag_enabled(config.get("xformers")):
+        config["xformers"] = False
+        changed = True
+    if "sdpa" in config and _flag_enabled(config.get("sdpa")):
+        config["sdpa"] = False
+        changed = True
+    if "sageattn" in config and _flag_enabled(config.get("sageattn")):
+        config["sageattn"] = False
+        changed = True
+    if "use_sage_attn" in config and _flag_enabled(config.get("use_sage_attn")):
+        config["use_sage_attn"] = False
+        changed = True
+    if not _flag_enabled(config.get("flashattn")):
+        config["flashattn"] = True
+        changed = True
+
+    if not changed:
+        return None
+
+    return "当前为 FlashAttention 运行时；本次 SDXL 训练已自动优先切到 FlashAttention 2。若内核调用失败，训练进程会自动回退到 SDPA。"
 
 
 def is_sageattention_requested(config: dict) -> bool:
@@ -184,7 +278,7 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
         return None
 
     runtime_mode = get_attention_runtime_mode()
-    if policy != "prefer_sage" or runtime_mode not in {"sageattention", "sagebwd-nvidia"}:
+    if policy != "prefer_sage" or runtime_mode not in {"sageattention", "sagebwd-nvidia", "intel-xpu-sage", "rocm-amd-sage"}:
         return None
 
     if parse_boolish(config.get("mem_eff_attn", False)):
@@ -212,6 +306,10 @@ def apply_startup_attention_policy(config: dict, parse_boolish) -> Optional[str]
     if changed:
         if runtime_mode == "sagebwd-nvidia":
             message = "启动器当前处于 SageBwd NVIDIA 实验模式。本次训练会先沿用现有 SageAttention 兼容路径，并为后续 SageBwd 接入预留运行时标记。"
+        elif runtime_mode == "intel-xpu-sage":
+            message = "启动器当前处于 Intel XPU Sage 实验模式，本次训练已自动优先尝试 SageAttention。若内核调用失败，运行时会自动回退到 SDPA。"
+        elif runtime_mode == "rocm-amd-sage":
+            message = "启动器当前处于 AMD ROCm Sage 实验模式，本次训练已自动优先尝试 SageAttention。若内核调用失败，运行时会自动回退到 SDPA。"
         else:
             message = "启动器当前处于 SageAttention 默认模式，本次训练已自动优先使用 SageAttention。"
         log.info(message)

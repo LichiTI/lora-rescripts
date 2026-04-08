@@ -1187,6 +1187,7 @@ class NetworkTrainer:
             "ss_validate_every_n_epochs": args.validate_every_n_epochs,
             "ss_validate_every_n_steps": args.validate_every_n_steps,
             "ss_resize_interpolation": args.resize_interpolation,
+            "ss_attention_backend": train_util.resolve_attention_backend(args),
         }
 
         self.update_metadata(metadata, args)  # architecture specific metadata

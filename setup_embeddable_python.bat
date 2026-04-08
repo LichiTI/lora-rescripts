@@ -3,30 +3,16 @@ chcp 65001 >nul
 setlocal enabledelayedexpansion
 set "AUTO_MODE=0"
 set "TARGET_DIR=python"
+set "REQUESTED_TARGET=%~1"
 
-if /i "%~1"=="--auto" set "AUTO_MODE=1"
-if /i "%~1"=="python_tageditor" set "TARGET_DIR=python_tageditor"
-if /i "%~1"=="python_blackwell" set "TARGET_DIR=python_blackwell"
-if /i "%~1"=="python-sageattention" set "TARGET_DIR=python-sageattention"
-if /i "%~1"=="python_sageattention" set "TARGET_DIR=python_sageattention"
-if /i "%~1"=="python-sageattention-latest" set "TARGET_DIR=python-sageattention-latest"
-if /i "%~1"=="python_sageattention_latest" set "TARGET_DIR=python_sageattention_latest"
-if /i "%~1"=="python-sageattention-blackwell" set "TARGET_DIR=python-sageattention-blackwell"
-if /i "%~1"=="python_sageattention_blackwell" set "TARGET_DIR=python_sageattention_blackwell"
-if /i "%~1"=="python_sagebwd_nvidia" set "TARGET_DIR=python_sagebwd_nvidia"
-if /i "%~1"=="python_rocm_amd" set "TARGET_DIR=python_rocm_amd"
-if /i "%~1"=="python" set "TARGET_DIR=python"
-if /i "%~2"=="python_tageditor" set "TARGET_DIR=python_tageditor"
-if /i "%~2"=="python_blackwell" set "TARGET_DIR=python_blackwell"
-if /i "%~2"=="python-sageattention" set "TARGET_DIR=python-sageattention"
-if /i "%~2"=="python_sageattention" set "TARGET_DIR=python_sageattention"
-if /i "%~2"=="python-sageattention-latest" set "TARGET_DIR=python-sageattention-latest"
-if /i "%~2"=="python_sageattention_latest" set "TARGET_DIR=python_sageattention_latest"
-if /i "%~2"=="python-sageattention-blackwell" set "TARGET_DIR=python-sageattention-blackwell"
-if /i "%~2"=="python_sageattention_blackwell" set "TARGET_DIR=python_sageattention_blackwell"
-if /i "%~2"=="python_sagebwd_nvidia" set "TARGET_DIR=python_sagebwd_nvidia"
-if /i "%~2"=="python_rocm_amd" set "TARGET_DIR=python_rocm_amd"
-if /i "%~2"=="python" set "TARGET_DIR=python"
+if /i "%REQUESTED_TARGET%"=="--auto" (
+    set "AUTO_MODE=1"
+    set "REQUESTED_TARGET=%~2"
+)
+
+if not defined REQUESTED_TARGET set "REQUESTED_TARGET=python"
+
+for /f "usebackq delims=" %%I in (`"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\runtime\resolve_runtime_dir.ps1" -RepoRoot "%~dp0" -RequestedTarget "%REQUESTED_TARGET%"`) do set "TARGET_DIR=%%~I"
 
 echo ========================================
 echo Setup Portable Python
@@ -110,7 +96,7 @@ if errorlevel 1 (
 )
 
 echo [3/3] Upgrading build tools...
-"%PYTHON_EXE%" -m pip install --upgrade pip setuptools wheel
+"%PYTHON_EXE%" -m pip install --upgrade pip "setuptools<81" wheel
 if errorlevel 1 (
     echo [WARN] Failed to upgrade pip/setuptools/wheel, keeping current bootstrap packages.
 )
@@ -128,13 +114,13 @@ if "%AUTO_MODE%"=="0" pause
 exit /b 0
 
 :copy_bootstrap_runtime_packages
-set "BOOTSTRAP_CANDIDATES=python python_tageditor python_blackwell python_rocm_amd python-sageattention python_sageattention python-sageattention-latest python_sageattention_latest python-sageattention-blackwell python_sageattention_blackwell python_sagebwd_nvidia"
+set "BOOTSTRAP_CANDIDATES=python env\python python_tageditor env\python_tageditor python_blackwell env\python_blackwell python_xpu_intel env\python_xpu_intel python_xpu_intel_sage env\python_xpu_intel_sage python_rocm_amd env\python_rocm_amd python_rocm_amd_sage env\python_rocm_amd_sage python-sageattention env\python-sageattention python_sageattention env\python_sageattention python_sagebwd_nvidia env\python_sagebwd_nvidia python-sagebwd-nvidia env\python-sagebwd-nvidia"
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
   "$repo = Get-Location;" ^
   "$targetDir = '%TARGET_DIR%';" ^
   "$targetSite = Join-Path (Join-Path $repo $targetDir) 'Lib\site-packages';" ^
   "$patterns = @('pip','pip-*','setuptools','setuptools-*','wheel','wheel-*','_distutils_hack','pkg_resources','distutils-precedence.pth');" ^
-  "$candidates = @('python','python_tageditor','python_blackwell','python_rocm_amd','python-sageattention','python_sageattention','python-sageattention-latest','python_sageattention_latest','python-sageattention-blackwell','python_sageattention_blackwell','python_sagebwd_nvidia');" ^
+  "$candidates = @('env\python','python','env\python_tageditor','python_tageditor','env\python_blackwell','python_blackwell','env\python_xpu_intel','python_xpu_intel','env\python_xpu_intel_sage','python_xpu_intel_sage','env\python_rocm_amd','python_rocm_amd','env\python_rocm_amd_sage','python_rocm_amd_sage','env\python-sageattention','python-sageattention','env\python_sageattention','python_sageattention','env\python_sagebwd_nvidia','python_sagebwd_nvidia','env\python-sagebwd-nvidia','python-sagebwd-nvidia');" ^
   "$copied = $false;" ^
   "foreach($candidate in $candidates){" ^
   "  if($candidate -ieq $targetDir){ continue }" ^

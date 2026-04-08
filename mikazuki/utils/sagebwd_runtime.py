@@ -6,20 +6,14 @@ from functools import lru_cache
 from typing import Any
 
 from mikazuki.utils.amd_sageattention import load_runtime_sageattention_symbols
+from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 
 
 _SAGEBWD_RUNTIME_NAMES = {"sagebwd-nvidia"}
 
 
 def is_sagebwd_nvidia_runtime() -> bool:
-    preferred_runtime = str(os.environ.get("MIKAZUKI_PREFERRED_RUNTIME", "") or "").strip().lower()
-    if preferred_runtime in _SAGEBWD_RUNTIME_NAMES:
-        return True
-    if str(os.environ.get("MIKAZUKI_SAGEBWD_STARTUP", "") or "").strip() == "1":
-        return True
-
-    executable = sys.executable.replace("\\", "/").lower()
-    return "/python_sagebwd_nvidia/" in executable or "/python-sagebwd-nvidia/" in executable
+    return infer_attention_runtime_mode() in _SAGEBWD_RUNTIME_NAMES
 
 
 def _short_exc_message(exc: Exception) -> str:

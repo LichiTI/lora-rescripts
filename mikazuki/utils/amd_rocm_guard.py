@@ -4,7 +4,8 @@ import importlib
 import os
 from typing import Any
 
-from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
+from mikazuki.utils.amd_sageattention import is_amd_rocm_sage_runtime, probe_runtime_sageattention
+from mikazuki.utils.runtime_safe_preview import apply_runtime_safe_preview_policy
 
 
 _SAFE_OPTIMIZER_NAMES = {
@@ -649,14 +650,27 @@ def apply_amd_anima_runtime_config_guard(config: dict, runtime_probe: dict[str, 
             result["warnings"].append(f"AMD 实验路线已自动禁用 {label}。")
 
     if is_sdxl_route:
-        if parse_boolish(config.get("sageattn")) or parse_boolish(config.get("use_sage_attn")) or requested_attn_mode == "sageattn":
+        if wants_sageattention and sage_probe["ready"] and is_amd_rocm_sage_runtime():
+            config["attn_mode"] = "sageattn"
+            config["sdpa"] = False
+            config["sageattn"] = True
+            config["use_sage_attn"] = True
+            result["warnings"].append(
+                "AMD ROCm 实验 SDXL 已启用实验性 SageAttention。若 SDXL U-Net 中的 Sage 内核调用失败，运行时会自动回退为 SDPA。"
+            )
+        elif parse_boolish(config.get("sageattn")) or parse_boolish(config.get("use_sage_attn")) or requested_attn_mode == "sageattn":
             config["sageattn"] = False
             config["use_sage_attn"] = False
             config["sdpa"] = True
             config["attn_mode"] = "sdpa"
-            result["warnings"].append(
-                "AMD ROCm 实验路线中的 SDXL 当前只开放 SDPA 路径；已自动禁用 SageAttention 请求。"
-            )
+            if not is_amd_rocm_sage_runtime():
+                result["warnings"].append(
+                    "AMD ROCm 实验 SDXL 的 SageAttention 当前只在 rocm-amd-sage 独立实验运行时中开放；本次已自动回退为 SDPA。"
+                )
+            else:
+                result["warnings"].append(
+                    f"AMD ROCm 实验 SDXL 当前未检测到可用的 SageAttention 构建（{sage_probe['reason'] or 'runtime probe failed'}），已自动回退为 SDPA。"
+                )
     elif wants_sageattention and sage_probe["ready"]:
         config["attn_mode"] = "sageattn"
         config["sdpa"] = False
@@ -682,10 +696,12 @@ def apply_amd_anima_runtime_config_guard(config: dict, runtime_probe: dict[str, 
     elif mixed_precision == "no":
         result["warnings"].append("当前 AMD 实验路线仍建议优先使用混合精度；若驱动和显卡稳定，通常优先测试 bf16。")
 
-    if _is_preview_requested(config) and not is_sdxl_route:
-        _clear_preview_fields(config)
-        result["skip_preview_prompt_prep"] = True
-        result["warnings"].append("AMD 实验路线已自动关闭训练预览图，并跳过预览提示词准备，以降低显存波动与碎片化风险。")
+    if apply_runtime_safe_preview_policy(
+        config,
+        runtime_label="AMD 实验路线",
+        messages=result["warnings"],
+    ):
+        result["skip_preview_prompt_prep"] = False
 
     try:
         max_workers = int(config.get("max_data_loader_n_workers", 0) or 0)
@@ -742,7 +758,12 @@ def apply_amd_anima_runtime_config_guard(config: dict, runtime_probe: dict[str, 
         )
 
     if is_sdxl_route:
-        result["notes"].append("AMD ROCm 实验 SDXL 当前会强制走 SDPA，并复用主线 SDXL trainer。")
+        if str(config.get("attn_mode", "") or "").strip().lower() == "sageattn":
+            result["notes"].append("AMD ROCm 实验 SDXL 当前已进入实验性 SageAttention 路径，并继续复用主线 SDXL trainer。")
+        else:
+            result["notes"].append("AMD ROCm 实验 SDXL 当前使用 SDPA，并复用主线 SDXL trainer。")
+        if parse_boolish(config.get("_runtime_safe_preview_enabled", False)):
+            result["notes"].append("AMD ROCm 实验 SDXL 的训练预览会使用独立的安全 SDPA 预览后端。")
 
     _apply_windows_micro_batch_safety_policy(config, result["warnings"])
 

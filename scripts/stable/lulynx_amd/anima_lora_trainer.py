@@ -12,6 +12,7 @@ from lulynx_amd.anima_runtime import (
     is_amd_rocm_runtime,
     log_anima_amd_experimental_banner,
 )
+from mikazuki.utils.runtime_safe_preview import temporary_anima_safe_preview_backend
 
 
 @contextmanager
@@ -191,18 +192,20 @@ class AnimaNetworkTrainer(_BaseAnimaNetworkTrainer):
         network=None,
     ):
         should_track_preview = _should_generate_sample_images(args, epoch, global_step)
-        result = super().sample_images(
-            accelerator,
-            args,
-            epoch,
-            global_step,
-            vae,
-            text_encoder,
-            dit,
-            tokenize_strategy,
-            text_encoding_strategy,
-            network=network,
-        )
+        unwrapped_dit = accelerator.unwrap_model(dit)
+        with temporary_anima_safe_preview_backend(args, unwrapped_dit, route_label="AMD Anima preview"):
+            result = super().sample_images(
+                accelerator,
+                args,
+                epoch,
+                global_step,
+                vae,
+                text_encoder,
+                dit,
+                tokenize_strategy,
+                text_encoding_strategy,
+                network=network,
+            )
         monitor = self._get_amd_monitor()
         if monitor is not None and should_track_preview:
             monitor.note_preview(epoch=epoch, global_step=global_step)

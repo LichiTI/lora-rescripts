@@ -23,6 +23,9 @@
 """
 
 import math
+import os
+import sys
+from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Optional
 import torch
@@ -30,15 +33,92 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
 from einops import rearrange
-from library.sageattention_compat import call_sageattention, get_runtime_sageattention_symbols
+from library import attention as unified_attention
+from library.sageattention_compat import call_sageattention, get_runtime_sageattention_source, get_runtime_sageattention_symbols
 from library.utils import setup_logging
+from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
 
 sageattn, _sageattn_varlen = get_runtime_sageattention_symbols()
+_sageattention_source = get_runtime_sageattention_source()
+_runtime_sageattention_disabled = False
+_runtime_flashattention_disabled = False
 
 setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _short_exc_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return exc.__class__.__name__
+    return message.splitlines()[0]
+
+
+def _get_sageattention_runtime_name(tensor: torch.Tensor) -> str:
+    device_type = tensor.device.type
+    active_runtime = infer_attention_runtime_mode()
+
+    if device_type == "xpu":
+        if active_runtime == "intel-xpu-sage":
+            return "intel-xpu-sage"
+        return "intel-xpu"
+
+    if device_type == "cuda" and bool(getattr(torch.version, "hip", None)):
+        if active_runtime == "rocm-amd-sage":
+            return "rocm-amd-sage"
+        return "rocm-amd"
+
+    return device_type or "unknown"
+
+
+def _should_try_runtime_sageattention_fallback(tensor: torch.Tensor) -> bool:
+    return _get_sageattention_runtime_name(tensor) in {"intel-xpu", "intel-xpu-sage", "rocm-amd", "rocm-amd-sage"}
+
+
+@lru_cache(maxsize=8)
+def _warn_sdxl_sageattention_fallback_once(runtime_name: str, source: str, reason: str) -> None:
+    runtime_source = source or "unknown"
+    logger.warning(
+        "SDXL %s experimental SageAttention call failed for source '%s'; switching this process to SDPA fallback. Reason: %s",
+        runtime_name,
+        runtime_source,
+        reason,
+    )
+
+
+def _disable_runtime_sageattention_with_warning(tensor: torch.Tensor, reason: str) -> None:
+    global _runtime_sageattention_disabled
+    runtime_name = _get_sageattention_runtime_name(tensor)
+    _runtime_sageattention_disabled = True
+    _warn_sdxl_sageattention_fallback_once(runtime_name, _sageattention_source, reason)
+
+
+@lru_cache(maxsize=8)
+def _info_sdxl_flashattention_backend_once() -> None:
+    logger.info("SDXL attention backend active: flash / SDXL attention 已进入 FlashAttention 2 内核路径。")
+
+
+@lru_cache(maxsize=8)
+def _warn_sdxl_flashattention_fallback_once(runtime_name: str, reason: str) -> None:
+    logger.warning(
+        "SDXL %s FlashAttention call failed; switching this process to SDPA fallback. Reason: %s",
+        runtime_name,
+        reason,
+    )
+
+
+@lru_cache(maxsize=1)
+def _warn_sdxl_flashattention_mask_fallback_once() -> None:
+    logger.warning("SDXL FlashAttention 当前不处理 attention mask，已自动回退到 SDPA 路径。")
+
+
+def _disable_runtime_flashattention_with_warning(tensor: torch.Tensor, reason: str) -> None:
+    global _runtime_flashattention_disabled
+    runtime_name = _get_sageattention_runtime_name(tensor)
+    _runtime_flashattention_disabled = True
+    _warn_sdxl_flashattention_fallback_once(runtime_name, reason)
 
 IN_CHANNELS: int = 4
 OUT_CHANNELS: int = 4
@@ -419,6 +499,7 @@ class CrossAttention(nn.Module):
         self.use_memory_efficient_attention_xformers = False
         self.use_memory_efficient_attention_mem_eff = False
         self.use_sdpa = False
+        self.use_flashattn = False
         self.use_sageattn = False
 
     def set_use_memory_efficient_attention(self, xformers, mem_eff):
@@ -426,6 +507,7 @@ class CrossAttention(nn.Module):
         self.use_memory_efficient_attention_mem_eff = mem_eff
         if xformers or mem_eff:
             self.use_sdpa = False
+            self.use_flashattn = False
             self.use_sageattn = False
 
     def set_use_sdpa(self, sdpa):
@@ -433,6 +515,15 @@ class CrossAttention(nn.Module):
         if sdpa:
             self.use_memory_efficient_attention_xformers = False
             self.use_memory_efficient_attention_mem_eff = False
+            self.use_flashattn = False
+            self.use_sageattn = False
+
+    def set_use_flashattn(self, flashattn_enabled: bool):
+        self.use_flashattn = flashattn_enabled
+        if flashattn_enabled:
+            self.use_memory_efficient_attention_xformers = False
+            self.use_memory_efficient_attention_mem_eff = False
+            self.use_sdpa = False
             self.use_sageattn = False
 
     def set_use_sageattn(self, sageattn_enabled: bool):
@@ -441,6 +532,7 @@ class CrossAttention(nn.Module):
             self.use_memory_efficient_attention_xformers = False
             self.use_memory_efficient_attention_mem_eff = False
             self.use_sdpa = False
+            self.use_flashattn = False
 
     def reshape_heads_to_batch_dim(self, tensor):
         batch_size, seq_len, dim = tensor.shape
@@ -461,6 +553,8 @@ class CrossAttention(nn.Module):
             return self.forward_memory_efficient_xformers(hidden_states, context, mask)
         if self.use_memory_efficient_attention_mem_eff:
             return self.forward_memory_efficient_mem_eff(hidden_states, context, mask)
+        if self.use_flashattn:
+            return self.forward_flashattn(hidden_states, context, mask)
         if self.use_sageattn:
             return self.forward_sageattn(hidden_states, context, mask)
         if self.use_sdpa:
@@ -572,8 +666,56 @@ class CrossAttention(nn.Module):
         out = self.to_out[0](out)
         return out
 
+    def forward_flashattn(self, x, context=None, mask=None):
+        if _runtime_flashattention_disabled:
+            return self.forward_sdpa(x, context=context, mask=mask)
+        if x.device.type != "cuda" or bool(getattr(torch.version, "hip", None)):
+            return self.forward_sdpa(x, context=context, mask=mask)
+        if mask is not None:
+            _warn_sdxl_flashattention_mask_fallback_once()
+            return self.forward_sdpa(x, context=context, mask=mask)
+        if unified_attention.flash_attn_func is None:
+            _disable_runtime_flashattention_with_warning(x, "flash-attn is not available in the current runtime.")
+            self.use_flashattn = False
+            self.use_sdpa = True
+            return self.forward_sdpa(x, context=context, mask=mask)
+        if x.dtype not in (torch.float16, torch.bfloat16):
+            return self.forward_sdpa(x, context=context, mask=mask)
+
+        h = self.heads
+        q_in = self.to_q(x)
+        context = context if context is not None else x
+        context = context.to(x.dtype)
+        k_in = self.to_k(context)
+        v_in = self.to_v(context)
+
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b n h d", h=h), (q_in, k_in, v_in))
+        del q_in, k_in, v_in
+
+        try:
+            _info_sdxl_flashattention_backend_once()
+            out = unified_attention.flash_attn_func(q.contiguous(), k.contiguous(), v.contiguous(), 0.0)
+        except Exception as exc:
+            _disable_runtime_flashattention_with_warning(x, _short_exc_message(exc))
+            self.use_flashattn = False
+            self.use_sdpa = True
+            return self.forward_sdpa(x, context=context, mask=mask)
+        finally:
+            del q, k, v
+
+        out = rearrange(out, "b n h d -> b n (h d)", h=h)
+        out = self.to_out[0](out)
+        return out
+
     def forward_sageattn(self, x, context=None, mask=None):
+        if _runtime_sageattention_disabled and _should_try_runtime_sageattention_fallback(x):
+            return self.forward_sdpa(x, context=context, mask=mask)
         if sageattn is None:
+            if _should_try_runtime_sageattention_fallback(x):
+                _disable_runtime_sageattention_with_warning(x, "SageAttention symbols are not available in the current runtime.")
+                self.use_sageattn = False
+                self.use_sdpa = True
+                return self.forward_sdpa(x, context=context, mask=mask)
             raise ImportError("No SageAttention / SageAttentionがインストールされていないようです / 未检测到 SageAttention")
         if mask is not None:
             logger.warning("SDXL SageAttention 当前不处理 attention mask，已自动回退到 SDPA 路径。")
@@ -589,14 +731,22 @@ class CrossAttention(nn.Module):
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q_in, k_in, v_in))
         del q_in, k_in, v_in
 
-        out = call_sageattention(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            tensor_layout="HND",
-            is_causal=False,
-            sm_scale=q.shape[-1] ** -0.5,
-        )
+        try:
+            out = call_sageattention(
+                q.contiguous(),
+                k.contiguous(),
+                v.contiguous(),
+                tensor_layout="HND",
+                is_causal=False,
+                sm_scale=q.shape[-1] ** -0.5,
+            )
+        except Exception as exc:
+            if not _should_try_runtime_sageattention_fallback(x):
+                raise
+            _disable_runtime_sageattention_with_warning(x, _short_exc_message(exc))
+            self.use_sageattn = False
+            self.use_sdpa = True
+            return self.forward_sdpa(x, context=context, mask=mask)
 
         out = rearrange(out, "b h n d -> b n (h d)", h=h)
         out = self.to_out[0](out)
@@ -691,6 +841,10 @@ class BasicTransformerBlock(nn.Module):
         self.attn1.set_use_sdpa(sdpa)
         self.attn2.set_use_sdpa(sdpa)
 
+    def set_use_flashattn(self, flashattn_enabled: bool):
+        self.attn1.set_use_flashattn(flashattn_enabled)
+        self.attn2.set_use_flashattn(flashattn_enabled)
+
     def set_use_sageattn(self, sageattn_enabled: bool):
         self.attn1.set_use_sageattn(sageattn_enabled)
         self.attn2.set_use_sageattn(sageattn_enabled)
@@ -783,6 +937,10 @@ class Transformer2DModel(nn.Module):
     def set_use_sdpa(self, sdpa):
         for transformer in self.transformer_blocks:
             transformer.set_use_sdpa(sdpa)
+
+    def set_use_flashattn(self, flashattn_enabled: bool):
+        for transformer in self.transformer_blocks:
+            transformer.set_use_flashattn(flashattn_enabled)
 
     def set_use_sageattn(self, sageattn_enabled: bool):
         for transformer in self.transformer_blocks:
@@ -1125,6 +1283,13 @@ class SdxlUNet2DConditionModel(nn.Module):
             for module in block:
                 if hasattr(module, "set_use_sageattn"):
                     module.set_use_sageattn(sageattn_enabled)
+
+    def set_use_flashattn(self, flashattn_enabled: bool) -> None:
+        blocks = self.input_blocks + [self.middle_block] + self.output_blocks
+        for block in blocks:
+            for module in block:
+                if hasattr(module, "set_use_flashattn"):
+                    module.set_use_flashattn(flashattn_enabled)
 
     def set_gradient_checkpointing(self, value=False):
         blocks = self.input_blocks + [self.middle_block] + self.output_blocks

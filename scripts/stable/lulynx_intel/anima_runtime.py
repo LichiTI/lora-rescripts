@@ -6,6 +6,7 @@ import os
 from argparse import Namespace
 
 import torch
+from mikazuki.utils.runtime_safe_preview import apply_runtime_safe_preview_policy
 
 
 logger = logging.getLogger(__name__)
@@ -134,26 +135,14 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
     return "AdamW", f"Intel XPU 实验核心暂未验证 optimizer_type={normalized}，已自动回退为 AdamW。"
 
 
-def _disable_preview_settings(args: Namespace, messages: list[str]) -> None:
-    preview_requested = bool(
-        getattr(args, "sample_at_first", False)
-        or getattr(args, "sample_every_n_steps", None) is not None
-        or getattr(args, "sample_every_n_epochs", None) is not None
-        or getattr(args, "sample_prompts", None)
-        or getattr(args, "enable_preview", False)
+def _apply_safe_preview_settings(args: Namespace, messages: list[str]) -> None:
+    apply_runtime_safe_preview_policy(
+        args,
+        runtime_label="Intel XPU 实验核心",
+        messages=messages,
+        preview_requested_key="_intel_preview_requested",
+        preview_forced_off_key="_intel_preview_forced_off",
     )
-    args._intel_preview_requested = preview_requested
-    if not preview_requested:
-        args._intel_preview_forced_off = False
-        return
-
-    args.enable_preview = False
-    args.sample_at_first = False
-    args.sample_every_n_steps = None
-    args.sample_every_n_epochs = None
-    args.sample_prompts = None
-    args._intel_preview_forced_off = True
-    messages.append("Intel XPU 实验核心已自动关闭训练预览图，并跳过预览提示词。")
 
 
 def _apply_mixed_precision_policy(args: Namespace, messages: list[str], runtime_probe: dict[str, object]) -> None:
@@ -191,7 +180,6 @@ def apply_anima_intel_xpu_experimental_policy(args: Namespace) -> list[str]:
     args.attn_mode = "torch"
     if hasattr(args, "sdpa"):
         args.sdpa = True
-    args.enable_preview = False
 
     if bool(getattr(args, "xformers", False)):
         args.xformers = False
@@ -266,7 +254,7 @@ def apply_anima_intel_xpu_experimental_policy(args: Namespace) -> list[str]:
                 f"Intel XPU 实验核心当前未检测到可用的 SageAttention 构建（{sage_probe['reason'] or 'runtime probe failed'}），已自动回退为 SDPA。"
             )
 
-    _disable_preview_settings(args, messages)
+    _apply_safe_preview_settings(args, messages)
     _apply_mixed_precision_policy(args, messages, runtime_probe)
 
     return messages
@@ -293,6 +281,7 @@ def log_anima_intel_xpu_experimental_banner(args: Namespace, messages: list[str]
         f"bf16_supported={runtime_probe.get('bf16_supported')} | "
         f"preview_requested={bool(getattr(args, '_intel_preview_requested', False))} | "
         f"preview_forced_off={bool(getattr(args, '_intel_preview_forced_off', False))} | "
+        f"preview_backend={getattr(args, '_runtime_preview_backend', '')} | "
         f"sample_at_first={bool(getattr(args, 'sample_at_first', False))} | "
         f"sample_every_n_steps={getattr(args, 'sample_every_n_steps', None)} | "
         f"sample_every_n_epochs={getattr(args, 'sample_every_n_epochs', None)} | "

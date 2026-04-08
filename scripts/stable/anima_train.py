@@ -867,7 +867,7 @@ if __name__ == "__main__":
     args = train_util.read_config_from_file(args, parser)
     args = _restore_missing_parser_defaults(parser, args)
 
-    if args.attn_mode == "sdpa":
+    if getattr(args, "attn_mode", None) == "sdpa":
         args.attn_mode = "torch"  # backward compatibility
 
     train(args)

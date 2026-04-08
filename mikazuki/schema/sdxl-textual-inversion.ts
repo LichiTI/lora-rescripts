@@ -115,6 +115,7 @@ Schema.intersect([
     SHARED_SCHEMAS.OTHER,
     Schema.object(UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {
         sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+        flashattn: Schema.boolean().default(false).description("启用 FlashAttention 2（实验性，需要 FlashAttention 运行时）"),
     }, [
         "cache_text_encoder_outputs",
         "cache_text_encoder_outputs_to_disk",

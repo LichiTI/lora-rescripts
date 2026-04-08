@@ -5,10 +5,17 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$portablePython = Join-Path $repoRoot "python\python.exe"
-$venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
-$portableMarker = Join-Path $repoRoot "python\.deps_installed"
-$venvMarker = Join-Path $repoRoot "venv\.deps_installed"
+. (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$portableRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "portable"
+$portableRuntimeDir = $portableRuntimeInfo.DirectoryPath
+$portablePython = Join-Path $portableRuntimeDir "python.exe"
+$portableMarker = Join-Path $portableRuntimeDir ".deps_installed"
+
+$venvRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "venv"
+$venvRuntimeDir = $venvRuntimeInfo.DirectoryPath
+$venvPython = Join-Path $venvRuntimeDir "Scripts\python.exe"
+$venvMarker = Join-Path $venvRuntimeDir ".deps_installed"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
 $mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
@@ -110,7 +117,11 @@ elseif (Test-Path $venvPython) {
 }
 elseif ($allowExternalPython) {
     Write-Host -ForegroundColor Yellow "No project-local Python found. MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 is set, creating a project-local venv from system Python..."
-    python -m venv (Join-Path $repoRoot "venv")
+    $venvParentDir = Split-Path -Parent $venvRuntimeDir
+    if (-not (Test-Path $venvParentDir)) {
+        New-Item -ItemType Directory -Path $venvParentDir -Force | Out-Null
+    }
+    python -m venv $venvRuntimeDir
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create venv."
     }
@@ -128,8 +139,8 @@ Expected one of:
 - $venvPython
 
 Recommended fix:
-1. Bundle a ready-to-run portable Python in .\python
-2. Or set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 once to bootstrap a project-local .\venv for development
+1. Bundle a ready-to-run portable Python in .\env\python or the legacy .\python
+2. Or set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 once to bootstrap a project-local .\env\venv or legacy .\venv for development
 "@
 }
 
