@@ -2,6 +2,120 @@
     const SAMPLE_PROMPTS_DEFAULT = "(masterpiece, best quality:1.2), 1girl, solo, --n lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts,signature, watermark, username, blurry,  --w 512  --h 768  --l 7  --s 24  --d 1337"
     const SAMPLE_PROMPTS_DESCRIPTION = "预览图生成参数。可填写直接填写参数，或单独写入txt文件填写路径<br>`--n` 后方为反向提示词<br>`--w`宽，`--h`高<br>`--l`: CFG Scale<br>`--s`: 迭代步数<br>`--d`: 种子"
 
+    const LULYNX_ANIMA_BLOCK_WEIGHTS_DEFAULT = Array(28).fill("1").join(",")
+
+    const LULYNX_EXPERIMENTAL_CORE_COMMON = Schema.intersect([
+        Schema.object({
+            lulynx_experimental_core_enabled: Schema.boolean().default(false).description("启用 Lulynx 实验核心。集中管理 SafeGuard、EMA、ResourceManager、BlockWeightManager、SmartRank 与 AutoController"),
+        }),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_safeguard_enabled: Schema.boolean().default(false).description("启用 Lulynx SafeGuard。桥接到当前训练器的轻量安全防护"),
+                lulynx_ema_enabled: Schema.boolean().default(false).description("启用 Lulynx EMA。桥接到当前训练器现有的 EMA 实现"),
+                lulynx_resource_manager_enabled: Schema.boolean().default(false).description("启用 Lulynx ResourceManager。监控显存占用并按设定节奏清理缓存"),
+                lulynx_block_weight_enabled: Schema.boolean().default(false).description("启用 Lulynx BlockWeightManager。按模型结构分配分层学习率"),
+                lulynx_smart_rank_enabled: Schema.boolean().default(false).description("启用 Lulynx SmartRank。周期性压缩低能量 rank 通道"),
+                lulynx_auto_controller_enabled: Schema.boolean().default(false).description("启用 Lulynx AutoController。根据 loss 平台自动控速、降学习率或提前停止"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_safeguard_enabled: Schema.const(true).required(),
+                lulynx_safeguard_nan_check_interval: Schema.number().min(1).default(1).description("每 N 个优化 step 检查一次 NaN / Inf loss"),
+                lulynx_safeguard_max_nan_count: Schema.number().min(1).default(3).description("连续触发多少次 NaN / Inf 后直接停止训练"),
+                lulynx_safeguard_loss_spike_threshold: Schema.number().min(1).step(0.1).default(5.0).description("当前 loss 超过滚动平均值多少倍时判定为 spike"),
+                lulynx_safeguard_loss_window_size: Schema.number().min(2).default(20).description("判定 loss spike 的滚动窗口大小"),
+                lulynx_safeguard_auto_reduce_lr: Schema.boolean().default(false).description("SafeGuard 触发时自动降低学习率"),
+                lulynx_safeguard_lr_reduction_factor: Schema.number().min(0.01).max(1).step(0.01).default(0.5).description("自动降低学习率时使用的倍率"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_ema_enabled: Schema.const(true).required(),
+                lulynx_ema_decay: Schema.number().min(0).max(0.99999).step(0.0001).default(0.999).description("EMA 衰减率。越接近 1 越平滑"),
+                lulynx_ema_update_every: Schema.number().min(1).default(1).description("每 N 个优化 step 更新一次 EMA"),
+                lulynx_ema_update_after_step: Schema.number().min(0).default(0).description("从第几个优化 step 开始更新 EMA"),
+                lulynx_ema_use_warmup: Schema.boolean().default(false).description("对 EMA 衰减率启用 warmup"),
+                lulynx_ema_inv_gamma: Schema.number().min(0.0001).step(0.01).default(1.0).description("EMA warmup 的 inverse gamma"),
+                lulynx_ema_power: Schema.number().min(0.0001).step(0.01).default(0.75).description("EMA warmup 的 power"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_resource_manager_enabled: Schema.const(true).required(),
+                lulynx_resource_log_interval: Schema.number().min(1).default(25).description("每 N 个优化 step 输出一次资源日志"),
+                lulynx_resource_warn_vram_ratio: Schema.number().min(0.1).max(0.999).step(0.01).default(0.90).description("显存保留占比达到该阈值时告警"),
+                lulynx_resource_critical_vram_ratio: Schema.number().min(0.1).max(0.9999).step(0.01).default(0.96).description("显存保留占比达到该阈值时执行紧急缓存清理"),
+                lulynx_resource_clear_cache_every_n_steps: Schema.number().min(0).default(50).description("每 N 个优化 step 主动清理一次缓存。0 表示关闭"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_smart_rank_enabled: Schema.const(true).required(),
+                lulynx_smart_rank_keep_ratio: Schema.number().min(0.05).max(1).step(0.01).default(0.75).description("保留多少比例的 rank 通道。数值越低越激进"),
+                lulynx_smart_rank_update_every: Schema.number().min(1).default(100).description("每 N 个优化 step 重新应用一次 SmartRank"),
+                lulynx_smart_rank_start_step: Schema.number().min(0).default(200).description("从第几个优化 step 开始启用 SmartRank"),
+                lulynx_smart_rank_min_active_rank: Schema.number().min(1).default(1).description("每个 LoRA 模块至少保留多少个 rank"),
+                lulynx_smart_rank_scope: Schema.union(["all", "unet", "text_encoder"]).default("all").description("SmartRank 作用范围"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_auto_controller_enabled: Schema.const(true).required(),
+                lulynx_auto_check_every: Schema.number().min(1).default(50).description("每 N 个优化 step 做一次 AutoController 判断"),
+                lulynx_auto_plateau_window: Schema.number().min(2).default(30).description("用于判定平台期的 loss 窗口大小"),
+                lulynx_auto_plateau_tolerance: Schema.number().min(0).max(1).step(0.001).default(0.01).description("认定为有效改善所需的相对 loss 降幅"),
+                lulynx_auto_lr_decay_factor: Schema.number().min(0.01).max(1).step(0.01).default(0.85).description("平台期触发降学习率时使用的倍率"),
+                lulynx_auto_lr_patience: Schema.number().min(1).default(2).description("连续多少次平台期后执行一次降学习率"),
+                lulynx_auto_early_stop_patience: Schema.number().min(1).default(6).description("连续多少次平台期后提前停止训练"),
+                lulynx_auto_min_lr: Schema.number().min(0).step(0.0000001).default(0.0000001).description("自动降学习率时的最小学习率下限"),
+                lulynx_auto_freeze_text_encoder_on_plateau: Schema.boolean().default(false).description("平台期持续时自动冻结文本编码器侧 LoRA 参数"),
+            }),
+            Schema.object({}),
+        ]),
+    ])
+
+    const LULYNX_EXPERIMENTAL_CORE_SDXL = Schema.intersect([
+        LULYNX_EXPERIMENTAL_CORE_COMMON,
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_block_weight_enabled: Schema.const(true).required(),
+                lulynx_down_lr_weight: Schema.string().default("1,1,1,1,1,1,1,1,1").description("SDXL Encoder 分层学习率权重，共 9 段"),
+                lulynx_mid_lr_weight: Schema.string().default("1,1,1").description("SDXL Mid 分层学习率权重，共 3 段"),
+                lulynx_up_lr_weight: Schema.string().default("1,1,1,1,1,1,1,1,1").description("SDXL Decoder 分层学习率权重，共 9 段"),
+                lulynx_block_lr_zero_threshold: Schema.number().step(0.01).default(0).description("低于该阈值的 block 权重按 0 处理"),
+            }),
+            Schema.object({}),
+        ]),
+    ]).description("Lulynx 实验核心")
+
+    const LULYNX_EXPERIMENTAL_CORE_ANIMA = Schema.intersect([
+        LULYNX_EXPERIMENTAL_CORE_COMMON,
+        Schema.union([
+            Schema.object({
+                lulynx_experimental_core_enabled: Schema.const(true).required(),
+                lulynx_block_weight_enabled: Schema.const(true).required(),
+                lulynx_anima_block_lr_weights: Schema.string().role('textarea').default(LULYNX_ANIMA_BLOCK_WEIGHTS_DEFAULT).description("Anima 主 transformer blocks 分层学习率权重，共 28 层，顺序对应 blocks.0 到 blocks.27"),
+                lulynx_anima_llm_adapter_lr_weight: Schema.number().step(0.01).default(1.0).description("LLM Adapter 学习率倍率"),
+                lulynx_anima_final_layer_lr_weight: Schema.number().step(0.01).default(1.0).description("final_layer 学习率倍率"),
+                lulynx_anima_norm_lr_weight: Schema.number().step(0.01).default(1.0).description("匹配 norm 层的学习率倍率"),
+            }),
+            Schema.object({}),
+        ]),
+    ]).description("Lulynx 实验核心")
+
     let data = {
         RAW: {
             DATASET_SETTINGS: {
@@ -108,6 +222,9 @@
             }),
             Schema.object({}),
         ]),
+
+        LULYNX_EXPERIMENTAL_CORE_SDXL,
+        LULYNX_EXPERIMENTAL_CORE_ANIMA,
 
         SAVE_SETTINGS: Schema.intersect([
             Schema.object({

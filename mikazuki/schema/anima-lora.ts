@@ -110,6 +110,7 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
+    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA,
     Schema.intersect([
         Schema.object({
             enable_preview: Schema.boolean().default(false).description("启用训练预览图"),
