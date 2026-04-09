@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sys
 
 from glob import glob
 from datetime import datetime
@@ -72,6 +73,12 @@ from mikazuki.utils.runtime_dependencies import (
     analyze_training_runtime_dependencies,
     build_runtime_status_payload,
 )
+from mikazuki.utils.runtime_mode import (
+    infer_attention_runtime_mode,
+    infer_runtime_environment_name,
+    is_amd_rocm_runtime,
+    is_intel_xpu_runtime,
+)
 from mikazuki.utils.attention_runtime_guard import (
     apply_sageattention_route_guard,
     apply_sageattention_runtime_override,
@@ -135,6 +142,17 @@ avaliable_scripts = [
 avaliable_schemas = []
 avaliable_presets = []
 
+EXPERIMENTAL_SAFE_OPTIMIZERS = (
+    "AdamW",
+    "AdaFactor",
+    "Lion",
+    "SGDNesterov",
+)
+EXPERIMENTAL_RUNTIME_SCHEMA_OPTIMIZER_PATTERN = re.compile(
+    r'(?P<indent>[ \t]*)optimizer_type:\s*Schema\.union\(\[(?P<body>.*?)\]\)\.default\("(?P<default>[^"]+)"\)\.description\("优化器设置"\)',
+    re.DOTALL,
+)
+
 script_positional_args = {
     "networks/convert_hunyuan_image_lora_to_comfy.py": ["src_path", "dst_path"],
     "networks/convert_anima_lora_to_comfy.py": ["src_path", "dst_path"],
@@ -142,6 +160,26 @@ script_positional_args = {
     "tools/resize_images_to_resolution.py": ["src_img_folder", "dst_img_folder"],
     "tools/convert_diffusers20_original_sd.py": ["model_to_load", "model_to_save"],
 }
+
+
+def apply_runtime_schema_overrides(content: str) -> str:
+    runtime_name = infer_attention_runtime_mode()
+    if not (is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name)):
+        return content
+
+    runtime_label = "AMD ROCm" if is_amd_rocm_runtime(runtime_name) else "Intel XPU"
+
+    def replace_optimizer_block(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        option_indent = indent + "    "
+        options = "\n".join(f'{option_indent}"{item}",' for item in EXPERIMENTAL_SAFE_OPTIMIZERS)
+        return (
+            f'{indent}optimizer_type: Schema.union([\n'
+            f'{options}\n'
+            f'{indent}]).default("AdamW").description("优化器设置（{runtime_label} 实验运行时仅显示已验证选项）")'
+        )
+
+    return EXPERIMENTAL_RUNTIME_SCHEMA_OPTIMIZER_PATTERN.sub(replace_optimizer_block, content)
 
 async def load_schemas():
     avaliable_schemas.clear()
@@ -154,7 +192,7 @@ async def load_schemas():
 
     for schema_path in schemas:
         with open(schema_path, encoding="utf-8") as f:
-            content = f.read()
+            content = apply_runtime_schema_overrides(f.read())
             avaliable_schemas.append({
                 "name": schema_path.stem,
                 "schema": content,
@@ -1782,11 +1820,10 @@ async def get_task_output(task_id: str, tail: int = 50) -> APIResponse:
         return APIResponseFail(message="Task not found")
 
     safe_tail = max(1, min(int(tail or 50), 1000))
-    lines, total, live_line = task.get_output_snapshot(tail=safe_tail)
+    lines, total = task.get_output_snapshot(tail=safe_tail)
     return APIResponseSuccess(data={
         "lines": lines,
         "total": total,
-        "live_line": live_line,
     })
 
 
@@ -1817,6 +1854,56 @@ async def get_gpu_status() -> APIResponse:
         return APIResponseSuccess(data={"available": True, "gpus": gpus})
     except Exception as exc:
         return APIResponseSuccess(data={"available": False, "error": str(exc)})
+
+
+def _fallback_runtime_status_payload(error_message: str) -> dict:
+    return {
+        "environment": infer_runtime_environment_name(),
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "required_ready": False,
+        "packages": {},
+        "inspection_errors": [str(error_message)],
+        "error": str(error_message),
+    }
+
+
+def _safe_build_runtime_status_payload() -> dict:
+    try:
+        payload = build_runtime_status_payload()
+    except Exception as exc:
+        log.exception("Failed to build runtime status payload for /graphic_cards")
+        return _fallback_runtime_status_payload(f"Runtime inspection failed: {exc}")
+
+    if not isinstance(payload, dict):
+        return _fallback_runtime_status_payload("Runtime inspection returned an invalid payload.")
+    return payload
+
+
+def _safe_get_xformers_status() -> dict:
+    fallback = {
+        "version": None,
+        "installed": False,
+        "supported": False,
+        "reason": "xformers status is unavailable.",
+    }
+    try:
+        status = get_xformers_status()
+    except Exception as exc:
+        log.exception("Failed to probe xformers status for /graphic_cards")
+        fallback["reason"] = f"xformers probe failed: {exc}"
+        return fallback
+
+    if not isinstance(status, dict):
+        fallback["reason"] = "xformers probe returned an invalid payload."
+        return fallback
+
+    return {
+        "version": status.get("version"),
+        "installed": bool(status.get("installed", False)),
+        "supported": bool(status.get("supported", False)),
+        "reason": str(status.get("reason", "") or ""),
+    }
 
 
 @router.get("/dataset/list_images")
@@ -1850,32 +1937,23 @@ async def list_dataset_images(folder: str, limit: int = 8) -> APIResponse:
 
 @router.get("/graphic_cards")
 async def list_avaliable_cards() -> APIResponse:
-    runtime_info = build_runtime_status_payload()
-    if not printable_devices:
+    runtime_info = _safe_build_runtime_status_payload()
+    xformers_info = _safe_get_xformers_status()
+    cards = list(printable_devices)
+    if not cards:
         return APIResponse(
             status="pending",
             message="GPU detection is still in progress.",
             data={
                 "cards": [],
-                "xformers": {
-                    "version": None,
-                    "installed": False,
-                    "supported": False,
-                    "reason": "GPU detection is still in progress.",
-                },
+                "xformers": xformers_info,
                 "runtime": runtime_info,
             },
         )
 
-    xformers_info = get_xformers_status()
     return APIResponseSuccess(data={
-        "cards": printable_devices,
-        "xformers": {
-            "version": xformers_info.get("version"),
-            "installed": xformers_info["installed"],
-            "supported": xformers_info["supported"],
-            "reason": xformers_info["reason"],
-        },
+        "cards": cards,
+        "xformers": xformers_info,
         "runtime": runtime_info,
     })
 

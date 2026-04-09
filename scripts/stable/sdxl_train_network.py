@@ -60,9 +60,16 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self.ckpt_info = ckpt_info
 
         # モデルに xformers とか memory efficient attention を組み込む
-        train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa, getattr(args, "sageattn", False))
+        train_util.replace_unet_modules(
+            unet,
+            args.mem_eff_attn,
+            args.xformers,
+            args.sdpa,
+            getattr(args, "sageattn", False),
+            getattr(args, "flashattn", False),
+        )
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
-            vae.set_use_memory_efficient_attention_xformers(args.xformers)
+            vae.set_use_memory_efficient_attention_xformers(args.xformers and not getattr(args, "flashattn", False))
 
         return sdxl_model_util.MODEL_VERSION_SDXL_BASE_V1_0, [text_encoder1, text_encoder2], vae, unet
 

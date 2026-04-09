@@ -29,6 +29,7 @@ from library import deepspeed_utils, model_util, sai_model_spec, strategy_base, 
 
 import library.train_util as train_util
 from library.train_util import DreamBoothDataset
+from lulynx.experimental_core import add_lulynx_experimental_arguments, create_lulynx_core, normalize_lulynx_args
 import library.config_util as config_util
 from library.config_util import (
     ConfigSanitizer,
@@ -569,6 +570,11 @@ class NetworkTrainer:
         deepspeed_utils.prepare_deepspeed_args(args)
         setup_logging(args, reset=True)
         self.normalize_conflicting_network_target_flags(args)
+        normalize_lulynx_args(
+            args,
+            route_label="SDXL LoRA" if self.is_sdxl else "Stable LoRA",
+            route_kind="sdxl" if self.is_sdxl else "stable",
+        )
 
         cache_latents = args.cache_latents
         use_dreambooth_method = args.in_json is None
@@ -776,6 +782,14 @@ class NetworkTrainer:
             args.scale_weight_norms = False
 
         self.post_process_network(args, accelerator, network, text_encoders, unet)
+
+        lulynx_core = create_lulynx_core(
+            args,
+            route_kind="sdxl" if self.is_sdxl else "stable",
+            route_label="SDXL LoRA" if self.is_sdxl else "Stable LoRA",
+        )
+        if lulynx_core is not None:
+            lulynx_core.apply_pre_optimizer_settings(network)
 
         # apply network to unet and text_encoder
         train_unet = not args.network_train_text_encoder_only
@@ -1084,6 +1098,8 @@ class NetworkTrainer:
         train_util.resume_from_local_or_hf_if_specified(accelerator, args)
         safeguard = train_util.create_training_safeguard(args)
         ema_model = train_util.create_model_ema(args, [("network", accelerator.unwrap_model(network))])
+        if lulynx_core is not None:
+            lulynx_core.attach_runtime(train_text_encoder=train_text_encoder)
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1187,6 +1203,7 @@ class NetworkTrainer:
             "ss_validate_every_n_epochs": args.validate_every_n_epochs,
             "ss_validate_every_n_steps": args.validate_every_n_steps,
             "ss_resize_interpolation": args.resize_interpolation,
+            "ss_attention_backend": train_util.resolve_attention_backend(args),
         }
 
         self.update_metadata(metadata, args)  # architecture specific metadata
@@ -1327,6 +1344,8 @@ class NetworkTrainer:
         # add extra args
         if args.network_args:
             metadata["ss_network_args"] = json.dumps(net_kwargs)
+        if lulynx_core is not None:
+            metadata.update(lulynx_core.get_metadata())
 
         # model name and hash
         if args.pretrained_model_name_or_path is not None:
@@ -1493,6 +1512,7 @@ class NetworkTrainer:
             disable=not accelerator.is_local_main_process,
             desc="steps",
         )
+        lulynx_stop_reason = None
 
         validation_steps = (
             min(args.max_validation_steps, len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
@@ -1659,6 +1679,19 @@ class NetworkTrainer:
                                 remove_model(remove_ckpt_name)
                     optimizer_train_fn()
 
+                    if lulynx_core is not None:
+                        lulynx_decision = lulynx_core.on_optimizer_step(
+                            global_step=global_step,
+                            current_loss=current_loss,
+                            average_loss=loss_recorder.moving_average,
+                            optimizer=optimizer,
+                            lr_scheduler=lr_scheduler,
+                            accelerator=accelerator,
+                            network=accelerator.unwrap_model(network),
+                        )
+                        if lulynx_decision.stop_training and lulynx_stop_reason is None:
+                            lulynx_stop_reason = lulynx_decision.reason or "Lulynx experimental core requested stop."
+
                 if safeguard is not None:
                     safeguard.record_loss(current_loss)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
@@ -1753,8 +1786,14 @@ class NetworkTrainer:
                     accelerator.unwrap_model(network).train()
                     progress_bar.unpause()
 
+                if lulynx_stop_reason is not None:
+                    break
+
                 if global_step >= args.max_train_steps:
                     break
+
+            if lulynx_stop_reason is not None:
+                break
 
             # EPOCH VALIDATION
             should_validate_epoch = (
@@ -1900,6 +1939,7 @@ def setup_parser() -> argparse.ArgumentParser:
     train_util.add_optimizer_arguments(parser)
     config_util.add_config_arguments(parser)
     custom_train_functions.add_custom_train_arguments(parser)
+    add_lulynx_experimental_arguments(parser)
 
     parser.add_argument(
         "--cpu_offload_checkpointing",

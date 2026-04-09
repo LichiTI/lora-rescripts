@@ -8,19 +8,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
+from mikazuki.utils.runtime_mode import infer_attention_runtime_mode
+from mikazuki.utils.runtime_paths import iter_runtime_dir_candidates
 
 _AMD_SAGE_RUNTIME_NAMES = {"rocm-amd-sage"}
 
 
 def is_amd_rocm_sage_runtime() -> bool:
-    preferred_runtime = str(os.environ.get("MIKAZUKI_PREFERRED_RUNTIME", "") or "").strip().lower()
-    if preferred_runtime in _AMD_SAGE_RUNTIME_NAMES:
-        return True
-    if str(os.environ.get("MIKAZUKI_ROCM_AMD_SAGE_STARTUP", "") or "").strip() == "1":
-        return True
-
-    executable = sys.executable.replace("\\", "/").lower()
-    return "/python_rocm_amd_sage/" in executable or "/python-rocm-amd-sage/" in executable
+    return infer_attention_runtime_mode() in _AMD_SAGE_RUNTIME_NAMES
 
 
 def _repo_root() -> Path:
@@ -40,8 +35,8 @@ def _normalize_source_candidate(raw_value: str) -> Path | None:
 def get_amd_rocm_sage_source_root() -> Path | None:
     candidates: list[Path | None] = [
         _normalize_source_candidate(os.environ.get("MIKAZUKI_AMD_SAGE_SOURCE", "")),
-        _repo_root() / "python_rocm_amd_sage" / "SageAttention-rocm",
-        _repo_root() / "python_rocm_amd" / "SageAttention-rocm",
+        *[candidate / "SageAttention-rocm" for candidate in iter_runtime_dir_candidates(_repo_root(), "rocm-amd-sage")],
+        *[candidate / "SageAttention-rocm" for candidate in iter_runtime_dir_candidates(_repo_root(), "rocm-amd")],
     ]
 
     for candidate in candidates:

@@ -12,6 +12,7 @@
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $runGuiScript = Join-Path $repoRoot 'run_gui.ps1'
 . (Join-Path $PSScriptRoot 'console_i18n.ps1')
+. (Join-Path $PSScriptRoot 'runtime_paths.ps1')
 
 function Get-FirstExistingPath {
     param(
@@ -170,6 +171,7 @@ function Get-LaunchProfiles {
             AttentionPolicy = ''
             EnableSageStartup = $false
             EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $false
         },
         [pscustomobject]@{
             Id = 'sageattention'
@@ -179,6 +181,17 @@ function Get-LaunchProfiles {
             AttentionPolicy = 'prefer_sage'
             EnableSageStartup = $true
             EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $false
+        },
+        [pscustomobject]@{
+            Id = 'flashattention'
+            Label = Get-ConsoleText -Key 'launcher_profile_flashattention_label'
+            Description = Get-ConsoleText -Key 'launcher_profile_flashattention_description'
+            PreferredRuntime = 'flashattention'
+            AttentionPolicy = ''
+            EnableSageStartup = $false
+            EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $true
         },
         [pscustomobject]@{
             Id = 'standard'
@@ -188,6 +201,7 @@ function Get-LaunchProfiles {
             AttentionPolicy = ''
             EnableSageStartup = $false
             EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $false
         },
         [pscustomobject]@{
             Id = 'safe-sdpa'
@@ -197,6 +211,7 @@ function Get-LaunchProfiles {
             AttentionPolicy = 'force_sdpa'
             EnableSageStartup = $false
             EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $false
         },
         [pscustomobject]@{
             Id = 'blackwell'
@@ -206,15 +221,7 @@ function Get-LaunchProfiles {
             AttentionPolicy = ''
             EnableSageStartup = $false
             EnableBlackwellStartup = $true
-        },
-        [pscustomobject]@{
-            Id = 'blackwell-sageattention'
-            Label = Get-ConsoleText -Key 'launcher_profile_blackwell_sage_label'
-            Description = Get-ConsoleText -Key 'launcher_profile_blackwell_sage_description'
-            PreferredRuntime = 'sageattention-blackwell'
-            AttentionPolicy = 'prefer_sage'
-            EnableSageStartup = $true
-            EnableBlackwellStartup = $false
+            EnableFlashAttentionStartup = $false
         }
     )
 }
@@ -233,8 +240,8 @@ function Show-LaunchProfileMenu {
 function Clear-LaunchEnvironmentOverrides {
     foreach ($name in @(
         'MIKAZUKI_PREFERRED_RUNTIME',
+        'MIKAZUKI_FLASHATTENTION_STARTUP',
         'MIKAZUKI_SAGEATTENTION_STARTUP',
-        'MIKAZUKI_SAGEATTENTION2_STARTUP',
         'MIKAZUKI_BLACKWELL_STARTUP',
         'MIKAZUKI_STARTUP_ATTENTION_POLICY'
     )) {
@@ -255,6 +262,9 @@ function Apply-LaunchProfile {
     if ($Profile.EnableSageStartup) {
         $Env:MIKAZUKI_SAGEATTENTION_STARTUP = '1'
     }
+    if ($Profile.EnableFlashAttentionStartup) {
+        $Env:MIKAZUKI_FLASHATTENTION_STARTUP = '1'
+    }
     if ($Profile.EnableBlackwellStartup) {
         $Env:MIKAZUKI_BLACKWELL_STARTUP = '1'
     }
@@ -263,15 +273,9 @@ function Apply-LaunchProfile {
     }
 }
 
-$sagePython = Get-FirstExistingPath @(
-    (Join-Path $repoRoot 'python-sageattention\python.exe'),
-    (Join-Path $repoRoot 'python_sageattention\python.exe')
-)
-$blackwellPython = Join-Path $repoRoot 'python_blackwell\python.exe'
-$blackwellSagePython = Get-FirstExistingPath @(
-    (Join-Path $repoRoot 'python-sageattention-blackwell\python.exe'),
-    (Join-Path $repoRoot 'python_sageattention_blackwell\python.exe')
-)
+$flashAttentionPython = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'flashattention' -RelativeFilePath 'python.exe').Path)
+$sagePython = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'sageattention' -RelativeFilePath 'python.exe').Path)
+$blackwellPython = Get-FirstExistingPath @((Get-RuntimeFileCandidates -RepoRoot $repoRoot -RuntimeName 'blackwell' -RelativeFilePath 'python.exe').Path)
 
 $requestedConsoleLanguage = $Language
 if ($Mode -eq 'Manual' -and -not $PSBoundParameters.ContainsKey('Language')) {
@@ -304,9 +308,9 @@ $selectionPayload = [ordered]@{
     preferred_runtime = $selectedProfile.PreferredRuntime
     attention_policy = $selectedProfile.AttentionPolicy
     console_language = Get-ConsoleLanguage
+    flashattention_runtime_detected = [bool]$flashAttentionPython
     sage_runtime_detected = [bool]$sagePython
-    blackwell_runtime_detected = (Test-Path $blackwellPython)
-    blackwell_sage_runtime_detected = [bool]$blackwellSagePython
+    blackwell_runtime_detected = [bool]$blackwellPython
 }
 
 if ($PrintSelectionOnly) {

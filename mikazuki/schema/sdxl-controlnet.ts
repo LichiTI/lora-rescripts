@@ -86,6 +86,7 @@ Schema.intersect([
     SHARED_SCHEMAS.OTHER,
     Schema.object(UpdateSchema(SHARED_SCHEMAS.RAW.PRECISION_CACHE_BATCH, {
         sageattn: Schema.boolean().default(false).description("启用 SageAttention（实验性，需要 SageAttention 专用环境）"),
+        flashattn: Schema.boolean().default(false).description("启用 FlashAttention 2（实验性，需要 FlashAttention 运行时）"),
     })).description("速度优化选项"),
     SHARED_SCHEMAS.DISTRIBUTED_TRAINING
 ]);

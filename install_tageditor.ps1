@@ -4,13 +4,26 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$tagEditorPortablePython = Join-Path $repoRoot "python_tageditor\python.exe"
-$tagEditorVenvPython = Join-Path $repoRoot "venv-tageditor\Scripts\python.exe"
-$portablePython = Join-Path $repoRoot "python\python.exe"
-$venvPython = Join-Path $repoRoot "venv\Scripts\python.exe"
+. (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$tagEditorPortableRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "tageditor"
+$tagEditorPortableRuntimeDir = $tagEditorPortableRuntimeInfo.DirectoryPath
+$tagEditorPortablePython = Join-Path $tagEditorPortableRuntimeDir "python.exe"
+
+$tagEditorVenvRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "venv-tageditor"
+$tagEditorVenvRuntimeDir = $tagEditorVenvRuntimeInfo.DirectoryPath
+$tagEditorVenvPython = Join-Path $tagEditorVenvRuntimeDir "Scripts\python.exe"
+
+$portableRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "portable"
+$portableRuntimeDir = $portableRuntimeInfo.DirectoryPath
+$portablePython = Join-Path $portableRuntimeDir "python.exe"
+
+$venvRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "venv"
+$venvRuntimeDir = $venvRuntimeInfo.DirectoryPath
+$venvPython = Join-Path $venvRuntimeDir "Scripts\python.exe"
 $tagEditorRequirements = Join-Path $repoRoot "mikazuki\dataset-tag-editor\requirements.txt"
-$portableMarker = Join-Path $repoRoot "python_tageditor\.tageditor_installed"
-$venvMarker = Join-Path $repoRoot "venv-tageditor\.tageditor_installed"
+$portableMarker = Join-Path $tagEditorPortableRuntimeDir ".tageditor_installed"
+$venvMarker = Join-Path $tagEditorVenvRuntimeDir ".tageditor_installed"
 
 function Invoke-Step {
     param (
@@ -77,12 +90,12 @@ elseif (Test-Path $tagEditorVenvPython) {
 elseif (Test-Path $portablePython) {
     Write-Host -ForegroundColor Green "Using main portable Python..."
     $pythonExe = $portablePython
-    $markerPath = Join-Path $repoRoot "python\.tageditor_installed"
+    $markerPath = Join-Path $portableRuntimeDir ".tageditor_installed"
 }
 elseif (Test-Path $venvPython) {
     Write-Host -ForegroundColor Green "Using main virtual environment..."
     $pythonExe = $venvPython
-    $markerPath = Join-Path $repoRoot "venv\.tageditor_installed"
+    $markerPath = Join-Path $venvRuntimeDir ".tageditor_installed"
 }
 else {
     throw @"
@@ -95,8 +108,8 @@ Expected one of:
 - $venvPython
 
 Recommended fix:
-1. Prepare python_tageditor for the bundled tag editor runtime
-2. Or run install.ps1 first so the project can bootstrap .\venv intentionally
+1. Prepare env\python_tageditor for the bundled tag editor runtime, or keep using the legacy root folder
+2. Or run install.ps1 first so the project can bootstrap .\env\venv intentionally
 "@
 }
 
@@ -122,7 +135,7 @@ Reason:
 
 Recommended fix:
 1. Prepare a separate Python 3.12 environment for the tag editor.
-2. Put it in $repoRoot\python_tageditor
+2. Put it in $tagEditorPortableRuntimeDir
 3. Run install_tageditor.ps1 again
 
 This keeps the main trainer on Python 3.13, while restoring tag editor as a bundled core feature.

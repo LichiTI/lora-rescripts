@@ -10,6 +10,7 @@ from lulynx_intel.anima_runtime import (
     is_intel_xpu_runtime,
     log_anima_intel_xpu_experimental_banner,
 )
+from mikazuki.utils.runtime_safe_preview import temporary_anima_safe_preview_backend
 
 
 @contextmanager
@@ -70,18 +71,20 @@ class AnimaNetworkTrainer(_BaseAnimaNetworkTrainer):
         text_encoding_strategy,
         network=None,
     ):
-        result = super().sample_images(
-            accelerator,
-            args,
-            epoch,
-            global_step,
-            vae,
-            text_encoder,
-            dit,
-            tokenize_strategy,
-            text_encoding_strategy,
-            network=network,
-        )
+        unwrapped_dit = accelerator.unwrap_model(dit)
+        with temporary_anima_safe_preview_backend(args, unwrapped_dit, route_label="Intel Anima preview"):
+            result = super().sample_images(
+                accelerator,
+                args,
+                epoch,
+                global_step,
+                vae,
+                text_encoder,
+                dit,
+                tokenize_strategy,
+                text_encoding_strategy,
+                network=network,
+            )
         self._cleanup_intel_runtime_memory()
         return result
 

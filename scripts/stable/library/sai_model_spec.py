@@ -284,12 +284,9 @@ def get_implementation_version() -> str:
         if result.returncode == 0:
             commit_hash = result.stdout.strip()
             return f"sd-scripts/{commit_hash}"
-        else:
-            logger.warning("Failed to get git commit hash, using fallback")
-            return "sd-scripts/unknown"
+        return "sd-scripts/unknown"
 
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError) as e:
-        logger.warning(f"Could not determine git commit: {e}")
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
         return "sd-scripts/unknown"
 
 

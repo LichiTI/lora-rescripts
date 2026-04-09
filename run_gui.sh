@@ -8,34 +8,54 @@ export HF_HOME="${HF_HOME:-huggingface}"
 export PYTHONUTF8=1
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 
-portable_python="$script_dir/python/bin/python"
-venv_python="$script_dir/venv/bin/python"
-portable_marker="$script_dir/python/.deps_installed"
-venv_marker="$script_dir/venv/.deps_installed"
-sage_runtime_dir_name="python-sageattention"
-if [[ ! -d "$script_dir/$sage_runtime_dir_name" && -d "$script_dir/python_sageattention" ]]; then
-    sage_runtime_dir_name="python_sageattention"
-fi
-sage_runtime_dir="$script_dir/$sage_runtime_dir_name"
+resolve_runtime_dir() {
+    local preferred_name="$1"
+    shift
+    local env_root="$script_dir/env"
+    local dir_name
+
+    if [[ -d "$env_root" ]]; then
+        for dir_name in "$@"; do
+            if [[ -d "$env_root/$dir_name" ]]; then
+                printf '%s\n' "$env_root/$dir_name"
+                return 0
+            fi
+        done
+    fi
+
+    for dir_name in "$@"; do
+        if [[ -d "$script_dir/$dir_name" ]]; then
+            printf '%s\n' "$script_dir/$dir_name"
+            return 0
+        fi
+    done
+
+    if [[ -d "$env_root" ]]; then
+        printf '%s\n' "$env_root/$preferred_name"
+    else
+        printf '%s\n' "$script_dir/$preferred_name"
+    fi
+}
+
+portable_runtime_dir="$(resolve_runtime_dir "python" "python")"
+portable_python="$portable_runtime_dir/bin/python"
+venv_runtime_dir="$(resolve_runtime_dir "venv" "venv")"
+venv_python="$venv_runtime_dir/bin/python"
+portable_marker="$portable_runtime_dir/.deps_installed"
+venv_marker="$venv_runtime_dir/.deps_installed"
+sage_runtime_dir="$(resolve_runtime_dir "python-sageattention" "python-sageattention" "python_sageattention")"
+sage_runtime_dir_name="$(basename "$sage_runtime_dir")"
 sage_python="$sage_runtime_dir/bin/python"
 sage_marker="$sage_runtime_dir/.deps_installed"
-sage2_runtime_dir_name="python-sageattention-latest"
-if [[ ! -d "$script_dir/$sage2_runtime_dir_name" && -d "$script_dir/python_sageattention_latest" ]]; then
-    sage2_runtime_dir_name="python_sageattention_latest"
-fi
-sage2_runtime_dir="$script_dir/$sage2_runtime_dir_name"
-sage2_python="$sage2_runtime_dir/bin/python"
-sage2_marker="$sage2_runtime_dir/.deps_installed"
-tageditor_portable_python="$script_dir/python_tageditor/bin/python"
-tageditor_venv_python="$script_dir/venv-tageditor/bin/python"
+tageditor_portable_runtime_dir="$(resolve_runtime_dir "python_tageditor" "python_tageditor")"
+tageditor_portable_python="$tageditor_portable_runtime_dir/bin/python"
+tageditor_venv_runtime_dir="$(resolve_runtime_dir "venv-tageditor" "venv-tageditor")"
+tageditor_venv_python="$tageditor_venv_runtime_dir/bin/python"
 allow_external_python="${MIKAZUKI_ALLOW_SYSTEM_PYTHON:-0}"
 preferred_runtime="${MIKAZUKI_PREFERRED_RUNTIME:-}"
 prefer_sageattention_runtime=0
-prefer_sageattention2_runtime=0
 if [[ "$preferred_runtime" == "sageattention" ]]; then
     prefer_sageattention_runtime=1
-elif [[ "$preferred_runtime" == "sageattention2" ]]; then
-    prefer_sageattention2_runtime=1
 fi
 main_modules=(accelerate torch fastapi toml transformers diffusers lion_pytorch dadaptation schedulefree prodigyopt prodigyplus pytorch_optimizer)
 
@@ -94,7 +114,7 @@ set_dedicated_runtime_caches() {
     local current_runtime_name="$1"
     local python_bin="$2"
 
-    if [[ "$current_runtime_name" != "sageattention" && "$current_runtime_name" != "sageattention2" ]]; then
+    if [[ "$current_runtime_name" != "sageattention" ]]; then
         return 0
     fi
 
@@ -234,7 +254,7 @@ get_python_minor_version() {
 
 runtime_uses_sageattention() {
     local current_runtime_name="$1"
-    [[ "$current_runtime_name" == "sageattention" || "$current_runtime_name" == "sageattention2" ]]
+    [[ "$current_runtime_name" == "sageattention" ]]
 }
 
 selected_runtime_dependencies_ready() {
@@ -263,12 +283,6 @@ install_selected_runtime_dependencies() {
     if [[ "$current_runtime_name" == "sageattention" || "$prefer_sageattention_runtime" -eq 1 ]]; then
         echo "SageAttention experimental dependencies are not installed yet. Running install_sageattention.sh..."
         bash "$script_dir/install_sageattention.sh"
-        return $?
-    fi
-
-    if [[ "$current_runtime_name" == "sageattention2" || "$prefer_sageattention2_runtime" -eq 1 ]]; then
-        echo "SageAttention2 experimental dependencies are not installed yet. Running install_sageattention2.sh..."
-        bash "$script_dir/install_sageattention2.sh"
         return $?
     fi
 
@@ -312,33 +326,6 @@ select_main_python() {
         fi
 
         echo "SageAttention runtime bootstrap failed. Expected: $sage_python" >&2
-        exit 1
-    fi
-
-    if [[ "$prefer_sageattention2_runtime" -eq 1 ]]; then
-        if [[ -x "$sage2_python" ]]; then
-            echo "Using SageAttention2 experimental Python..."
-            if ! test_pip_ready "$sage2_python"; then
-                echo "SageAttention2 runtime is incomplete: pip is not available. Repair or recreate ./$sage2_runtime_dir_name first." >&2
-                exit 1
-            fi
-            python_exe="$sage2_python"
-            deps_marker="$sage2_marker"
-            runtime_name="sageattention2"
-            return 0
-        fi
-
-        echo "SageAttention2 startup was requested, but the dedicated runtime is missing or incomplete. Running install_sageattention2.sh..." >&2
-        bash "$script_dir/install_sageattention2.sh"
-        if [[ -x "$sage2_python" ]] && test_pip_ready "$sage2_python"; then
-            echo "Using SageAttention2 experimental Python..."
-            python_exe="$sage2_python"
-            deps_marker="$sage2_marker"
-            runtime_name="sageattention2"
-            return 0
-        fi
-
-        echo "SageAttention2 runtime bootstrap failed. Expected: $sage2_python" >&2
         exit 1
     fi
 
@@ -391,8 +378,8 @@ Expected one of:
 - $venv_python
 
 Recommended fix:
-1. Bundle a ready-to-run portable Python in ./python
-2. Or set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 and rerun to bootstrap a project-local ./venv for development
+1. Bundle a ready-to-run portable Python in ./env/python or the legacy ./python
+2. Or set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 and rerun to bootstrap a project-local ./env/venv or legacy ./venv for development
 EOF
     exit 1
 }
@@ -403,31 +390,31 @@ select_tageditor_python() {
 
     if [[ -x "$tageditor_portable_python" ]]; then
         tageditor_python="$tageditor_portable_python"
-        tageditor_marker="$script_dir/python_tageditor/.tageditor_installed"
+        tageditor_marker="$tageditor_portable_runtime_dir/.tageditor_installed"
         return 0
     fi
 
     if [[ -x "$tageditor_venv_python" ]]; then
         tageditor_python="$tageditor_venv_python"
-        tageditor_marker="$script_dir/venv-tageditor/.tageditor_installed"
+        tageditor_marker="$tageditor_venv_runtime_dir/.tageditor_installed"
         return 0
     fi
 
     local fallback_main_python=""
-    if [[ "$runtime_name" == "sageattention" || "$runtime_name" == "sageattention2" ]]; then
+    if [[ "$runtime_name" == "sageattention" ]]; then
         if [[ -x "$portable_python" ]]; then
             fallback_main_python="$portable_python"
-            tageditor_marker="$script_dir/python/.tageditor_installed"
+            tageditor_marker="$portable_runtime_dir/.tageditor_installed"
         elif [[ -x "$venv_python" ]]; then
             fallback_main_python="$venv_python"
-            tageditor_marker="$script_dir/venv/.tageditor_installed"
+            tageditor_marker="$venv_runtime_dir/.tageditor_installed"
         fi
     else
         fallback_main_python="$python_exe"
         if [[ "$python_exe" == "$portable_python" ]]; then
-            tageditor_marker="$script_dir/python/.tageditor_installed"
+            tageditor_marker="$portable_runtime_dir/.tageditor_installed"
         elif [[ "$python_exe" == "$venv_python" ]]; then
-            tageditor_marker="$script_dir/venv/.tageditor_installed"
+            tageditor_marker="$venv_runtime_dir/.tageditor_installed"
         fi
     fi
 

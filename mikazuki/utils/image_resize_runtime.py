@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib
+import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
 
@@ -8,15 +11,38 @@ from PIL import Image, UnidentifiedImageError
 from mikazuki.launch_utils import base_dir_path
 from mikazuki.log import log
 from mikazuki.utils.resume_guard import resolve_local_path
-from scripts.stable.lulynx.image_preprocessor import (
-    SUPPORTED_IMAGE_EXTENSIONS,
-    collect_images,
-    run_image_preprocessor,
-)
 
 
 IMAGE_PREVIEW_DEFAULT_LIMIT = 8
 IMAGE_PREVIEW_MAX_LIMIT = 24
+
+
+@lru_cache(maxsize=1)
+def _load_image_preprocessor_symbols():
+    repo_root = str(base_dir_path())
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    try:
+        module = importlib.import_module("scripts.stable.lulynx.image_preprocessor")
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "Lulynx image preprocessor is unavailable because the local scripts package could not be imported. "
+            "Please confirm the release package contains ./scripts/stable/lulynx/image_preprocessor.py. "
+            "/ Lulynx 图像预处理模块当前不可用：无法导入本地 scripts 包，请确认发行包内包含 "
+            "./scripts/stable/lulynx/image_preprocessor.py。"
+        ) from exc
+
+    supported_image_extensions = getattr(module, "SUPPORTED_IMAGE_EXTENSIONS", None)
+    collect_images = getattr(module, "collect_images", None)
+    run_image_preprocessor = getattr(module, "run_image_preprocessor", None)
+    if supported_image_extensions is None or not callable(collect_images) or not callable(run_image_preprocessor):
+        raise ValueError(
+            "Lulynx image preprocessor symbols are incomplete in the current build. "
+            "/ 当前发行包中的 Lulynx 图像预处理模块缺少必需符号。"
+        )
+
+    return supported_image_extensions, collect_images, run_image_preprocessor
 
 
 def resolve_image_resize_path(raw_path: str) -> Path:
@@ -32,7 +58,8 @@ def resolve_image_resize_file(raw_path: str) -> Path:
         raise FileNotFoundError(path)
     if not path.is_file():
         raise ValueError(f"Path is not a file: {path}")
-    if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+    supported_image_extensions, _, _ = _load_image_preprocessor_symbols()
+    if path.suffix.lower() not in supported_image_extensions:
         raise ValueError(f"Unsupported image file: {path.name}")
     return path
 
@@ -44,6 +71,7 @@ def build_image_resize_preview_manifest(raw_input_dir: str, recursive: bool = Fa
     if not input_dir.is_dir():
         raise ValueError(f"Input path is not a folder: {input_dir}")
 
+    _, collect_images, _ = _load_image_preprocessor_symbols()
     safe_limit = max(1, min(int(limit or IMAGE_PREVIEW_DEFAULT_LIMIT), IMAGE_PREVIEW_MAX_LIMIT))
     images = collect_images(input_dir, recursive=recursive)
     items: list[dict[str, object]] = []
@@ -88,6 +116,7 @@ def build_image_resize_preview_manifest(raw_input_dir: str, recursive: bool = Fa
 
 
 def run_image_resize_job(raw_config: Mapping[str, object]) -> dict[str, object]:
+    _, _, run_image_preprocessor = _load_image_preprocessor_symbols()
     payload = dict(raw_config)
     input_dir = resolve_image_resize_path(str(payload.get("input_dir", "") or ""))
 

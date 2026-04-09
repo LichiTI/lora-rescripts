@@ -7,6 +7,7 @@ from argparse import Namespace
 
 import torch
 from mikazuki.utils.amd_sageattention import probe_runtime_sageattention
+from mikazuki.utils.runtime_safe_preview import apply_runtime_safe_preview_policy
 
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,12 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
         return "AdamW", "AMD 实验核心未指定 optimizer_type，已自动改用 AdamW。"
 
     lowered = normalized.lower()
+    if lowered.startswith("pytorch_optimizer."):
+        return (
+            "AdamW",
+            f"AMD 实验核心当前禁用 {normalized}。Windows ROCm 运行时里的 pytorch_optimizer 会依赖不完整的 torch.distributed，已自动回退为 AdamW。",
+        )
+
     if lowered in _SAFE_OPTIMIZER_NAMES:
         return normalized, None
 
@@ -277,26 +284,14 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
     return "AdamW", f"AMD 实验核心暂未验证 optimizer_type={normalized}，已自动回退为 AdamW。"
 
 
-def _disable_preview_settings(args: Namespace, messages: list[str]) -> None:
-    preview_requested = bool(
-        getattr(args, "sample_at_first", False)
-        or getattr(args, "sample_every_n_steps", None) is not None
-        or getattr(args, "sample_every_n_epochs", None) is not None
-        or getattr(args, "sample_prompts", None)
-        or getattr(args, "enable_preview", False)
+def _apply_safe_preview_settings(args: Namespace, messages: list[str]) -> None:
+    apply_runtime_safe_preview_policy(
+        args,
+        runtime_label="AMD 实验核心",
+        messages=messages,
+        preview_requested_key="_amd_preview_requested",
+        preview_forced_off_key="_amd_preview_forced_off",
     )
-    args._amd_preview_requested = preview_requested
-    if not preview_requested:
-        args._amd_preview_forced_off = False
-        return
-
-    args.enable_preview = False
-    args.sample_at_first = False
-    args.sample_every_n_steps = None
-    args.sample_every_n_epochs = None
-    args.sample_prompts = None
-    args._amd_preview_forced_off = True
-    messages.append("AMD 实验核心已自动关闭训练预览图，并跳过预览提示词。")
 
 
 def _apply_mixed_precision_policy(args: Namespace, messages: list[str], runtime_probe: dict[str, object]) -> None:
@@ -465,7 +460,6 @@ def apply_anima_amd_experimental_policy(args: Namespace) -> list[str]:
     if requested_attn_mode not in {"", "none", "null", "torch", "sdpa", "sageattn"}:
         messages.append(f"AMD 实验核心暂不启用 {requested_attn_mode} attention，已强制改用 SDPA。")
     args.attn_mode = "torch"
-    args.enable_preview = False
 
     if bool(getattr(args, "xformers", False)):
         args.xformers = False
@@ -540,7 +534,7 @@ def apply_anima_amd_experimental_policy(args: Namespace) -> list[str]:
                 f"AMD 实验核心当前未检测到可用的 SageAttention 构建（{sage_probe['reason'] or 'runtime probe failed'}），已自动回退为 SDPA。"
             )
 
-    _disable_preview_settings(args, messages)
+    _apply_safe_preview_settings(args, messages)
     _apply_mixed_precision_policy(args, messages, runtime_probe)
     _apply_safeguard_policy(args, messages)
     _apply_diagnostics_policy(args, messages)
@@ -575,6 +569,7 @@ def log_anima_amd_experimental_banner(args: Namespace, messages: list[str]) -> N
         f"bf16_supported={runtime_probe.get('bf16_supported')} | "
         f"preview_requested={bool(getattr(args, '_amd_preview_requested', False))} | "
         f"preview_forced_off={bool(getattr(args, '_amd_preview_forced_off', False))} | "
+        f"preview_backend={getattr(args, '_runtime_preview_backend', '')} | "
         f"sample_at_first={bool(getattr(args, 'sample_at_first', False))} | "
         f"sample_every_n_steps={getattr(args, 'sample_every_n_steps', None)} | "
         f"sample_every_n_epochs={getattr(args, 'sample_every_n_epochs', None)} | "

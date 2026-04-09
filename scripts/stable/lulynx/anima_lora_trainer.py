@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import gc
 from contextlib import nullcontext
 import importlib
@@ -38,6 +38,7 @@ from library.config_util import BlueprintGenerator, ConfigSanitizer
 from library.custom_train_functions import apply_masked_loss
 from library.utils import setup_logging
 import train_network
+from lulynx.experimental_core import create_lulynx_core, normalize_lulynx_args
 
 setup_logging()
 import logging
@@ -559,6 +560,7 @@ class AnimaNetworkTrainer:
             "ss_weighting_scheme": str(args.weighting_scheme),
             "ss_discrete_flow_shift": str(args.discrete_flow_shift),
             "ss_attn_mode": str(args.attn_mode),
+            "ss_attention_backend": str(train_util.resolve_attention_backend(args)),
         }
         if args.pretrained_model_name_or_path is not None:
             metadata["ss_sd_model_name"] = str(args.pretrained_model_name_or_path)
@@ -627,6 +629,11 @@ class AnimaNetworkTrainer:
         args.torch_compile = bool(getattr(args, "torch_compile", False))
         args.dynamo_backend = str(getattr(args, "dynamo_backend", "inductor") or "inductor")
         args.opt_channels_last = bool(getattr(args, "opt_channels_last", False))
+        normalize_lulynx_args(
+            args,
+            route_label="Anima LoRA",
+            route_kind="anima",
+        )
 
         if os.name == "nt" and int(getattr(args, "max_data_loader_n_workers", 0) or 0) > 0:
             logger.warning(
@@ -862,6 +869,10 @@ class AnimaNetworkTrainer:
             logger.warning("scale_weight_norms is specified but the network does not support it")
             args.scale_weight_norms = False
 
+        lulynx_core = create_lulynx_core(args, route_kind="anima", route_label="Anima LoRA")
+        if lulynx_core is not None:
+            lulynx_core.apply_pre_optimizer_settings(network)
+
         train_unet = not args.network_train_text_encoder_only
         train_text_encoder = self.is_train_text_encoder(args)
         if not train_unet and not train_text_encoder:
@@ -1050,6 +1061,8 @@ class AnimaNetworkTrainer:
         if hasattr(accelerator.unwrap_model(network), "get_extra_ema_modules"):
             ema_named_models.extend(accelerator.unwrap_model(network).get_extra_ema_modules())
         ema_model = train_util.create_model_ema(args, ema_named_models)
+        if lulynx_core is not None:
+            lulynx_core.attach_runtime(train_text_encoder=train_text_encoder)
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
@@ -1057,6 +1070,9 @@ class AnimaNetworkTrainer:
             args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
 
         metadata, minimum_metadata = self.build_metadata(args, session_id, training_started_at, optimizer_name, optimizer_args)
+        if lulynx_core is not None:
+            metadata.update(lulynx_core.get_metadata())
+            minimum_metadata.update(lulynx_core.get_metadata())
 
         initial_step = 0
         if args.initial_epoch is not None or args.initial_step is not None:
@@ -1154,6 +1170,7 @@ class AnimaNetworkTrainer:
             disable=not accelerator.is_local_main_process,
             desc="steps",
         )
+        lulynx_stop_reason = None
 
         if self.is_swapping_blocks:
             accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
@@ -1270,6 +1287,18 @@ class AnimaNetworkTrainer:
                                     remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                     remove_model(remove_ckpt_name)
                     optimizer_train_fn()
+                    if lulynx_core is not None:
+                        lulynx_decision = lulynx_core.on_optimizer_step(
+                            global_step=global_step,
+                            current_loss=current_loss,
+                            average_loss=loss_recorder.moving_average,
+                            optimizer=optimizer,
+                            lr_scheduler=lr_scheduler,
+                            accelerator=accelerator,
+                            network=accelerator.unwrap_model(network),
+                        )
+                        if lulynx_decision.stop_training and lulynx_stop_reason is None:
+                            lulynx_stop_reason = lulynx_decision.reason or "Lulynx experimental core requested stop."
                     anima_step_profiler.finalize_optimizer_step(global_step)
 
                 if safeguard is not None:
@@ -1283,8 +1312,13 @@ class AnimaNetworkTrainer:
                     train_util.append_lr_to_logs_with_names(step_logs, lr_scheduler, args.optimizer_type, lr_descriptions or [])
                     accelerator.log(step_logs, step=global_step)
 
+                if lulynx_stop_reason is not None:
+                    break
                 if global_step >= args.max_train_steps:
                     break
+
+            if lulynx_stop_reason is not None:
+                break
 
             if len(accelerator.trackers) > 0:
                 accelerator.log({"loss/epoch_average": loss_recorder.moving_average}, step=global_step)
@@ -1319,6 +1353,8 @@ class AnimaNetworkTrainer:
                 )
             optimizer_train_fn()
 
+            if lulynx_stop_reason is not None:
+                break
             if global_step >= args.max_train_steps:
                 break
 

@@ -13,6 +13,8 @@ from mikazuki.launch_utils import (base_dir_path, catch_exception, git_tag,
                                    prepare_environment, check_port_avaliable, find_avaliable_ports)
 from mikazuki.log import log
 from mikazuki.utils.backend_status import BACKEND_STATUS_FILE_ENV, write_backend_status
+from mikazuki.utils.runtime_mode import infer_runtime_environment_name, is_amd_rocm_runtime, is_intel_xpu_runtime
+from mikazuki.utils.runtime_paths import get_project_local_main_python_roots, get_tageditor_python_candidates
 
 APP_NAME = "SD-reScripts"
 APP_VERSION = "v1.1.5 Beta10"
@@ -38,25 +40,8 @@ parser.add_argument("--dev", action="store_true")
 
 TAGEDITOR_STATUS_FILE = REPO_ROOT / "tmp" / "tageditor_status.json"
 BACKEND_STATUS_FILE = REPO_ROOT / "tmp" / "backend_status.json"
-PROJECT_LOCAL_MAIN_PYTHON_ROOTS = [
-    (REPO_ROOT / "python").resolve(),
-    (REPO_ROOT / "python_blackwell").resolve(),
-    (REPO_ROOT / "python_sagebwd_nvidia").resolve(),
-    (REPO_ROOT / "python-sagebwd-nvidia").resolve(),
-    (REPO_ROOT / "python-sageattention").resolve(),
-    (REPO_ROOT / "python-sageattention-latest").resolve(),
-    (REPO_ROOT / "python-sageattention-blackwell").resolve(),
-    (REPO_ROOT / "python_sageattention").resolve(),
-    (REPO_ROOT / "python_sageattention_latest").resolve(),
-    (REPO_ROOT / "python_sageattention_blackwell").resolve(),
-    (REPO_ROOT / "venv").resolve(),
-]
-DEDICATED_TAGEDITOR_PYTHONS = [
-    REPO_ROOT / "python_tageditor" / "python.exe",
-    REPO_ROOT / "python_tageditor" / "bin" / "python",
-    REPO_ROOT / "venv-tageditor" / "Scripts" / "python.exe",
-    REPO_ROOT / "venv-tageditor" / "bin" / "python",
-]
+PROJECT_LOCAL_MAIN_PYTHON_ROOTS = [path.resolve() for path in get_project_local_main_python_roots(REPO_ROOT)]
+DEDICATED_TAGEDITOR_PYTHONS = get_tageditor_python_candidates(REPO_ROOT)
 TAGEDITOR_REQUIRED_MODULES = ["gradio", "transformers", "timm", "print_color"]
 
 
@@ -93,8 +78,9 @@ def ensure_project_local_main_python():
 
     raise RuntimeError(
         "This build is locked to project-local Python by default. "
-        "Launch it via run_gui.ps1/run_gui.sh after preparing ./python, ./python_blackwell, ./python_sagebwd_nvidia, ./python-sageattention, ./python-sageattention-latest, ./python-sageattention-blackwell, or ./venv. "
-        "Legacy ./python-sagebwd-nvidia, ./python_sageattention, ./python_sageattention_latest, and ./python_sageattention_blackwell folders are also accepted. "
+        "Launch it via run_gui.ps1/run_gui.sh after preparing one of the supported runtime folders under ./env/ (preferred) or the repo root: "
+        "./python, ./python_blackwell, ./python_xpu_intel, ./python_xpu_intel_sage, ./python_rocm_amd, ./python_rocm_amd_sage, ./python_sagebwd_nvidia, ./python-sageattention, or ./venv. "
+        "Legacy ./python-sagebwd-nvidia and ./python_sageattention folders are also accepted in either location. "
         "For development only, set MIKAZUKI_ALLOW_SYSTEM_PYTHON=1 to override this guard intentionally."
     )
 
@@ -132,6 +118,17 @@ def resolve_tag_editor_python():
     if dedicated_python is not None:
         return str(dedicated_python), "dedicated", ""
 
+    runtime_name = infer_runtime_environment_name()
+    if is_amd_rocm_runtime(runtime_name) or is_intel_xpu_runtime(runtime_name):
+        runtime_label = "AMD ROCm" if is_amd_rocm_runtime(runtime_name) else "Intel XPU"
+        detail = (
+            f"Dedicated tag editor runtime required for {runtime_label} experimental mode. "
+            "Run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) to prepare env/python_tageditor, env/venv-tageditor, or the legacy root folders.\n"
+            f"{runtime_label} 实验运行时下，标签编辑器需要单独的运行时。"
+            "请运行 install_tageditor.ps1（Windows）或 install_tageditor.sh（Linux）准备 env/python_tageditor、env/venv-tageditor，或旧的根目录运行时。"
+        )
+        return None, "dedicated_runtime_required", detail
+
     missing_modules = [name for name in TAGEDITOR_REQUIRED_MODULES if importlib.util.find_spec(name) is None]
     if missing_modules:
         return None, "missing_dependencies", f"Missing modules: {', '.join(missing_modules)}"
@@ -148,11 +145,14 @@ def run_tag_editor():
 
     python_exe, runtime_kind, detail = resolve_tag_editor_python()
     if python_exe is None:
-        log.warning(
-            "tag editor dependencies are missing (%s), run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first.",
-            detail.removeprefix("Missing modules: "),
-        )
-        update_tageditor_status("missing_dependencies", detail)
+        if runtime_kind == "missing_dependencies":
+            log.warning(
+                "tag editor dependencies are missing (%s), run install_tageditor.ps1 (Windows) or install_tageditor.sh (Linux) first.",
+                detail.removeprefix("Missing modules: "),
+            )
+        else:
+            log.warning("tag editor startup skipped: %s", detail)
+        update_tageditor_status(runtime_kind, detail)
         return
 
     os.environ["MIKAZUKI_TAGEDITOR_RUNTIME"] = runtime_kind
@@ -228,6 +228,13 @@ def launch():
             disable_auto_mirror=args.disable_auto_mirror,
             prepare_onnxruntime=not args.skip_prepare_onnxruntime,
         )
+
+    try:
+        from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
 
     resolve_server_port()
 

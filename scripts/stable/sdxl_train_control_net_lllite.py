@@ -245,7 +245,14 @@ def train(args):
     unet.apply_lllite(args.cond_emb_dim, args.network_dim, args.network_dropout)
 
     # モデルに xformers とか memory efficient attention を組み込む
-    train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa, getattr(args, "sageattn", False))
+    train_util.replace_unet_modules(
+        unet,
+        args.mem_eff_attn,
+        args.xformers,
+        args.sdpa,
+        getattr(args, "sageattn", False),
+        getattr(args, "flashattn", False),
+    )
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()

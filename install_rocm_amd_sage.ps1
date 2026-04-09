@@ -7,14 +7,19 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$runtimeDir = Join-Path $repoRoot "python_rocm_amd_sage"
+$null = . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$runtimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "rocm-amd-sage"
+$runtimeDirName = $runtimeInfo.DirectoryName
+$runtimeDir = $runtimeInfo.DirectoryPath
 $runtimePython = Join-Path $runtimeDir "python.exe"
 $runtimeMarker = Join-Path $runtimeDir ".deps_installed"
 $selfTestScript = Join-Path $repoRoot "mikazuki\scripts\amd_rocm_sage_selftest.py"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
+$baseRocmRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "rocm-amd"
 $sourceCandidates = @(
     (Join-Path $runtimeDir "SageAttention-rocm"),
-    (Join-Path $repoRoot "python_rocm_amd\SageAttention-rocm")
+    (Join-Path $baseRocmRuntimeInfo.DirectoryPath "SageAttention-rocm")
 )
 $mainRequiredModules = @(
     "accelerate",
@@ -23,12 +28,6 @@ $mainRequiredModules = @(
     "toml",
     "transformers",
     "diffusers",
-    "lion_pytorch",
-    "dadaptation",
-    "schedulefree",
-    "prodigyopt",
-    "prodigyplus",
-    "pytorch_optimizer",
     "cv2"
 )
 $incompatiblePackages = @(
@@ -41,22 +40,30 @@ $incompatiblePackages = @(
 
 $expectedRuntime = @{
     PythonMinor = "3.12"
-    Torch = "2.9.1+rocm7.2.1"
-    TorchVision = "0.24.1+rocm7.2.1"
-    HipPrefix = "7.2.1"
+    TorchPrefix = "2.9.1+"
+    TorchVisionPrefix = "0.24.1+"
+    HipPrefix = "7.2"
 }
 
-$rocmWheelBase = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1"
+$rocmWheelBase = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2"
 $rocmSdkPackages = @(
-    "$rocmWheelBase/rocm_sdk_core-7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/rocm_sdk_libraries_custom-7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/rocm_sdk_devel-7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/rocm-7.2.1.tar.gz"
+    "$rocmWheelBase/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl",
+    "$rocmWheelBase/rocm_sdk_libraries_custom-7.2.0.dev0-py3-none-win_amd64.whl",
+    "$rocmWheelBase/rocm_sdk_devel-7.2.0.dev0-py3-none-win_amd64.whl",
+    "$rocmWheelBase/rocm-7.2.0.dev0.tar.gz"
 )
 $rocmTorchPackages = @(
-    "$rocmWheelBase/torch-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/torchvision-0.24.1+rocm7.2.1-cp312-cp312-win_amd64.whl",
-    "$rocmWheelBase/torchaudio-2.9.1+rocm7.2.1-cp312-cp312-win_amd64.whl"
+    "$rocmWheelBase/torch-2.9.1+rocmsdk20260116-cp312-cp312-win_amd64.whl",
+    "$rocmWheelBase/torchvision-0.24.1+rocmsdk20260116-cp312-cp312-win_amd64.whl",
+    "$rocmWheelBase/torchaudio-2.9.1+rocmsdk20260116-cp312-cp312-win_amd64.whl"
+)
+$rocmTorchPythonDeps = @(
+    "filelock",
+    "typing-extensions>=4.10.0",
+    "sympy>=1.13.3",
+    "networkx>=2.5.1",
+    "jinja2",
+    "fsspec>=0.8.5"
 )
 $transformersConstraint = "transformers>=4.55.5,<5"
 
@@ -116,18 +123,87 @@ function Test-ModulesReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $PythonExe -c "import importlib, sys; failed=[];
-for name in sys.argv[1:]:
+        & $PythonExe -c "import importlib, sys;
+repo_root = sys.argv[1]
+if repo_root and repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+try:
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+except Exception:
+    install_experimental_runtime_import_guards = None
+if install_experimental_runtime_import_guards is not None:
+    try:
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
+failed=[];
+for name in sys.argv[2:]:
     try:
         importlib.import_module(name)
     except Exception:
         failed.append(name)
-raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
+raise SystemExit(1 if failed else 0)" $repoRoot @Modules 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+}
+
+function Get-MissingModulesReport {
+    param (
+        [string]$PythonExe,
+        [string[]]$Modules
+    )
+
+    if (-not $Modules -or $Modules.Count -eq 0) {
+        return @()
+    }
+
+    $report = @()
+    foreach ($moduleName in $Modules) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $output = & $PythonExe -c "import importlib, sys;
+repo_root = sys.argv[1]
+if repo_root and repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+try:
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+except Exception:
+    install_experimental_runtime_import_guards = None
+if install_experimental_runtime_import_guards is not None:
+    try:
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
+importlib.import_module(sys.argv[2])" $repoRoot $moduleName 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($exitCode -eq 0) {
+            continue
+        }
+
+        $reason = ""
+        if ($output) {
+            $reason = (($output | ForEach-Object { [string]$_ }) -join " ").Trim()
+        }
+        if ([string]::IsNullOrWhiteSpace($reason)) {
+            $reason = "python exited with code $exitCode while importing $moduleName"
+        }
+
+        $report += [pscustomobject]@{
+            module = $moduleName
+            reason = $reason
+        }
+    }
+
+    return $report
 }
 
 function New-FilteredRequirementsFile {
@@ -153,7 +229,8 @@ function New-FilteredRequirementsFile {
             $normalizedRequirement -like "xformers*" -or
             $normalizedRequirement -like "sageattention*" -or
             $normalizedRequirement -like "triton*" -or
-            $normalizedRequirement -like "pytorch-triton-rocm*"
+            $normalizedRequirement -like "pytorch-triton-rocm*" -or
+            $normalizedRequirement -like "pytorch-optimizer*"
         ) {
             continue
         }
@@ -320,17 +397,17 @@ print(json.dumps(result))
 
 if (-not (Test-Path $runtimePython)) {
     throw @"
-python_rocm_amd_sage\python.exe was not found.
+$runtimeDirName\python.exe was not found.
 
 Expected path:
 - $runtimePython
 
 Recommended fix:
-1. Copy your working python_rocm_amd runtime to .\python_rocm_amd_sage
+1. Copy your working AMD ROCm runtime to $runtimeDir
 2. Keep the downloaded SageAttention-rocm source under:
-   - .\python_rocm_amd_sage\SageAttention-rocm
+   - $(Join-Path $runtimeDir "SageAttention-rocm")
    or
-   - .\python_rocm_amd\SageAttention-rocm
+   - $(Join-Path $baseRocmRuntimeInfo.DirectoryPath "SageAttention-rocm")
 3. Rerun this installer
 "@
 }
@@ -341,18 +418,18 @@ if (-not $sourceRoot) {
 SageAttention-rocm source was not found.
 
 Expected one of:
-- .\python_rocm_amd_sage\SageAttention-rocm
-- .\python_rocm_amd\SageAttention-rocm
+- $(Join-Path $runtimeDir "SageAttention-rocm")
+- $(Join-Path $baseRocmRuntimeInfo.DirectoryPath "SageAttention-rocm")
 "@
 }
 
 Set-Location $repoRoot
 
 if (-not (Test-PipReady -PythonExe $runtimePython)) {
-    Write-Host -ForegroundColor Yellow "python_rocm_amd_sage 尚未完成 pip 初始化，正在尝试自动修复。"
-    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_rocm_amd_sage
+    Write-Host -ForegroundColor Yellow "$runtimeDirName 尚未完成 pip 初始化，正在尝试自动修复。"
+    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $runtimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $runtimePython)) {
-        throw "python_rocm_amd_sage pip 初始化失败，请先修复该运行时。"
+        throw "$runtimeDirName pip 初始化失败，请先修复该运行时。"
     }
 }
 
@@ -363,7 +440,7 @@ if (-not (Test-Path $requirementsPath)) {
 Write-Host -ForegroundColor Yellow "AMD Sage 支线当前不会覆盖主线 sageattention 包，而是优先尝试加载本地 SageAttention-rocm Triton 源码桥接层。"
 Write-Host -ForegroundColor Yellow "这条线依赖 Triton 能在 Windows ROCm 运行；若 Triton 不可用，安装器会直接把这条支线标记为未就绪。"
 Write-Host -ForegroundColor Yellow "本次使用的本地 SageAttention-rocm 路径: $sourceRoot"
-Write-Host -ForegroundColor Yellow "当前安装器会先把 python_rocm_amd_sage 强制切到独立的 AMD ROCm wheel 组合，然后再尝试实验性 Triton + AMD Sage bridge。"
+Write-Host -ForegroundColor Yellow "当前安装器会先把 $runtimeDirName 强制切到独立的 AMD ROCm wheel 组合，然后再尝试实验性 Triton + AMD Sage bridge。"
 
 $filteredRequirementsPath = $null
 
@@ -382,8 +459,12 @@ try {
         & $runtimePython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary @rocmSdkPackages
     }
 
+    Invoke-Step "Installing shared Python dependencies required by ROCm PyTorch wheels for AMD Sage runtime..." {
+        & $runtimePython -m pip install --upgrade --no-warn-script-location --prefer-binary @rocmTorchPythonDeps
+    }
+
     Invoke-Step "Installing PyTorch ROCm wheels for AMD Sage runtime..." {
-        & $runtimePython -m pip install --upgrade --force-reinstall --no-warn-script-location --prefer-binary @rocmTorchPackages
+        & $runtimePython -m pip install --upgrade --force-reinstall --no-deps --no-warn-script-location --prefer-binary @rocmTorchPackages
     }
 
     $filteredRequirementsPath = New-FilteredRequirementsFile -SourcePath $requirementsPath
@@ -401,21 +482,35 @@ try {
     } "Triton install did not finish cleanly. The AMD Sage self-test will determine whether this runtime is usable."
 
     if (-not (Test-ModulesReady -PythonExe $runtimePython -Modules $mainRequiredModules)) {
-        throw "Project dependencies did not finish installing correctly in python_rocm_amd_sage."
+        $missingModules = @(Get-MissingModulesReport -PythonExe $runtimePython -Modules $mainRequiredModules)
+        if ($missingModules.Count -gt 0) {
+            $details = $missingModules | ForEach-Object {
+                $moduleName = [string]$_.module
+                $reason = [string]$_.reason
+                if ([string]::IsNullOrWhiteSpace($reason)) {
+                    $moduleName
+                }
+                else {
+                    "${moduleName}: ${reason}"
+                }
+            }
+            throw "Project dependencies did not finish installing correctly in $runtimeDirName. Missing/broken modules: $($details -join '; ')"
+        }
+        throw "Project dependencies did not finish installing correctly in $runtimeDirName."
     }
 
     $probe = Get-ROCmAmdSageRuntimeProbe -PythonExe $runtimePython -SourceRoot $sourceRoot
     if (-not $probe) {
-        throw "Could not probe python_rocm_amd_sage runtime details."
+        throw "Could not probe $runtimeDirName runtime details."
     }
     if ($expectedRuntime.PythonMinor -and $probe.python_minor -ne $expectedRuntime.PythonMinor) {
         throw "Python minor is $($probe.python_minor), expected $($expectedRuntime.PythonMinor)"
     }
-    if ($expectedRuntime.Torch -and $probe.torch_version -ne $expectedRuntime.Torch) {
-        throw "Torch is $($probe.torch_version), expected $($expectedRuntime.Torch)"
+    if ($expectedRuntime.TorchPrefix -and ([string]::IsNullOrWhiteSpace($probe.torch_version) -or -not $probe.torch_version.StartsWith($expectedRuntime.TorchPrefix))) {
+        throw "Torch is $($probe.torch_version), expected prefix $($expectedRuntime.TorchPrefix)"
     }
-    if ($expectedRuntime.TorchVision -and $probe.torchvision_version -ne $expectedRuntime.TorchVision) {
-        throw "TorchVision is $($probe.torchvision_version), expected $($expectedRuntime.TorchVision)"
+    if ($expectedRuntime.TorchVisionPrefix -and ([string]::IsNullOrWhiteSpace($probe.torchvision_version) -or -not $probe.torchvision_version.StartsWith($expectedRuntime.TorchVisionPrefix))) {
+        throw "TorchVision is $($probe.torchvision_version), expected prefix $($expectedRuntime.TorchVisionPrefix)"
     }
     if ($expectedRuntime.HipPrefix -and ([string]::IsNullOrWhiteSpace($probe.hip_version) -or -not $probe.hip_version.StartsWith($expectedRuntime.HipPrefix))) {
         throw "HIP runtime is $($probe.hip_version), expected prefix $($expectedRuntime.HipPrefix)"

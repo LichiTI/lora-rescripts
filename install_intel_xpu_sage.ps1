@@ -7,7 +7,11 @@ $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$runtimeDir = Join-Path $repoRoot "python_xpu_intel_sage"
+$null = . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+
+$runtimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "intel-xpu-sage"
+$runtimeDirName = $runtimeInfo.DirectoryName
+$runtimeDir = $runtimeInfo.DirectoryPath
 $runtimePython = Join-Path $runtimeDir "python.exe"
 $runtimeMarker = Join-Path $runtimeDir ".deps_installed"
 $selfTestScript = Join-Path $repoRoot "mikazuki\scripts\intel_xpu_sage_selftest.py"
@@ -20,11 +24,6 @@ $mainRequiredModules = @(
     "transformers",
     "diffusers",
     "lion_pytorch",
-    "dadaptation",
-    "schedulefree",
-    "prodigyopt",
-    "prodigyplus",
-    "pytorch_optimizer",
     "cv2",
     "sageattention"
 )
@@ -97,13 +96,26 @@ function Test-ModulesReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $PythonExe -c "import importlib, sys; failed=[];
-for name in sys.argv[1:]:
+        & $PythonExe -c "import importlib, sys;
+repo_root = sys.argv[1]
+if repo_root and repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+try:
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+except Exception:
+    install_experimental_runtime_import_guards = None
+if install_experimental_runtime_import_guards is not None:
+    try:
+        install_experimental_runtime_import_guards()
+    except Exception:
+        pass
+failed=[];
+for name in sys.argv[2:]:
     try:
         importlib.import_module(name)
     except Exception:
         failed.append(name)
-raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
+raise SystemExit(1 if failed else 0)" $repoRoot @Modules 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     }
     finally {
@@ -134,7 +146,12 @@ function New-FilteredRequirementsFile {
             $normalizedRequirement -like "xformers*" -or
             $normalizedRequirement -like "triton-windows*" -or
             $normalizedRequirement -like "pytorch-triton-rocm*" -or
-            $normalizedRequirement -like "intel-extension-for-pytorch*"
+            $normalizedRequirement -like "intel-extension-for-pytorch*" -or
+            $normalizedRequirement -like "dadaptation*" -or
+            $normalizedRequirement -like "schedulefree*" -or
+            $normalizedRequirement -like "prodigyopt*" -or
+            $normalizedRequirement -like "prodigy-plus-schedule-free*" -or
+            $normalizedRequirement -like "pytorch-optimizer*"
         ) {
             continue
         }
@@ -250,18 +267,18 @@ print(json.dumps(result))
 }
 
 if (-not (Test-Path $runtimePython)) {
-    Write-Host -ForegroundColor Yellow "python_xpu_intel_sage 未检测到 python.exe，正在尝试自动初始化..."
-    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_xpu_intel_sage
+    Write-Host -ForegroundColor Yellow "$runtimeDirName 未检测到 python.exe，正在尝试自动初始化..."
+    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $runtimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $runtimePython)) {
         throw "Dedicated Intel XPU Sage runtime not found: $runtimePython"
     }
 }
 
 if (-not (Test-PipReady -PythonExe $runtimePython)) {
-    Write-Host -ForegroundColor Yellow "python_xpu_intel_sage 尚未初始化，正在运行 setup_embeddable_python.bat..."
-    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto python_xpu_intel_sage
+    Write-Host -ForegroundColor Yellow "$runtimeDirName 尚未初始化，正在运行 setup_embeddable_python.bat..."
+    & (Join-Path $repoRoot "setup_embeddable_python.bat") --auto $runtimeDirName
     if ($LASTEXITCODE -ne 0 -or -not (Test-PipReady -PythonExe $runtimePython)) {
-        throw "python_xpu_intel_sage 初始化失败，缺少可用的 pip。"
+        throw "$runtimeDirName 初始化失败，缺少可用的 pip。"
     }
 }
 
@@ -304,7 +321,7 @@ if (-not (Test-ModulesReady -PythonExe $runtimePython -Modules $mainRequiredModu
 Invoke-Step -Message "Verifying Intel XPU Sage runtime / 校验 Intel XPU Sage 运行时" -Action {
     $probe = Invoke-PythonRuntimeProbe -PythonExe $runtimePython
     if (-not $probe) {
-        throw "无法读取 python_xpu_intel_sage 运行时信息。"
+        throw "无法读取 $runtimeDirName 运行时信息。"
     }
     if ($expectedRuntime.PythonMinors -and $expectedRuntime.PythonMinors.Count -gt 0 -and $probe.python_minor -notin $expectedRuntime.PythonMinors) {
         throw "Intel XPU Sage runtime uses Python $($probe.python_minor), but the current supported target is $($expectedRuntime.PythonMinors -join '/')."
@@ -316,10 +333,10 @@ Invoke-Step -Message "Verifying Intel XPU Sage runtime / 校验 Intel XPU Sage �
         throw "Torch XPU runtime is not available."
     }
     if (-not $probe.triton_import_ok) {
-        throw "Triton is not importable in python_xpu_intel_sage."
+        throw "Triton is not importable in $runtimeDirName."
     }
     if (-not $probe.sageattention_import_ok -or -not $probe.sageattention_symbols_ok) {
-        throw "SageAttention is not importable in python_xpu_intel_sage."
+        throw "SageAttention is not importable in $runtimeDirName."
     }
     if ($expectedRuntime.SageAttention -and $probe.sageattention_version -ne $expectedRuntime.SageAttention) {
         throw "Intel XPU Sage runtime installed SageAttention $($probe.sageattention_version), expected $($expectedRuntime.SageAttention)."

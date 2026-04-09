@@ -31,6 +31,19 @@ def main():
     target_path = _resolve_target_path(base_dir, sys.argv[1])
 
     _prepend_sys_paths([target_path.parent, target_path.parent.parent, base_dir])
+    from mikazuki.utils.runtime_import_guards import install_experimental_runtime_import_guards
+    from mikazuki.utils.runtime_distributed_compat import apply_torch_distributed_compat_shims
+    from mikazuki.utils.runtime_mode import infer_attention_runtime_mode, is_amd_rocm_runtime, is_intel_xpu_runtime
+
+    install_experimental_runtime_import_guards()
+    apply_torch_distributed_compat_shims()
+
+    runtime_mode = infer_attention_runtime_mode()
+    if is_amd_rocm_runtime(runtime_mode) or is_intel_xpu_runtime(runtime_mode):
+        print(
+            f"Experimental runtime bootstrap: mode={runtime_mode}; import_guards=on; distributed_compat=on",
+            flush=True,
+        )
 
     sys.argv = [str(target_path), *sys.argv[2:]]
     runpy.run_path(str(target_path), run_name="__main__")

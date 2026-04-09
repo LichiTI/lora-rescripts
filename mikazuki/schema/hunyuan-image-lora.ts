@@ -16,7 +16,7 @@ Schema.intersect([
         logit_mean: Schema.number().step(0.01).description("logit_normal 权重策略的均值"),
         logit_std: Schema.number().step(0.01).description("logit_normal 权重策略的标准差"),
         mode_scale: Schema.number().step(0.01).description("mode 权重策略的缩放系数"),
-        attn_mode: Schema.union(["", "torch", "xformers", "flash", "sageattn"]).default("").description("Attention 实现，留空表示使用脚本默认值（torch）"),
+        attn_mode: Schema.union(["", "torch", "xformers", "sageattn", "flash"]).default("").description("Attention 实现，留空表示使用脚本默认值（torch）"),
         split_attn: Schema.boolean().default(false).description("拆分 attention 计算以降低显存占用"),
         text_encoder_cpu: Schema.boolean().default(false).description("让文本编码器在 CPU 上推理"),
         vae_chunk_size: Schema.number().min(1).description("VAE 解码分块大小，用于降低显存占用"),

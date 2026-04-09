@@ -236,7 +236,9 @@ def train(args):
         accelerator.wait_for_everyone()
 
     # モデルに xformers とか memory efficient attention を組み込む
-    if getattr(args, "sageattn", False):
+    if getattr(args, "flashattn", False):
+        train_util.enable_flashattention(("U-Net", unet), ("ControlNet", control_net))
+    elif getattr(args, "sageattn", False):
         train_util.enable_sageattention(("U-Net", unet), ("ControlNet", control_net))
     elif args.xformers:
         unet.set_use_memory_efficient_attention(True, False)

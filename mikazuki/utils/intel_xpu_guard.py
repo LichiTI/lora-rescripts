@@ -4,6 +4,8 @@ import importlib
 import os
 from typing import Any
 
+from mikazuki.utils.runtime_safe_preview import apply_runtime_safe_preview_policy
+
 
 _SAFE_OPTIMIZER_NAMES = {
     "adamw",
@@ -18,6 +20,8 @@ _UNSAFE_OPTIMIZER_KEYWORDS = (
     "bitsandbytes",
     "ademamix",
 )
+
+_PYTORCH_OPTIMIZER_PREFIX = "pytorch_optimizer."
 
 _SUPPORTED_INTEL_ANIMA_TRAINING_TYPES = {
     "anima-lora",
@@ -142,6 +146,12 @@ def _normalize_optimizer_type(raw_value: str) -> tuple[str, str | None]:
         return "AdamW", "Intel XPU 实验路线未指定 optimizer_type，已自动改用 AdamW。"
 
     lowered = normalized.lower()
+    if lowered.startswith(_PYTORCH_OPTIMIZER_PREFIX):
+        return (
+            "AdamW",
+            f"Intel XPU 实验路线当前暂不启用 {normalized}，已自动回退为 AdamW。",
+        )
+
     if lowered in _SAFE_OPTIMIZER_NAMES:
         return normalized, None
 
@@ -510,12 +520,16 @@ def apply_intel_anima_runtime_config_guard(config: dict, runtime_probe: dict[str
         f"Intel XPU 实验路线将使用 IPEX attention slicing：trigger={config['ipex_sdpa_slice_trigger_rate']}, slice={config['ipex_attention_slice_rate']}。"
     )
 
-    if _is_preview_requested(config) and not is_sdxl_route:
-        _clear_preview_fields(config)
-        result["warnings"].append("Intel XPU 实验路线已自动关闭训练预览图，并跳过预览提示词。")
-        result["skip_preview_prompt_prep"] = True
+    if apply_runtime_safe_preview_policy(
+        config,
+        runtime_label="Intel XPU 实验路线",
+        messages=result["warnings"],
+    ):
+        result["skip_preview_prompt_prep"] = False
 
     if is_sdxl_route:
         result["notes"].append("Intel XPU 实验 SDXL 当前会强制走 SDPA，并复用主线 SDXL trainer。")
+        if parse_boolish(config.get("_runtime_safe_preview_enabled", False)):
+            result["notes"].append("Intel XPU 实验 SDXL 的训练预览会使用独立的安全 SDPA 预览后端。")
 
     return result

@@ -115,8 +115,14 @@ def build_attention_backend_summary(torch_module, xformers_info: dict, is_xpu_av
         detail = "Intel XPU Sage runtime active. Anima routes will try SageAttention first and fall back to SDPA automatically if the kernel call fails."
         detail_zh = "当前为 Intel XPU Sage 实验运行时。Anima 路线会优先尝试 SageAttention；若内核调用失败，会自动回退到 SDPA。"
     elif runtime_mode == "rocm-amd-sage" and preferred_backend == "sageattn":
-        detail = "AMD ROCm Sage runtime active. The AMD experimental route will try the local ROCm Triton Sage bridge first and fall back to SDPA automatically if the kernel call fails."
-        detail_zh = "当前为 AMD ROCm Sage 实验运行时。AMD 实验路线会优先尝试本地 ROCm Triton Sage 桥接层；若内核调用失败，会自动回退到 SDPA。"
+        detail = (
+            "AMD ROCm Sage runtime active. AMD experimental Anima routes and the experimental SDXL Sage path "
+            "will try the local ROCm Triton Sage bridge first and fall back to SDPA automatically if the kernel call fails."
+        )
+        detail_zh = (
+            "当前为 AMD ROCm Sage 实验运行时。AMD 实验 Anima 路线与实验性的 SDXL Sage 路线会优先尝试本地 ROCm Triton Sage 桥接层；"
+            "若内核调用失败，会自动回退到 SDPA。"
+        )
     elif preferred_backend == "xformers":
         detail = "xformers is currently the strongest verified attention backend in this runtime."
         detail_zh = "当前运行时里，xformers 是最优先且已验证可用的 attention 后端。"
