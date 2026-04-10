@@ -1,4 +1,4 @@
-function Get-IntelXpuExpectedPackageVersions {
+﻿function Get-IntelXpuExpectedPackageVersions {
     return @{
         PythonMinors = @("3.10", "3.11")
     }

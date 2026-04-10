@@ -1,4 +1,4 @@
-function Get-ExperimentalRuntimeDisplayName {
+﻿function Get-ExperimentalRuntimeDisplayName {
     param(
         [ValidateSet('intel-xpu', 'intel-xpu-sage', 'rocm-amd', 'rocm-amd-sage')]
         [string]$RuntimeName,

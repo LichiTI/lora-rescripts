@@ -1,4 +1,4 @@
-$moduleFiles = @(
+﻿$moduleFiles = @(
     'runtime_bootstrap.validation.ps1',
     'runtime_bootstrap.actions.ps1'
 )

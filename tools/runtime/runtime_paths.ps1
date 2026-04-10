@@ -1,4 +1,4 @@
-$script:RuntimeDirectoryAliases = @{
+﻿$script:RuntimeDirectoryAliases = @{
     "portable" = @("python")
     "flashattention" = @("python-flashattention", "python_flashattention")
     "blackwell" = @("python_blackwell")

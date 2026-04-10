@@ -1,4 +1,4 @@
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+﻿$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimeScript = Join-Path $repoRoot "run_gui_runtime.ps1"
 
 if (-not (Test-Path $runtimeScript)) {

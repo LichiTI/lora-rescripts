@@ -42,3 +42,5 @@ huggingface/hub/version_diffusers_cache.txt
 /BooruDatasetTagManager
 /ui
 A启动新前端UI.bat
+/env
+/tools

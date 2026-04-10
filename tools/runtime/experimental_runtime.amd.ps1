@@ -1,4 +1,4 @@
-function Get-ROCmAmdExpectedPackageVersions {
+﻿function Get-ROCmAmdExpectedPackageVersions {
     return @{
         PythonMinor = "3.12"
         Torch = "2.9.1+rocmsdk20260116"

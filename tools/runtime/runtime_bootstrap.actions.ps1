@@ -1,4 +1,4 @@
-function Get-SelectedRuntimeStateProjection {
+﻿function Get-SelectedRuntimeStateProjection {
     param (
         [string]$RuntimeName,
         [hashtable]$State
@@ -64,56 +64,56 @@ function Get-SelectedRuntimeInstallPlan {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_flashattention.ps1'
-                Arguments = @()
+                Arguments = @{}
             }
         }
         "blackwell" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_blackwell.ps1'
-                Arguments = @('-TorchChannel', $BlackwellProfile)
+                Arguments = @{ TorchChannel = $BlackwellProfile }
             }
         }
         "sageattention" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_sageattention.ps1'
-                Arguments = @('-Profile', $SageAttentionProfile)
+                Arguments = @{ Profile = $SageAttentionProfile }
             }
         }
         "intel-xpu" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_intel_xpu.ps1'
-                Arguments = @()
+                Arguments = @{}
             }
         }
         "intel-xpu-sage" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_intel_xpu_sage.ps1'
-                Arguments = @()
+                Arguments = @{}
             }
         }
         "rocm-amd" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_rocm_amd.ps1'
-                Arguments = @()
+                Arguments = @{}
             }
         }
         "rocm-amd-sage" {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $true
                 Script = 'install_rocm_amd_sage.ps1'
-                Arguments = @()
+                Arguments = @{}
             }
         }
         default {
             return [pscustomobject]@{
                 UsesDedicatedRuntimeNotice = $false
                 Script = 'install.ps1'
-                Arguments = @()
+                Arguments = @{}
             }
         }
     }
@@ -152,7 +152,8 @@ function Install-SelectedRuntimeDependencies {
         Write-ConsoleText -Key 'install_main_dependencies' -ForegroundColor 'Yellow'
     }
 
-    & (Join-Path $repoRoot $plan.Script) @($plan.Arguments)
+    $installArgs = $plan.Arguments
+    & (Join-Path $repoRoot $plan.Script) @installArgs
 }
 
 function Get-SelectedRuntimeInstallFailureMessage {

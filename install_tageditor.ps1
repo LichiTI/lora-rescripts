@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"

@@ -1,4 +1,4 @@
-function Test-ROCmAmdRuntimeReady {
+﻿function Test-ROCmAmdRuntimeReady {
     param (
         [string]$PythonExe,
         [hashtable]$Expected,

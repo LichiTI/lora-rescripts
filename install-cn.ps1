@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installScript = Join-Path $repoRoot "install.ps1"

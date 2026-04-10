@@ -1,4 +1,4 @@
-$moduleFiles = @(
+﻿$moduleFiles = @(
     'experimental_runtime.common.ps1',
     'experimental_runtime.amd.ps1',
     'experimental_runtime.intel.ps1'

@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $Env:HF_HOME = "huggingface"
 $Env:PYTHONUTF8 = "1"
