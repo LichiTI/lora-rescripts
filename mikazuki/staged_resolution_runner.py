@@ -288,7 +288,8 @@ def write_phase_config(phase_toml: Path, phase_config: dict) -> None:
 
 
 def clear_dataset_npz_cache_by_config(config: dict, repo_root: Path) -> None:
-    total_removed = 0
+    total_npz_removed = 0
+    total_metadata_removed = 0
     for key in DATASET_DIR_KEYS:
         value = str(config.get(key, "") or "").strip()
         if not value:
@@ -298,22 +299,31 @@ def clear_dataset_npz_cache_by_config(config: dict, repo_root: Path) -> None:
         if not local_dir.exists() or not local_dir.is_dir():
             continue
 
-        removed = 0
+        removed_npz = 0
         for npz_file in local_dir.rglob("*.npz"):
             try:
                 npz_file.unlink()
-                removed += 1
+                removed_npz += 1
             except Exception as exc:
                 raise RuntimeError(f"Failed to remove dataset cache {npz_file}: {exc}") from exc
 
-        total_removed += removed
+        total_npz_removed += removed_npz
+        removed_metadata = 0
+        metadata_cache = local_dir / "metadata_cache.json"
+        if metadata_cache.exists():
+            try:
+                metadata_cache.unlink()
+                removed_metadata = 1
+            except Exception as exc:
+                raise RuntimeError(f"Failed to remove dataset cache {metadata_cache}: {exc}") from exc
+        total_metadata_removed += removed_metadata
         print(
-            f"[MixedResolution] Cache reset for {key}: removed={removed} *.npz file(s) under {local_dir}",
+            f"[MixedResolution] Cache reset for {key}: removed={removed_npz} *.npz file(s), metadata_cache={removed_metadata} under {local_dir}",
             flush=True,
         )
 
     print(
-        f"[MixedResolution] Cache reset finished: total npz removed={total_removed}.",
+        f"[MixedResolution] Cache reset finished: total npz removed={total_npz_removed}, total metadata_cache removed={total_metadata_removed}.",
         flush=True,
     )
 

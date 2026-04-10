@@ -3,6 +3,31 @@ import sys
 from pathlib import Path
 
 
+def _disable_windows_quick_edit_mode() -> None:
+    if sys.platform != "win32":
+        return
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        std_input_handle = kernel32.GetStdHandle(-10)
+        if std_input_handle in (0, -1):
+            return
+
+        mode = ctypes.c_uint()
+        if kernel32.GetConsoleMode(std_input_handle, ctypes.byref(mode)) == 0:
+            return
+
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        updated_mode = (mode.value | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE
+        kernel32.SetConsoleMode(std_input_handle, updated_mode)
+    except Exception:
+        # Best-effort only: some hosts are not normal interactive consoles.
+        pass
+
+
 def _resolve_target_path(base_dir: Path, script_arg: str) -> Path:
     target_path = Path(script_arg)
     if not target_path.is_absolute():
@@ -25,6 +50,8 @@ def _prepend_sys_paths(paths):
 def main():
     if len(sys.argv) < 2:
         raise SystemExit("Usage: script_runner.py <script_path> [args...]")
+
+    _disable_windows_quick_edit_mode()
 
     runner_path = Path(__file__).resolve()
     base_dir = runner_path.parent.parent

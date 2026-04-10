@@ -72,6 +72,10 @@ def _flag_enabled(value, *, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+PYTORCH_ALLOC_CONF_ENV = "PYTORCH_ALLOC_CONF"
+PYTORCH_CUDA_ALLOC_CONF_ENV = "PYTORCH_CUDA_ALLOC_CONF"
+
+
 def merge_pytorch_cuda_alloc_conf(existing_conf: str, *, expandable_segments_enabled: bool) -> str:
     passthrough_tokens: list[str] = []
     keyed_tokens: dict[str, str] = {}
@@ -99,21 +103,23 @@ def apply_training_memory_allocator_env(customize_env: dict, config_data: dict) 
         config_data.get("pytorch_cuda_expandable_segments"),
         default=True,
     )
+    existing_conf = customize_env.get(PYTORCH_ALLOC_CONF_ENV) or customize_env.get(PYTORCH_CUDA_ALLOC_CONF_ENV, "")
     merged_conf = merge_pytorch_cuda_alloc_conf(
-        customize_env.get("PYTORCH_CUDA_ALLOC_CONF", ""),
+        existing_conf,
         expandable_segments_enabled=expandable_segments_enabled,
     )
-    customize_env["PYTORCH_CUDA_ALLOC_CONF"] = merged_conf
+    customize_env[PYTORCH_ALLOC_CONF_ENV] = merged_conf
+    customize_env.pop(PYTORCH_CUDA_ALLOC_CONF_ENV, None)
 
     if expandable_segments_enabled:
         log.info(
             "[memory] enabled PyTorch CUDA expandable_segments to reduce fragmentation-related OOM. "
-            f"PYTORCH_CUDA_ALLOC_CONF={merged_conf}"
+            f"{PYTORCH_ALLOC_CONF_ENV}={merged_conf}"
         )
     else:
         log.info(
             "[memory] PyTorch CUDA expandable_segments disabled by training config. "
-            f"PYTORCH_CUDA_ALLOC_CONF={merged_conf}"
+            f"{PYTORCH_ALLOC_CONF_ENV}={merged_conf}"
         )
 
 

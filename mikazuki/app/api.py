@@ -1017,6 +1017,7 @@ async def create_toml_file(request: Request):
     skip_preview_prompt_prep = runtime_context["skip_preview_prompt_prep"]
 
     model_train_type = str(config.pop("model_train_type", "sd-lora") or "sd-lora").strip().lower()
+    config["model_train_type"] = model_train_type
     train_data_dir = str(config.get("train_data_dir", "") or "").strip()
     suggest_cpu_threads = 8 if train_data_dir and len(train_utils.get_total_images(train_data_dir)) > 200 else 2
     trainer_file = trainer_definition.trainer_file

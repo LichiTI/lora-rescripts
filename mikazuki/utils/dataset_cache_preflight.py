@@ -92,6 +92,7 @@ def analyze_dataset_cache_preflight(config: dict, *, training_type: str) -> dict
         scan_dirs=scan_dirs,
         image_size_cache=image_size_cache,
         cache_info_enabled=parse_boolish(config.get("cache_info", False)),
+        clear_before_train=parse_boolish(config.get("clear_dataset_npz_before_train", False)),
     )
     errors.extend(metadata_report["errors"])
     warnings.extend(metadata_report["warnings"])
@@ -128,6 +129,8 @@ def analyze_latent_cache_state(
     notes: list[str] = []
 
     cache_to_disk = parse_boolish(config.get("cache_latents_to_disk", False))
+    clear_before_train = parse_boolish(config.get("clear_dataset_npz_before_train", False))
+    skip_cache_check = parse_boolish(config.get("skip_cache_check", False))
     if not cache_to_disk:
         return {
             "errors": [],
@@ -136,7 +139,15 @@ def analyze_latent_cache_state(
             "summary": {},
         }
 
-    if parse_boolish(config.get("skip_cache_check", False)):
+    if clear_before_train:
+        return {
+            "errors": [],
+            "warnings": [],
+            "notes": ["clear_dataset_npz_before_train is enabled, so stale latent caches will be cleared before launch."],
+            "summary": {},
+        }
+
+    if skip_cache_check:
         warnings.append(
             "skip_cache_check is enabled while cache_latents_to_disk is on. This can reuse stale latent caches after "
             "changing resolution / bucket settings or replacing images. / 当前启用了 skip_cache_check 且开启了磁盘 latent 缓存，"
@@ -210,13 +221,30 @@ def analyze_latent_cache_state(
 
     if stale_cache_count > 0:
         sample_text = "\n".join(stale_samples)
-        errors.append(
-            "Detected stale dataset latent cache files that do not match the current training bucket / resolution settings. "
-            "Delete the dataset latent cache files (*.npz such as *_sd.npz / *_sdxl.npz / *_flux.npz / legacy .npz) and retry.\n"
-            "检测到数据集 latent 缓存与当前训练的分桶 / 分辨率设置不匹配。请删除数据集目录中的 latent 缓存文件"
-            "（*.npz，例如 *_sd.npz / *_sdxl.npz / *_flux.npz / 旧版 .npz）后重试。\n"
-            f"Examples:\n{sample_text}"
-        )
+        if skip_cache_check:
+            errors.append(
+                "Detected stale dataset latent cache files that do not match the current training bucket / resolution settings, "
+                "and skip_cache_check is enabled, so the runtime may incorrectly reuse them. Delete the dataset latent cache files "
+                "(*.npz such as *_sd.npz / *_sdxl.npz / *_flux.npz / legacy .npz), disable skip_cache_check, or enable "
+                "clear_dataset_npz_before_train, then retry.\n"
+                "检测到数据集 latent 缓存与当前训练的分桶 / 分辨率设置不匹配，且当前启用了 skip_cache_check，"
+                "运行时可能会错误复用这些过期缓存。请删除数据集目录中的 latent 缓存文件"
+                "（*.npz，例如 *_sd.npz / *_sdxl.npz / *_flux.npz / 旧版 .npz），"
+                "或关闭 skip_cache_check，或启用 clear_dataset_npz_before_train 后重试。\n"
+                f"Examples:\n{sample_text}"
+            )
+        else:
+            warnings.append(
+                "Detected stale dataset latent cache files that do not match the current training bucket / resolution settings. "
+                "Valid caches can still be reused, and stale caches should be regenerated during latent caching before training starts. "
+                "If you prefer a full cleanup first, delete the dataset latent cache files (*.npz such as *_sd.npz / *_sdxl.npz / "
+                "*_flux.npz / legacy .npz) or enable clear_dataset_npz_before_train.\n"
+                "检测到数据集 latent 缓存与当前训练的分桶 / 分辨率设置不匹配。有效缓存仍可继续复用，"
+                "过期缓存会在训练开始前的 latent 缓存阶段重新生成。若你希望先完整清理，"
+                "可删除数据集目录中的 latent 缓存文件（*.npz，例如 *_sd.npz / *_sdxl.npz / *_flux.npz / 旧版 .npz），"
+                "或启用 clear_dataset_npz_before_train。\n"
+                f"Examples:\n{sample_text}"
+            )
 
     if legacy_shadowing_count > 0:
         sample_text = "\n".join(legacy_shadow_samples)
@@ -256,6 +284,7 @@ def analyze_metadata_cache_state(
     scan_dirs: list[Path],
     image_size_cache: dict[Path, tuple[int, int]],
     cache_info_enabled: bool,
+    clear_before_train: bool,
 ) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
@@ -308,17 +337,27 @@ def analyze_metadata_cache_state(
 
     if metadata_mismatch_count > 0:
         sample_text = "\n".join(metadata_samples)
-        message = (
-            "Detected stale metadata_cache.json entries whose recorded image sizes do not match the current files. "
-            "Delete metadata_cache.json in the affected dataset folders before training.\n"
-            "检测到 metadata_cache.json 中记录的图像尺寸与当前文件不一致。请删除对应数据集文件夹中的 "
-            "metadata_cache.json 后再训练。\n"
-            f"Examples:\n{sample_text}"
-        )
-        if cache_info_enabled:
-            errors.append(message)
+        if clear_before_train:
+            notes.append(
+                "Detected stale metadata_cache.json entries whose recorded image sizes do not match the current files. "
+                "clear_dataset_npz_before_train is enabled, so metadata_cache.json will be cleared before training starts.\n"
+                "检测到 metadata_cache.json 中记录的图像尺寸与当前文件不一致。由于已启用 "
+                "clear_dataset_npz_before_train，训练开始前会自动清理 metadata_cache.json。\n"
+                f"Examples:\n{sample_text}"
+            )
         else:
-            notes.append(message)
+            message = (
+                "Detected stale metadata_cache.json entries whose recorded image sizes do not match the current files. "
+                "Delete metadata_cache.json in the affected dataset folders before training, "
+                "or enable clear_dataset_npz_before_train to auto-clear it before launch.\n"
+                "检测到 metadata_cache.json 中记录的图像尺寸与当前文件不一致。请删除对应数据集文件夹中的 "
+                "metadata_cache.json，或启用 clear_dataset_npz_before_train 让训练前自动清理后再训练。\n"
+                f"Examples:\n{sample_text}"
+            )
+            if cache_info_enabled:
+                errors.append(message)
+            else:
+                notes.append(message)
 
     if metadata_cache_file_count > 0 and metadata_mismatch_count == 0:
         notes.append(f"Checked {metadata_cache_file_count} metadata_cache.json files.")

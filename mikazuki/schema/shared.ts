@@ -172,7 +172,7 @@
                 persistent_data_loader_workers: Schema.boolean().default(true).description("保留加载训练集的worker，减少每个 epoch 之间的停顿。"),
                 vae_batch_size: Schema.number().min(1).description("vae 编码批量大小"),
                 cpu_offload_checkpointing: Schema.boolean().default(false).description("实验性：梯度检查点时将部分张量卸载到 CPU，节省显存"),
-                pytorch_cuda_expandable_segments: Schema.boolean().default(true).description("训练前自动设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，缓解显存碎片导致的 OOM。一般对速度影响很小；如需排查兼容性或自行管理 allocator，可关闭"),
+                pytorch_cuda_expandable_segments: Schema.boolean().default(true).description("训练前自动设置 `PYTORCH_ALLOC_CONF=expandable_segments:True`，缓解显存碎片导致的 OOM。一般对速度影响很小；如需排查兼容性或自行管理 allocator，可关闭"),
             }
         },
 
@@ -466,7 +466,7 @@
             sync_ssh_port: Schema.number().min(1).max(65535).default(22).description("远程同步使用的 SSH 端口"),
             sync_use_password_auth: Schema.boolean().default(false).description("远程同步时启用密码认证。若开启且未走共享路径，需要本机可用 sshpass"),
             sync_ssh_password: Schema.string().description("远程同步密码。更推荐改用环境变量或共享路径"),
-            clear_dataset_npz_before_train: Schema.boolean().default(false).description("worker 在启动训练前清空 train/reg 数据集中的 .npz 缓存。多机共享数据集发生变化时可开启"),
+            clear_dataset_npz_before_train: Schema.boolean().default(false).description("worker 在启动训练前清空 train/reg 数据集中的 .npz 缓存和 metadata_cache.json。多机共享数据集发生变化时可开启"),
             ddp_timeout: Schema.number().min(0).description("分布式训练超时时间"),
             ddp_gradient_as_bucket_view: Schema.boolean(),
             ddp_static_graph: Schema.boolean().description("启用 DDP static_graph 优化"),
