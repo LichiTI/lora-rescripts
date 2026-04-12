@@ -201,7 +201,9 @@ def resolve_worker_sync_runtime(config: dict, distributed_runtime: dict, repo_ro
     if sync_missing_assets_from_main:
         notes.append("Worker sync will compare dataset/resource availability and pull missing assets from the main node when needed.")
     if clear_dataset_npz_before_train:
-        notes.append("clear_dataset_npz_before_train is enabled, so worker dataset .npz caches will be cleared before launch.")
+        notes.append(
+            "clear_dataset_npz_before_train is enabled, so worker dataset .npz caches and metadata_cache.json will be cleared before launch."
+        )
 
     if (sync_config_from_main or sync_missing_assets_from_main) and shared_main_repo_root is None:
         if not remote_host:
@@ -627,7 +629,8 @@ def clear_dataset_npz_cache(toml_path: str, repo_root: Path) -> tuple[bool, str]
         log.info("[cache-reset] no dataset dir found in toml, skip npz cleanup")
         return True, ""
 
-    total_removed = 0
+    total_npz_removed = 0
+    total_metadata_removed = 0
     for key, _, local_dir in dataset_dirs:
         if not local_dir.exists():
             log.info(f"[cache-reset] {key}: dataset dir not found, skip npz cleanup: {local_dir}")
@@ -635,17 +638,32 @@ def clear_dataset_npz_cache(toml_path: str, repo_root: Path) -> tuple[bool, str]
         if not local_dir.is_dir():
             return False, f"数据集路径不是目录，无法清理 npz: {local_dir}"
 
-        removed = 0
+        removed_npz = 0
         for npz_file in local_dir.rglob("*.npz"):
             try:
                 npz_file.unlink()
-                removed += 1
+                removed_npz += 1
             except Exception as exc:
                 return False, f"删除缓存失败: {npz_file} ({exc})"
-        total_removed += removed
-        log.info(f"[cache-reset] {key}: removed {removed} npz files under {local_dir}")
+        total_npz_removed += removed_npz
 
-    log.info(f"[cache-reset] removed total npz files: {total_removed}")
+        metadata_cache = local_dir / "metadata_cache.json"
+        removed_metadata = 0
+        if metadata_cache.exists():
+            try:
+                metadata_cache.unlink()
+                removed_metadata = 1
+            except Exception as exc:
+                return False, f"删除缓存失败: {metadata_cache} ({exc})"
+        total_metadata_removed += removed_metadata
+
+        log.info(
+            f"[cache-reset] {key}: removed {removed_npz} npz files and {removed_metadata} metadata cache files under {local_dir}"
+        )
+
+    log.info(
+        f"[cache-reset] removed total npz files: {total_npz_removed}, total metadata cache files: {total_metadata_removed}"
+    )
     return True, ""
 
 

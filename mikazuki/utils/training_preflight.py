@@ -480,7 +480,9 @@ def analyze_training_preflight(
         notes.append("Resume is configured from an existing state, but the current run is not set to save new state snapshots.")
 
     if bool(payload.get("clear_dataset_npz_before_train")):
-        notes.append("clear_dataset_npz_before_train is enabled, so train/reg dataset .npz caches will be cleared before launch.")
+        notes.append(
+            "clear_dataset_npz_before_train is enabled, so train/reg dataset .npz caches and metadata_cache.json will be cleared before launch."
+        )
 
     if not direct_python_training:
         distributed_runtime = run_preflight_step(

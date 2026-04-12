@@ -25,9 +25,9 @@ const C = s(
   null,
   -1
 );
-const E = s("p", null, "v1.1.5 Beta10", -1);
+const E = s("p", null, "v1.3.1", -1);
 const h = r(
-  `<p align="center"><strong>Fork from</strong> 秋葉 <a href="https://github.com/Akegarasu/lora-scripts" target="_blank" rel="noopener noreferrer">aaaki/lora-scripts</a></p><p align="center"><strong>Modify By</strong> <a href="https://github.com/WhitecrowAurora/lora-rescripts" target="_blank" rel="noopener noreferrer">Lulynx</a></p><h3 id="更新日志" tabindex="-1"><a class="header-anchor" href="#更新日志" aria-hidden="true">#</a> 更新日志</h3><h4 id="v1-1-5-beta10" tabindex="-1"><a class="header-anchor" href="#v1-1-5-beta10" aria-hidden="true">#</a> v1.1.5 Beta10</h4><ul><li>改进 Anima 训练吞吐与运行时稳定性，优化缓存处理、张量传输路径与运行诊断输出。</li><li>强化 Anima 在 SageAttention 下的性能可见性，新增步骤级 profiler 与更清晰的后端摘要日志。</li><li>修复多项 Anima 边界问题，包括预览 Prompt、空 Token 路径、旧版文本缓存重建，以及按 epoch 保存为 0 时的异常。</li><li>新增 Anima 高级调试选项，支持 profiler 统计窗口与 NaN 检查间隔调节。</li></ul>`,
+  `<p align="center"><strong>Fork from</strong> 秋葉 <a href="https://github.com/Akegarasu/lora-scripts" target="_blank" rel="noopener noreferrer">aaaki/lora-scripts</a></p><p align="center"><strong>Modify By</strong> <a href="https://github.com/WhitecrowAurora/lora-rescripts" target="_blank" rel="noopener noreferrer">Lulynx</a></p><h3 id="更新日志" tabindex="-1"><a class="header-anchor" href="#更新日志" aria-hidden="true">#</a> 更新日志</h3><h4 id="v1-3-1" tabindex="-1"><a class="header-anchor" href="#v1-3-1" aria-hidden="true">#</a> v1.3.1</h4><ul><li>修复训练参数右侧预览不显示 optimizer_args_custom / network_args_custom 的问题。</li><li>调整数据集缓存预检逻辑，恢复更接近旧版的 NPZ 复用体验：可复用则沿用，失效时允许自动重建，不再过度拦截。</li><li>clear_dataset_npz_before_train 现在会同时清理 .npz 与 metadata_cache.json，并补齐对应预检兜底。</li><li>修复 SageAttention 路线守卫里 model_train_type 丢失导致的 (unknown) 提示与错误回退。</li><li>切换到新的 PYTORCH_ALLOC_CONF 环境变量写法，减少 deprecated warning 刷屏。</li><li>缓解 Windows 控制台因 QuickEdit 导致的“看起来卡住、按回车才刷新”问题。</li></ul>`,
   5
 );
 

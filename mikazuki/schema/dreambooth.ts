@@ -256,7 +256,7 @@ Schema.intersect([
         sync_ssh_port: Schema.number().min(1).max(65535).default(22).description("远程同步使用的 SSH 端口"),
         sync_use_password_auth: Schema.boolean().default(false).description("远程同步时启用密码认证。若开启且未走共享路径，需要本机可用 sshpass"),
         sync_ssh_password: Schema.string().description("远程同步密码。更推荐改用环境变量或共享路径"),
-        clear_dataset_npz_before_train: Schema.boolean().default(false).description("worker 在启动训练前清空 train/reg 数据集中的 .npz 缓存。多机共享数据集发生变化时可开启"),
+        clear_dataset_npz_before_train: Schema.boolean().default(false).description("worker 在启动训练前清空 train/reg 数据集中的 .npz 缓存和 metadata_cache.json。多机共享数据集发生变化时可开启"),
         ddp_timeout: Schema.number().min(0).description("分布式训练超时时间"),
         ddp_gradient_as_bucket_view: Schema.boolean(),
         ddp_static_graph: Schema.boolean().description("启用 DDP static_graph 优化"),

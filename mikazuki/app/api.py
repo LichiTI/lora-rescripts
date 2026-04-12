@@ -969,6 +969,7 @@ async def create_toml_file(request: Request):
     json_data = await request.body()
 
     config: dict = json.loads(json_data.decode("utf-8"))
+    config.setdefault("pytorch_cuda_expandable_segments", True)
     try:
         train_utils.fix_config_types(config)
     except (TypeError, ValueError) as exc:
@@ -1015,7 +1016,8 @@ async def create_toml_file(request: Request):
     start_warnings.extend(launch_runtime["warnings"])
     skip_preview_prompt_prep = runtime_context["skip_preview_prompt_prep"]
 
-    model_train_type = str(config.get("model_train_type", "sd-lora") or "sd-lora").strip().lower()
+    model_train_type = str(config.pop("model_train_type", "sd-lora") or "sd-lora").strip().lower()
+    config["model_train_type"] = model_train_type
     train_data_dir = str(config.get("train_data_dir", "") or "").strip()
     suggest_cpu_threads = 8 if train_data_dir and len(train_utils.get_total_images(train_data_dir)) > 200 else 2
     trainer_file = trainer_definition.trainer_file
