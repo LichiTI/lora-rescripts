@@ -14,13 +14,18 @@ $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "tools\runtime\runtime_paths.ps1")
+. (Join-Path $repoRoot "tools\runtime\mirror_env.ps1")
+
+if (Test-MikazukiChinaMirrorMode) {
+    Enable-MikazukiChinaMirrorMode -RepoRoot $repoRoot
+}
 
 $blackwellRuntimeInfo = Resolve-RuntimeDirectoryInfo -RepoRoot $repoRoot -RuntimeName "blackwell"
 $blackwellRuntimeDirName = $blackwellRuntimeInfo.DirectoryName
 $blackwellRuntimeDir = $blackwellRuntimeInfo.DirectoryPath
 $blackwellPython = Join-Path $blackwellRuntimeDir "python.exe"
 $blackwellMarker = Join-Path $blackwellRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
 
 function Test-PipReady {
     param (
@@ -90,6 +95,142 @@ raise SystemExit(1 if failed else 0)" @Modules 1>$null 2>$null
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+}
+
+function Invoke-PythonJsonProbe {
+    param (
+        [string]$PythonExe,
+        [string]$ScriptContent
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PythonExe) -or -not (Test-Path $PythonExe)) {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($ScriptContent)) {
+        return $null
+    }
+
+    $tempPath = [System.IO.Path]::GetTempFileName()
+    $tempPyPath = [System.IO.Path]::ChangeExtension($tempPath, ".py")
+    Move-Item -LiteralPath $tempPath -Destination $tempPyPath -Force
+
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tempPyPath, $ScriptContent, $utf8NoBom)
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $raw = & $PythonExe $tempPyPath 2>$null
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($exitCode -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+            return $null
+        }
+
+        $text = if ($raw -is [System.Array]) {
+            ($raw | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+        }
+        else {
+            [string]$raw
+        }
+
+        $jsonLine = $text -split "`r?`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^[\{\[]' } |
+            Select-Object -Last 1
+
+        if ([string]::IsNullOrWhiteSpace($jsonLine)) {
+            return $null
+        }
+
+        try {
+            return $jsonLine | ConvertFrom-Json
+        }
+        catch {
+            return $null
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $tempPyPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-WheelRequiresDist {
+    param (
+        [string]$WheelPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WheelPath) -or -not (Test-Path $WheelPath)) {
+        return @()
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($WheelPath)
+    try {
+        $metadataEntry = $archive.Entries |
+            Where-Object { $_.FullName -like '*.dist-info/METADATA' } |
+            Select-Object -First 1
+        if (-not $metadataEntry) {
+            return @()
+        }
+
+        $stream = $metadataEntry.Open()
+        $reader = New-Object System.IO.StreamReader($stream)
+        try {
+            $requirements = New-Object System.Collections.Generic.List[string]
+            while (($line = $reader.ReadLine()) -ne $null) {
+                if ($line.StartsWith('Requires-Dist:', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $requirements.Add($line.Substring(14).Trim()) | Out-Null
+                }
+            }
+            return $requirements.ToArray()
+        }
+        finally {
+            $reader.Dispose()
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-BlackwellWheelExtraPackages {
+    param (
+        [string]$WheelPath
+    )
+
+    $requirements = Get-WheelRequiresDist -WheelPath $WheelPath
+    if (-not $requirements -or $requirements.Count -eq 0) {
+        return @()
+    }
+
+    $packages = New-Object System.Collections.Generic.List[string]
+    foreach ($requirement in $requirements) {
+        $baseRequirement = (($requirement -split ';', 2)[0]).Trim()
+        if ([string]::IsNullOrWhiteSpace($baseRequirement)) {
+            continue
+        }
+        if ($baseRequirement -match '^(?i)triton(?:-windows)?(?:\s*\(([^)]+)\))?$') {
+            $specifier = $Matches[1]
+            $package = if ([string]::IsNullOrWhiteSpace($specifier)) {
+                'triton-windows'
+            }
+            else {
+                ('triton-windows' + $specifier) -replace '\s+', ''
+            }
+            if ($packages -notcontains $package) {
+                $packages.Add($package) | Out-Null
+            }
+        }
+    }
+
+    return $packages.ToArray()
 }
 
 function Get-BlackwellExpectedPackageVersions {
@@ -181,17 +322,7 @@ except Exception as exc:
 print(json.dumps(result))
 "@
 
-    $raw = & $PythonExe -c $script 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
-        return $null
-    }
-
-    try {
-        return $raw | ConvertFrom-Json
-    }
-    catch {
-        return $null
-    }
+    return Invoke-PythonJsonProbe -PythonExe $PythonExe -ScriptContent $script
 }
 
 function Assert-BlackwellRuntimeReady {
@@ -268,6 +399,12 @@ function Resolve-XformersWheel {
     }
 
     $czmahiDefaultWheelUrl = "https://huggingface.co/czmahi/xformers-windows-torch2.8-cu128-py312/resolve/main/latest-torch2.8-python3.12-xformers-comfyui-windows/xformers-0.0.31%2B8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl"
+    if ((Test-MikazukiChinaMirrorMode) -and $Env:HF_ENDPOINT) {
+        $hfEndpoint = $Env:HF_ENDPOINT.TrimEnd("/")
+        if ($czmahiDefaultWheelUrl.StartsWith("https://huggingface.co/")) {
+            $czmahiDefaultWheelUrl = $hfEndpoint + $czmahiDefaultWheelUrl.Substring("https://huggingface.co".Length)
+        }
+    }
     $czmahiDefaultWheelName = "xformers-0.0.31+8fc8ec5a.d20250503-cp312-cp312-win_amd64.whl"
 
     $searchRoots = @(
@@ -386,6 +523,14 @@ if (-not $SkipXformers) {
         Write-Host -ForegroundColor Yellow "Using Blackwell xformers wheel: $resolvedWheel"
         Invoke-Step "Installing Blackwell xformers wheel from local file..." {
             & $blackwellPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
+        }
+
+        $extraPackages = @(Get-BlackwellWheelExtraPackages -WheelPath $resolvedWheel)
+        if ($extraPackages.Count -gt 0) {
+            Write-Host -ForegroundColor Yellow "Installing Blackwell wheel support packages: $($extraPackages -join ', ')"
+            Invoke-Step "Installing Blackwell runtime support packages..." {
+                & $blackwellPython -m pip install --upgrade --no-warn-script-location @extraPackages
+            }
         }
     }
     elseif ($AllowOfficialXformersFallback) {
