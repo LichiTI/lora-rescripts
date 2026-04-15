@@ -46,3 +46,6 @@ A启动新前端UI.bat
 /tools
 /tmp
 /python_sageattention
+tmp/backend_status.json
+/python
+ui.rar
