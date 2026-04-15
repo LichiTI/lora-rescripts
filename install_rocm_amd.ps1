@@ -23,7 +23,8 @@ $mainRequiredModules = @(
     "transformers",
     "diffusers",
     "cv2",
-    "tensorboard"
+    "tensorboard",
+    "pkg_resources"
 )
 
 $expectedRuntime = @{
@@ -470,6 +471,10 @@ try {
 
     Invoke-Step "Upgrading transformers for AMD runtime compatibility..." {
         & $rocmAmdPython -m pip install --upgrade --no-warn-script-location --prefer-binary $transformersConstraint
+    }
+
+    Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard in $rocmAmdRuntimeDirName..." {
+        & $rocmAmdPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
     }
 
     if (-not (Test-ModulesReady -PythonExe $rocmAmdPython -Modules $mainRequiredModules)) {

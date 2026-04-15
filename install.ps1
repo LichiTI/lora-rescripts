@@ -22,7 +22,7 @@ $venvRuntimeDir = $venvRuntimeInfo.DirectoryPath
 $venvPython = Join-Path $venvRuntimeDir "Scripts\python.exe"
 $venvMarker = Join-Path $venvRuntimeDir ".deps_installed"
 $allowExternalPython = $Env:MIKAZUKI_ALLOW_SYSTEM_PYTHON -eq "1"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard", "pkg_resources")
 
 function Test-PipReady {
     param (
@@ -191,6 +191,10 @@ Invoke-OptionalStep "Installing xformers (optional)..." {
 
 Invoke-Step "Installing project dependencies..." {
     & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
+}
+
+Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard..." {
+    & $pythonExe -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
 }
 
 if (-not (Test-ModulesReady -PythonExe $pythonExe -Modules $mainRequiredModules)) {

@@ -97,6 +97,7 @@ def main() -> None:
                 'lr_scheduler': preparation.config.lr_scheduler,
                 'lr_warmup_steps': preparation.config.lr_warmup_steps,
                 'max_grad_norm': preparation.config.max_grad_norm,
+                'save_every_n_epochs': preparation.config.save_every_n_epochs,
                 'save_every_n_steps': preparation.config.save_every_n_steps,
                 'adapter_type': preparation.config.adapter_type,
             },

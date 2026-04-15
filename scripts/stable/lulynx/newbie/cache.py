@@ -111,7 +111,7 @@ def encode_newbie_gemma_text_record(
     device: torch.device,
 ) -> bool:
     caption = _read_caption_text(record)
-    gemma_prefix = str(getattr(config, 'newbie_gemma_prompt_prefix', '') or '').strip()
+    gemma_prefix = str(getattr(config, 'gemma3_prompt', '') or '')
     gemma_text = f'{gemma_prefix}{caption}' if gemma_prefix else caption
     target_dtype = resolve_dtype(config.mixed_precision)
 

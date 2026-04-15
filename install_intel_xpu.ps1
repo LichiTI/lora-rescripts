@@ -24,7 +24,8 @@ $mainRequiredModules = @(
     "diffusers",
     "lion_pytorch",
     "cv2",
-    "tensorboard"
+    "tensorboard",
+    "pkg_resources"
 )
 $incompatiblePackages = @(
     "bitsandbytes",
@@ -284,6 +285,10 @@ try {
 }
 finally {
     Remove-Item -LiteralPath $filteredRequirements -Force -ErrorAction SilentlyContinue
+}
+
+Invoke-Step -Message "Re-enabling pkg_resources compatibility for TensorBoard / 修复 TensorBoard 对 pkg_resources 的兼容性" -Action {
+    & $intelPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
 }
 
 if (-not (Test-ModulesReady -PythonExe $intelPython -Modules $mainRequiredModules)) {
