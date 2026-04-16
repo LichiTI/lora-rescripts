@@ -47,6 +47,8 @@ Schema.intersect([
         network_train_text_encoder_only: Schema.boolean().default(false).description("仅训练文本编码器"),
     }).description("训练相关参数"),
 
+    SHARED_SCHEMAS.PEAK_VRAM_CONTROL,
+
     Schema.intersect([
         Schema.object({
             enable_mixed_resolution_training: Schema.boolean().default(false).description("启用阶段分辨率训练（实验性，支持 Anima）。1024 基准使用 512/768/1024；2048 基准使用 1024/1536/2048"),
@@ -126,7 +128,7 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
-    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA.description("Lulynx 实验核心"),
+    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_ANIMA,
     Schema.intersect([
         Schema.object({
             enable_preview: Schema.boolean().default(false).description("启用训练预览图"),

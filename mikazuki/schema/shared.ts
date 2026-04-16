@@ -7,7 +7,7 @@
     const LULYNX_EXPERIMENTAL_CORE_COMMON = Schema.intersect([
         Schema.object({
             lulynx_experimental_core_enabled: Schema.boolean().default(false).description("启用 Lulynx 实验核心。集中管理 SafeGuard、EMA、ResourceManager、BlockWeightManager、SmartRank、AutoController、LISA、PCGrad、Pause、Prodigy Guard 与轻量监控"),
-        }),
+        }).description("Lulynx 实验核心"),
         Schema.union([
             Schema.object({
                 lulynx_experimental_core_enabled: Schema.const(true).required(),
@@ -170,7 +170,49 @@
         ]),
     ])
 
+    const PEAK_VRAM_CONTROL = Schema.intersect([
+        Schema.object({
+            peak_vram_control_enabled: Schema.boolean().default(false).description("启用显存峰值控制。提供目标等效 batch、启动峰值保护、micro-batch 拆分与轻量显存诊断这些更稳妥的峰值调节入口"),
+        }).description("显存峰值控制"),
+        Schema.union([
+            Schema.object({
+                peak_vram_control_enabled: Schema.const(true).required(),
+                peak_vram_target_effective_batch: Schema.number().min(0).default(0).description("目标等效 batch。填写 0 表示关闭；填写后会优先通过梯度累积去逼近该等效 batch，而不是直接抬高单步 batch"),
+                peak_vram_startup_guard_enabled: Schema.boolean().default(false).description("启动峰值保护。训练开始前若干步会先套用更保守的省显存策略，跨过启动峰值后再回到常规配置（推荐高 batch 开启）"),
+                peak_vram_micro_batch_enabled: Schema.boolean().default(false).description("启用 micro-batch 拆分执行。会把当前 batch 拆成更小的前后向子批次，降低单次前后向峰值显存"),
+                peak_vram_diagnostics_enabled: Schema.boolean().default(false).description("启用轻量显存诊断。训练中会按设定间隔输出 step_start / forward / backward / optimizer 的显存峰值"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                peak_vram_control_enabled: Schema.const(true).required(),
+                peak_vram_micro_batch_enabled: Schema.const(true).required(),
+                peak_vram_micro_batch_size: Schema.number().min(1).default(1).description("每个 micro-batch 的实际前后向 batch 大小。例如 train_batch_size=8、这里填 2，则运行时会按 2+2+2+2 拆分"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                peak_vram_control_enabled: Schema.const(true).required(),
+                peak_vram_diagnostics_enabled: Schema.const(true).required(),
+                peak_vram_diagnostics_interval: Schema.number().min(1).default(25).description("每 N 个优化 step 输出一次显存诊断"),
+            }),
+            Schema.object({}),
+        ]),
+        Schema.union([
+            Schema.object({
+                peak_vram_control_enabled: Schema.const(true).required(),
+                peak_vram_startup_guard_enabled: Schema.const(true).required(),
+                peak_vram_startup_guard_mode: Schema.union(["auto", "balanced", "aggressive"]).default("auto").description("启动峰值保护强度。`auto` 会按当前分辨率、batch 与路线自动估计；`balanced` 更偏平衡；`aggressive` 更偏省显存"),
+                peak_vram_startup_guard_steps: Schema.number().min(0).default(24).description("启动峰值保护持续多少个优化 step。`0` 表示整段训练都保留该保护策略，不自动回落"),
+            }),
+            Schema.object({}),
+        ]),
+    ])
+
     let data = {
+        PEAK_VRAM_CONTROL,
         RAW: {
             DATASET_SETTINGS: {
                 train_data_dir: Schema.string().role('filepicker', { type: "folder", internal: "train-dir" }).default("./train/aki").description("训练数据集路径"),

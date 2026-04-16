@@ -11,6 +11,11 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from library.device_utils import clean_memory_on_device
+from lulynx.experimental_core import (
+    PeakVramDiagnosticsRecorder,
+    build_peak_vram_micro_batch_plan,
+    iter_training_micro_batches,
+)
 
 from .adapter import attach_newbie_adapter, count_trainable_parameters
 from .bridge import create_newbie_transport, instantiate_newbie_transformer
@@ -208,6 +213,17 @@ class NewbieCachedTrainer:
                 max_blocks=get_newbie_max_swappable_blocks(unwrapped_model),
                 allow_auto_release=bool(getattr(self.config, 'newbie_auto_swap_release', False)),
             )
+        peak_vram_diagnostics = PeakVramDiagnosticsRecorder(
+            self.config,
+            route_label='newbie',
+            device=accelerator.device,
+        )
+
+        startup_guard_release_step = max(0, int(getattr(self.config, 'peak_vram_startup_guard_steps', 0) or 0))
+        startup_guard_release_blocks = int(getattr(self.config, 'peak_vram_startup_guard_release_blocks', 0) or 0)
+        startup_guard_release_done = startup_guard_release_step <= 0 or startup_guard_release_blocks == int(
+            getattr(unwrapped_model, 'blocks_to_swap', 0) or 0
+        )
 
         global_step = start_step
         last_loss = 0.0
@@ -278,34 +294,54 @@ class NewbieCachedTrainer:
                     break
 
                 batch_retry = 0
+                current_loss = last_loss
                 while True:
                     try:
                         if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
                             unwrapped_model.prepare_block_swap_before_forward()
 
                         with accelerator.accumulate(model):
-                            latents = batch['latents'].to(accelerator.device)
-                            cap_feats = batch['cap_feats'].to(accelerator.device)
-                            cap_mask = batch['cap_mask'].to(accelerator.device)
-                            clip_text_pooled = batch['clip_text_pooled'].to(accelerator.device)
-                            loss_dict = transport.training_losses(
-                                model,
-                                latents,
-                                model_kwargs={
-                                    'cap_feats': cap_feats,
-                                    'cap_mask': cap_mask,
-                                    'clip_text_pooled': clip_text_pooled,
-                                },
+                            micro_batch_plan = build_peak_vram_micro_batch_plan(self.config, batch)
+                            peak_vram_diagnostics.start_step(
+                                global_step + 1,
+                                batch_size=micro_batch_plan.actual_batch_size,
+                                micro_batch_size=micro_batch_plan.micro_batch_size,
+                                split_count=micro_batch_plan.split_count,
                             )
-                            loss = loss_dict['loss'].mean()
-                            accelerator.backward(loss)
-                            if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
-                                move_newbie_trainable_params_to_device(unwrapped_model, accelerator.device)
+                            weighted_loss = 0.0
+
+                            for micro_batch, _sub_batch_size, loss_scale in iter_training_micro_batches(batch, micro_batch_plan):
+                                latents = micro_batch['latents'].to(accelerator.device, non_blocking=True)
+                                cap_feats = micro_batch['cap_feats'].to(accelerator.device, non_blocking=True)
+                                cap_mask = micro_batch['cap_mask'].to(accelerator.device, non_blocking=True)
+                                clip_text_pooled = micro_batch['clip_text_pooled'].to(
+                                    accelerator.device,
+                                    non_blocking=True,
+                                )
+                                loss_dict = transport.training_losses(
+                                    model,
+                                    latents,
+                                    model_kwargs={
+                                        'cap_feats': cap_feats,
+                                        'cap_mask': cap_mask,
+                                        'clip_text_pooled': clip_text_pooled,
+                                    },
+                                )
+                                loss = loss_dict['loss'].mean()
+                                peak_vram_diagnostics.capture('forward')
+                                weighted_loss += float(loss.detach().item()) * loss_scale
+                                accelerator.backward(loss * loss_scale)
+                                peak_vram_diagnostics.capture('backward')
+                                if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
+                                    move_newbie_trainable_params_to_device(unwrapped_model, accelerator.device)
+
                             if accelerator.sync_gradients and getattr(self.config, 'max_grad_norm', 1.0) not in (0, 0.0, None):
                                 accelerator.clip_grad_norm_(model.parameters(), float(getattr(self.config, 'max_grad_norm', 1.0)))
                             optimizer.step()
                             scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
+                            peak_vram_diagnostics.capture('optimizer')
+                            current_loss = weighted_loss
                         break
                     except RuntimeError as exc:
                         if (
@@ -324,7 +360,16 @@ class NewbieCachedTrainer:
 
                         if not getattr(self.config, 'cpu_offload_checkpointing', False) and current_blocks < max_blocks:
                             next_blocks = min(max_blocks, max(current_blocks + 2, 2))
-                            unwrapped_model.reconfigure_block_swap(next_blocks, accelerator.device)
+                            try:
+                                unwrapped_model.reconfigure_block_swap(next_blocks, accelerator.device)
+                            except Exception as reconfigure_exc:
+                                clean_memory_on_device(accelerator.device)
+                                raise NewbieTrainRuntimeError(
+                                    'Newbie 在 OOM 后尝试在线增强 block swap 失败。'
+                                    f'当前 blocks_to_swap={current_blocks}，目标={next_blocks}。'
+                                    '请重启训练后直接使用更高的 blocks_to_swap，或降低 batch size / 分辨率。'
+                                    f' 原始重配置错误: {reconfigure_exc}'
+                                ) from reconfigure_exc
                             self.config.blocks_to_swap = next_blocks
                             if adaptive_controller is not None:
                                 adaptive_controller.current_blocks = next_blocks
@@ -354,15 +399,19 @@ class NewbieCachedTrainer:
 
                 if accelerator.sync_gradients:
                     global_step += 1
-                    last_loss = float(loss.detach().item())
-                    accelerator.log(
-                        {
-                            'loss': last_loss,
-                            'learning_rate': float(scheduler.get_last_lr()[0]),
-                            'epoch': epoch + 1,
-                        },
-                        step=global_step,
-                    )
+                    last_loss = float(current_loss)
+                    peak_vram_logs, peak_vram_message = peak_vram_diagnostics.finish_step()
+                    if peak_vram_message and accelerator.is_main_process:
+                        print(peak_vram_message)
+
+                    step_logs = {
+                        'loss': last_loss,
+                        'learning_rate': float(scheduler.get_last_lr()[0]),
+                        'epoch': epoch + 1,
+                    }
+                    if peak_vram_logs:
+                        step_logs.update(peak_vram_logs)
+                    accelerator.log(step_logs, step=global_step)
                     if progress_bar is not None:
                         current_lr = scheduler.get_last_lr()[0]
                         progress_bar.update(1)
@@ -371,6 +420,27 @@ class NewbieCachedTrainer:
                             lr=f"{float(current_lr):.2e}",
                             epoch=f"{epoch + 1}/{max_train_epochs}",
                         )
+                    if not startup_guard_release_done and global_step >= startup_guard_release_step:
+                        current_blocks = int(getattr(unwrapped_model, 'blocks_to_swap', 0) or 0)
+                        if startup_guard_release_blocks != current_blocks:
+                            try:
+                                unwrapped_model.reconfigure_block_swap(startup_guard_release_blocks, accelerator.device)
+                                self.config.blocks_to_swap = startup_guard_release_blocks
+                                if adaptive_controller is not None:
+                                    adaptive_controller.current_blocks = startup_guard_release_blocks
+                                if accelerator.is_main_process:
+                                    print(
+                                        f"[newbie-train] startup peak guard released block swap: "
+                                        f"{current_blocks} -> {startup_guard_release_blocks} "
+                                        f"at step {global_step}"
+                                    )
+                            except Exception as release_exc:
+                                if accelerator.is_main_process:
+                                    print(
+                                        f"[newbie-train] warning: startup peak guard release skipped at step {global_step}: {release_exc}"
+                                    )
+                        startup_guard_release_done = True
+
                     if adaptive_controller is not None:
                         adaptive_note = adaptive_controller.on_optimizer_step(
                             step=global_step,
@@ -423,6 +493,8 @@ class NewbieCachedTrainer:
             total_params=total_params,
             saved_adapter_path=str(final_adapter_path),
         )
+
+
 
 
 

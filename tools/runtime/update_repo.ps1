@@ -52,6 +52,37 @@ function Get-GitHubMirrorCandidates {
     return $candidates
 }
 
+function Join-GitHubMirrorUrl {
+    param(
+        [string]$MirrorBase,
+        [string]$GitHubUrl
+    )
+
+    $normalizedMirrorBase = ([string]$MirrorBase).Trim()
+    $normalizedGitHubUrl = ([string]$GitHubUrl).Trim()
+    if ([string]::IsNullOrWhiteSpace($normalizedMirrorBase) -or [string]::IsNullOrWhiteSpace($normalizedGitHubUrl)) {
+        return $normalizedGitHubUrl
+    }
+
+    if (-not $normalizedMirrorBase.EndsWith('/')) {
+        $normalizedMirrorBase += '/'
+    }
+
+    $githubPrefix = 'https://github.com/'
+    if (
+        $normalizedGitHubUrl.StartsWith($githubPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $normalizedMirrorBase.EndsWith($githubPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        return ($normalizedMirrorBase + $normalizedGitHubUrl.Substring($githubPrefix.Length))
+    }
+
+    if ($normalizedGitHubUrl -match '^https?://') {
+        return ($normalizedMirrorBase + $normalizedGitHubUrl)
+    }
+
+    return ($normalizedMirrorBase + $normalizedGitHubUrl.TrimStart('/'))
+}
+
 function Get-NormalizedRepoHttpUrl {
     param(
         [string]$RepoUrl
@@ -85,7 +116,7 @@ function Get-ArchiveUrlCandidates {
 
     if ($UseChinaMirror) {
         foreach ($mirrorBase in (Get-GitHubMirrorCandidates)) {
-            $candidate = $mirrorBase + $archiveUrl
+            $candidate = Join-GitHubMirrorUrl -MirrorBase $mirrorBase -GitHubUrl $archiveUrl
             if (-not $candidates.Contains($candidate)) {
                 $candidates.Add($candidate)
             }
@@ -98,7 +129,7 @@ function Get-ArchiveUrlCandidates {
 
     if (-not $UseChinaMirror) {
         foreach ($mirrorBase in (Get-GitHubMirrorCandidates)) {
-            $candidate = $mirrorBase + $archiveUrl
+            $candidate = Join-GitHubMirrorUrl -MirrorBase $mirrorBase -GitHubUrl $archiveUrl
             if (-not $candidates.Contains($candidate)) {
                 $candidates.Add($candidate)
             }

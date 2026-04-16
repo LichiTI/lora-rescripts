@@ -230,7 +230,9 @@ def apply_newbie_memory_runtime_patch(model):
         if requested == int(getattr(self, 'blocks_to_swap', 0) or 0):
             return
         _enable_block_swap(self, requested, device, supports_backward=True)
-        _prepare_block_swap_before_forward(self)
+        # Reconfiguration can happen immediately after a CUDA OOM path. Deferring the
+        # actual block-device preparation to the next forward avoids doing another
+        # CPU/GPU remap while the allocator/runtime is still recovering.
 
     def _move_to_device_except_swap_blocks(self, device: torch.device):
         self._newbie_runtime_device = torch.device(device)

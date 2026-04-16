@@ -309,6 +309,26 @@ def add_lulynx_experimental_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument("--lulynx_svd_sample_interval", type=int, default=None)
 
+    group.add_argument(
+        "--peak_vram_control_enabled",
+        action="store_true",
+        default=None,
+        help="enable peak VRAM control bridge / 启用显存峰值控制桥接",
+    )
+    group.add_argument("--peak_vram_target_effective_batch", type=int, default=None)
+    group.add_argument("--peak_vram_startup_guard_enabled", action="store_true", default=None)
+    group.add_argument(
+        "--peak_vram_startup_guard_mode",
+        type=str,
+        default=None,
+        choices=["auto", "balanced", "aggressive"],
+    )
+    group.add_argument("--peak_vram_startup_guard_steps", type=int, default=None)
+    group.add_argument("--peak_vram_micro_batch_enabled", action="store_true", default=None)
+    group.add_argument("--peak_vram_micro_batch_size", type=int, default=None)
+    group.add_argument("--peak_vram_diagnostics_enabled", action="store_true", default=None)
+    group.add_argument("--peak_vram_diagnostics_interval", type=int, default=None)
+
     group.add_argument("--enable_block_weights", action="store_true", default=None)
     group.add_argument("--down_lr_weight", type=str, default=None)
     group.add_argument("--mid_lr_weight", type=str, default=None)
@@ -328,10 +348,310 @@ def _apply_alias_arguments(args: argparse.Namespace, source_prefix: str, target_
             setattr(args, f"{target_prefix}_{field_name}", value)
 
 
+
+def _value_is_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip() == "":
+        return False
+    return True
+
+
+def _normalize_ratio(value: Any, default: float = 0.0) -> float:
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        ratio = float(default)
+    if ratio > 1.0:
+        ratio /= 100.0
+    return min(0.99, max(0.0, ratio))
+
+
+def _infer_resolution_edge(args: argparse.Namespace) -> int:
+    direct_target_edge = _to_optional_int(getattr(args, "sdxl_bucket_target_edge", None), minimum=64)
+    if direct_target_edge is not None:
+        return direct_target_edge
+
+    raw_resolution = getattr(args, "resolution", None)
+    if raw_resolution is None:
+        return 1024
+
+    text = str(raw_resolution).strip().lower().replace("x", ",")
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    try:
+        if len(parts) >= 2:
+            return max(max(64, int(float(parts[0]))), max(64, int(float(parts[1]))))
+        if len(parts) == 1:
+            return max(64, int(float(parts[0])))
+    except (TypeError, ValueError):
+        return 1024
+    return 1024
+
+
+def _resolve_peak_vram_startup_guard_mode(args: argparse.Namespace, route_kind: str) -> str:
+    requested = str(getattr(args, "peak_vram_startup_guard_mode", None) or "auto").strip().lower()
+    if requested not in {"auto", "balanced", "aggressive"}:
+        requested = "auto"
+    if requested != "auto":
+        return requested
+
+    train_batch_size = max(1, _to_int(getattr(args, "train_batch_size", None), 1))
+    gradient_accumulation_steps = max(1, _to_int(getattr(args, "gradient_accumulation_steps", None), 1))
+    requested_effective_batch = max(0, _to_int(getattr(args, "peak_vram_target_effective_batch", None), 0))
+    resolution_edge = _infer_resolution_edge(args)
+
+    score = 0
+    if route_kind == "sdxl" and _to_bool(getattr(args, "sdxl_low_vram_optimization", None), False):
+        score += 2
+    if resolution_edge >= 1536:
+        score += 2
+    elif resolution_edge >= 1280:
+        score += 1
+    if train_batch_size >= 2:
+        score += 2
+    if requested_effective_batch >= max(4, train_batch_size * gradient_accumulation_steps * 2):
+        score += 1
+
+    try:
+        if torch.cuda.is_available():
+            total_vram_gb = float(torch.cuda.get_device_properties(0).total_memory) / float(1024**3)
+            if total_vram_gb <= 8.5:
+                score += 2
+            elif total_vram_gb <= 12.5:
+                score += 1
+    except Exception:
+        pass
+
+    return "aggressive" if score >= 3 else "balanced"
+
+
+def _format_sdxl_fixed_block_swap_scope(config: Dict[str, Any]) -> str:
+    scopes: List[str] = []
+    if config.get("swap_input_blocks"):
+        scopes.append("input")
+    if config.get("swap_middle_block"):
+        scopes.append("middle")
+    if config.get("swap_output_blocks"):
+        scopes.append("output")
+    return "/".join(scopes) if scopes else "none"
+
+
+def _capture_sdxl_fixed_block_swap_config(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "enabled": _to_bool(getattr(args, "sdxl_fixed_block_swap", None), False),
+        "swap_input_blocks": _to_bool(getattr(args, "sdxl_fixed_block_swap_input_blocks", None), False),
+        "swap_middle_block": _to_bool(getattr(args, "sdxl_fixed_block_swap_middle_block", None), False),
+        "swap_output_blocks": _to_bool(getattr(args, "sdxl_fixed_block_swap_output_blocks", None), False),
+        "offload_after_backward": _to_bool(getattr(args, "sdxl_fixed_block_swap_offload_after_backward", None), True),
+        "vram_threshold_ratio": _normalize_ratio(
+            getattr(args, "sdxl_fixed_block_swap_vram_threshold_ratio", None),
+            default=0.0,
+        ),
+    }
+
+
+def _sdxl_fixed_block_swap_configs_equal(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    return (
+        bool(left.get("enabled")) == bool(right.get("enabled"))
+        and bool(left.get("swap_input_blocks")) == bool(right.get("swap_input_blocks"))
+        and bool(left.get("swap_middle_block")) == bool(right.get("swap_middle_block"))
+        and bool(left.get("swap_output_blocks")) == bool(right.get("swap_output_blocks"))
+        and bool(left.get("offload_after_backward")) == bool(right.get("offload_after_backward"))
+        and abs(float(left.get("vram_threshold_ratio", 0.0)) - float(right.get("vram_threshold_ratio", 0.0))) < 1e-6
+    )
+
+
+def _apply_sdxl_fixed_block_swap_config(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    args.sdxl_fixed_block_swap = bool(config["enabled"])
+    args.sdxl_fixed_block_swap_input_blocks = bool(config["swap_input_blocks"])
+    args.sdxl_fixed_block_swap_middle_block = bool(config["swap_middle_block"])
+    args.sdxl_fixed_block_swap_output_blocks = bool(config["swap_output_blocks"])
+    args.sdxl_fixed_block_swap_offload_after_backward = bool(config["offload_after_backward"])
+    args.sdxl_fixed_block_swap_vram_threshold_ratio = float(config["vram_threshold_ratio"])
+
+
+def _apply_peak_vram_control(args: argparse.Namespace, route_label: str, route_kind: str) -> None:
+    explicit_peak_vram_control_enabled = _to_optional_bool(getattr(args, "peak_vram_control_enabled", None))
+    raw_target_effective_batch = getattr(args, "peak_vram_target_effective_batch", None)
+    raw_startup_guard_enabled = getattr(args, "peak_vram_startup_guard_enabled", None)
+    raw_startup_guard_mode = getattr(args, "peak_vram_startup_guard_mode", None)
+    raw_startup_guard_steps = getattr(args, "peak_vram_startup_guard_steps", None)
+    raw_micro_batch_enabled = getattr(args, "peak_vram_micro_batch_enabled", None)
+    raw_micro_batch_size = getattr(args, "peak_vram_micro_batch_size", None)
+    raw_diagnostics_enabled = getattr(args, "peak_vram_diagnostics_enabled", None)
+    raw_diagnostics_interval = getattr(args, "peak_vram_diagnostics_interval", None)
+
+    explicit_peak_vram_child_requests = {
+        "target_effective_batch": _value_is_present(raw_target_effective_batch) and _to_int(raw_target_effective_batch, 0) > 0,
+        "startup_guard": (
+            _to_bool(raw_startup_guard_enabled, False)
+            or _value_is_present(raw_startup_guard_mode)
+            or _value_is_present(raw_startup_guard_steps)
+        ),
+        "micro_batch": _to_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size),
+        "diagnostics": _to_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval),
+    }
+    if explicit_peak_vram_control_enabled is False and any(explicit_peak_vram_child_requests.values()):
+        logger.info(
+            "Peak VRAM control was explicitly disabled for %s; ignoring child control requests.",
+            route_label,
+        )
+        raw_target_effective_batch = None
+        raw_startup_guard_enabled = None
+        raw_startup_guard_mode = None
+        raw_startup_guard_steps = None
+        raw_micro_batch_enabled = None
+        raw_micro_batch_size = None
+        raw_diagnostics_enabled = None
+        raw_diagnostics_interval = None
+
+    has_target_request = _value_is_present(raw_target_effective_batch) and _to_int(raw_target_effective_batch, 0) > 0
+    has_guard_request = (
+        _to_bool(raw_startup_guard_enabled, False)
+        or _value_is_present(raw_startup_guard_mode)
+        or _value_is_present(raw_startup_guard_steps)
+    )
+    if explicit_peak_vram_control_enabled is True:
+        args.peak_vram_control_enabled = True
+    elif explicit_peak_vram_control_enabled is False:
+        args.peak_vram_control_enabled = False
+    else:
+        args.peak_vram_control_enabled = has_target_request or has_guard_request
+
+    train_batch_size = max(1, _to_int(getattr(args, "train_batch_size", None), 1))
+    original_gradient_accumulation_steps = max(1, _to_int(getattr(args, "gradient_accumulation_steps", None), 1))
+    target_effective_batch = max(0, _to_int(raw_target_effective_batch, 0))
+    if target_effective_batch > 0:
+        args.gradient_accumulation_steps = max(1, int(math.ceil(float(target_effective_batch) / float(train_batch_size))))
+    args.peak_vram_target_effective_batch = target_effective_batch
+    args.peak_vram_effective_batch_realized = train_batch_size * max(
+        1,
+        _to_int(getattr(args, "gradient_accumulation_steps", None), 1),
+    )
+    args.peak_vram_effective_batch_adjusted = max(
+        1,
+        _to_int(getattr(args, "gradient_accumulation_steps", None), 1),
+    ) != original_gradient_accumulation_steps
+
+    has_micro_batch_request = _to_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size)
+    has_diagnostics_request = _to_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
+    if explicit_peak_vram_control_enabled is None:
+        args.peak_vram_control_enabled = bool(args.peak_vram_control_enabled or has_micro_batch_request or has_diagnostics_request)
+    args.peak_vram_micro_batch_enabled = args.peak_vram_control_enabled and (
+        _to_bool(raw_micro_batch_enabled, False)
+        or (_value_is_present(raw_micro_batch_size) and _to_int(raw_micro_batch_size, 0) > 0)
+    )
+    args.peak_vram_micro_batch_size = max(1, _to_int(raw_micro_batch_size, train_batch_size))
+    args.peak_vram_diagnostics_enabled = args.peak_vram_control_enabled and (
+        _to_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
+    )
+    args.peak_vram_diagnostics_interval = max(1, _to_int(raw_diagnostics_interval, 25))
+
+    args.peak_vram_startup_guard_enabled = args.peak_vram_control_enabled and _to_bool(raw_startup_guard_enabled, False)
+    requested_mode = str(raw_startup_guard_mode or "auto").strip().lower() or "auto"
+    if requested_mode not in {"auto", "balanced", "aggressive"}:
+        requested_mode = "auto"
+    args.peak_vram_startup_guard_mode = requested_mode
+    args.peak_vram_startup_guard_steps = max(
+        0,
+        _to_int(raw_startup_guard_steps, 24 if args.peak_vram_startup_guard_enabled else 0),
+    )
+    args._peak_vram_startup_guard_resolved_mode = requested_mode
+    args._peak_vram_startup_guard_summary = None
+    args._peak_vram_startup_guard_release_blocks = None
+    args._peak_vram_startup_guard_release_config = None
+
+    if args.peak_vram_startup_guard_enabled:
+        resolved_mode = _resolve_peak_vram_startup_guard_mode(args, route_kind)
+        args._peak_vram_startup_guard_resolved_mode = resolved_mode
+
+        if route_kind == "anima":
+            baseline_blocks = max(0, _to_int(getattr(args, "blocks_to_swap", None), 0))
+            if _to_bool(getattr(args, "cpu_offload_checkpointing", None), False) or _to_bool(
+                getattr(args, "unsloth_offload_checkpointing", None), False
+            ):
+                args._peak_vram_startup_guard_summary = "startup_guard skipped because CPU/Unsloth offload is already active"
+            else:
+                desired_blocks = 4 if resolved_mode == "balanced" else 6
+                applied_blocks = max(baseline_blocks, desired_blocks)
+                args.blocks_to_swap = applied_blocks
+                if args.peak_vram_startup_guard_steps > 0 and applied_blocks != baseline_blocks:
+                    args._peak_vram_startup_guard_release_blocks = baseline_blocks
+                args._peak_vram_startup_guard_summary = (
+                    f"blocks_to_swap={applied_blocks} -> release_to={baseline_blocks} "
+                    f"after {args.peak_vram_startup_guard_steps} steps"
+                    if args.peak_vram_startup_guard_steps > 0 and applied_blocks != baseline_blocks
+                    else f"blocks_to_swap={applied_blocks}"
+                )
+        elif route_kind == "sdxl":
+            baseline_config = _capture_sdxl_fixed_block_swap_config(args)
+            guarded_config = dict(baseline_config)
+            guarded_config["enabled"] = True
+            guarded_config["swap_middle_block"] = True
+            guarded_config["swap_output_blocks"] = True
+            guarded_config["swap_input_blocks"] = bool(baseline_config["swap_input_blocks"]) or resolved_mode == "aggressive"
+            guarded_config["offload_after_backward"] = True
+            desired_threshold = 0.70 if resolved_mode == "balanced" else 0.0
+            current_threshold = float(baseline_config["vram_threshold_ratio"])
+            guarded_config["vram_threshold_ratio"] = (
+                min(current_threshold, desired_threshold) if baseline_config["enabled"] else desired_threshold
+            )
+            _apply_sdxl_fixed_block_swap_config(args, guarded_config)
+
+            if args.peak_vram_startup_guard_steps > 0 and not _sdxl_fixed_block_swap_configs_equal(
+                baseline_config, guarded_config
+            ):
+                args._peak_vram_startup_guard_release_config = baseline_config
+
+            args._peak_vram_startup_guard_summary = (
+                f"fixed_block_swap={_format_sdxl_fixed_block_swap_scope(guarded_config)} "
+                f"-> release_to={_format_sdxl_fixed_block_swap_scope(baseline_config)} "
+                f"after {args.peak_vram_startup_guard_steps} steps"
+                if args.peak_vram_startup_guard_steps > 0
+                and args._peak_vram_startup_guard_release_config is not None
+                else f"fixed_block_swap={_format_sdxl_fixed_block_swap_scope(guarded_config)}"
+            )
+
+    if args.peak_vram_control_enabled:
+        logger.info(
+            f"Peak VRAM control requested for {route_label}: "
+            f"target_effective_batch={args.peak_vram_target_effective_batch or 'off'} "
+            f"(realized={args.peak_vram_effective_batch_realized}), "
+            f"startup_guard={'on' if args.peak_vram_startup_guard_enabled else 'off'}"
+            + (
+                f", mode={args._peak_vram_startup_guard_resolved_mode}, summary={args._peak_vram_startup_guard_summary}"
+                if args.peak_vram_startup_guard_enabled and args._peak_vram_startup_guard_summary
+                else ""
+            )
+            + (
+                f", micro_batch={args.peak_vram_micro_batch_size}"
+                if args.peak_vram_micro_batch_enabled
+                else ", micro_batch=off"
+            )
+            + (
+                f", diagnostics=every_{args.peak_vram_diagnostics_interval}_steps"
+                if args.peak_vram_diagnostics_enabled
+                else ", diagnostics=off"
+            )
+        )
 def normalize_lulynx_args(args: argparse.Namespace, route_label: str, route_kind: str) -> None:
+
     args.lulynx_route_label = route_label
     args.lulynx_route_kind = route_kind
-
+    explicit_experimental_core_enabled = _to_optional_bool(getattr(args, "lulynx_experimental_core_enabled", None))
+    explicit_experimental_child_flags = {
+        "lulynx_safeguard_enabled": _to_bool(getattr(args, "lulynx_safeguard_enabled", None), False),
+        "lulynx_ema_enabled": _to_bool(getattr(args, "lulynx_ema_enabled", None), False),
+        "lulynx_resource_manager_enabled": _to_bool(getattr(args, "lulynx_resource_manager_enabled", None), False),
+        "lulynx_block_weight_enabled": _to_bool(getattr(args, "lulynx_block_weight_enabled", None), False),
+        "lulynx_smart_rank_enabled": _to_bool(getattr(args, "lulynx_smart_rank_enabled", None), False),
+        "lulynx_auto_controller_enabled": _to_bool(getattr(args, "lulynx_auto_controller_enabled", None), False),
+        "lulynx_lisa_enabled": _to_bool(getattr(args, "lulynx_lisa_enabled", None), False),
+        "lulynx_pcgrad_enabled": _to_bool(getattr(args, "lulynx_pcgrad_enabled", None), False),
+        "lulynx_pause_enabled": _to_bool(getattr(args, "lulynx_pause_enabled", None), False),
+        "lulynx_prodigy_guard_enabled": _to_bool(getattr(args, "lulynx_prodigy_guard_enabled", None), False),
+        "lulynx_advanced_stats_enabled": _to_bool(getattr(args, "lulynx_advanced_stats_enabled", None), False),
+    }
     legacy_block_weight_enabled = _to_bool(getattr(args, "enable_block_weights", None), False) or any(
         getattr(args, field_name, None) not in (None, "")
         for field_name in ("down_lr_weight", "mid_lr_weight", "up_lr_weight", "block_lr_zero_threshold")
@@ -397,6 +717,15 @@ def normalize_lulynx_args(args: argparse.Namespace, route_label: str, route_kind
     args.lulynx_prodigy_guard_enabled = _to_bool(getattr(args, "lulynx_prodigy_guard_enabled", None), False) or any(
         getattr(args, field_name, None) not in (None, "") for field_name in prodigy_guard_fields
     )
+
+    if explicit_experimental_core_enabled is False and any(explicit_experimental_child_flags.values()):
+        logger.info(
+            "Lulynx experimental core was explicitly disabled for %s; ignoring child feature toggles.",
+            route_label,
+        )
+        for field_name, requested in explicit_experimental_child_flags.items():
+            if requested:
+                setattr(args, field_name, False)
 
     args.lulynx_resource_log_interval = max(1, _to_int(getattr(args, "lulynx_resource_log_interval", None), 25))
     args.lulynx_resource_warn_vram_ratio = min(
@@ -469,6 +798,7 @@ def normalize_lulynx_args(args: argparse.Namespace, route_label: str, route_kind
         args.lulynx_prodigy_lr_max = args.lulynx_prodigy_lr_min
 
     args.lulynx_svd_sample_interval = max(1, _to_int(getattr(args, "lulynx_svd_sample_interval", None), 100))
+    _apply_peak_vram_control(args, route_label, route_kind)
 
     if args.lulynx_pause_enabled:
         if getattr(args, "cooldown_every_n_epochs", None) in (None, "") and args.lulynx_pause_every_n_epochs is not None:
@@ -482,21 +812,24 @@ def normalize_lulynx_args(args: argparse.Namespace, route_label: str, route_kind
         if getattr(args, "cooldown_poll_seconds", None) in (None, ""):
             args.cooldown_poll_seconds = 15
 
-    args.lulynx_experimental_core_enabled = _to_bool(getattr(args, "lulynx_experimental_core_enabled", None), False) or any(
-        [
-            args.lulynx_safeguard_enabled,
-            args.lulynx_ema_enabled,
-            args.lulynx_resource_manager_enabled,
-            args.lulynx_block_weight_enabled,
-            args.lulynx_smart_rank_enabled,
-            args.lulynx_auto_controller_enabled,
-            args.lulynx_lisa_enabled,
-            args.lulynx_pcgrad_enabled,
-            args.lulynx_pause_enabled,
-            args.lulynx_prodigy_guard_enabled,
-            args.lulynx_advanced_stats_enabled,
-        ]
-    )
+    if explicit_experimental_core_enabled is True:
+        args.lulynx_experimental_core_enabled = True
+    else:
+        args.lulynx_experimental_core_enabled = any(
+            [
+                args.lulynx_safeguard_enabled,
+                args.lulynx_ema_enabled,
+                args.lulynx_resource_manager_enabled,
+                args.lulynx_block_weight_enabled,
+                args.lulynx_smart_rank_enabled,
+                args.lulynx_auto_controller_enabled,
+                args.lulynx_lisa_enabled,
+                args.lulynx_pcgrad_enabled,
+                args.lulynx_pause_enabled,
+                args.lulynx_prodigy_guard_enabled,
+                args.lulynx_advanced_stats_enabled,
+            ]
+        )
 
     if args.lulynx_experimental_core_enabled:
         logger.info(
@@ -522,6 +855,214 @@ class LulynxStepDecision:
     logs: Dict[str, float] = field(default_factory=dict)
 
 
+
+@dataclass
+class PeakVramMicroBatchPlan:
+    actual_batch_size: int
+    micro_batch_size: int
+    split_count: int
+    enabled: bool
+
+    @property
+    def requires_split(self) -> bool:
+        return bool(self.enabled and self.split_count > 1)
+
+
+def infer_training_batch_size(batch: Any) -> Optional[int]:
+    if isinstance(batch, torch.Tensor):
+        if batch.ndim <= 0:
+            return None
+        return int(batch.shape[0])
+
+    if isinstance(batch, dict):
+        preferred_keys = (
+            "latents",
+            "images",
+            "loss_weights",
+            "captions",
+            "input_ids_list",
+            "text_encoder_outputs_list",
+            "cap_feats",
+            "cap_mask",
+            "clip_text_pooled",
+        )
+        for key in preferred_keys:
+            if key in batch:
+                size = infer_training_batch_size(batch[key])
+                if size is not None:
+                    return size
+        for value in batch.values():
+            size = infer_training_batch_size(value)
+            if size is not None:
+                return size
+        return None
+
+    if isinstance(batch, (list, tuple)):
+        if len(batch) == 0:
+            return None
+        if all(not isinstance(item, (torch.Tensor, dict, list, tuple)) for item in batch):
+            return len(batch)
+        for item in batch:
+            size = infer_training_batch_size(item)
+            if size is not None:
+                return size
+    return None
+
+
+def slice_training_batch(batch: Any, start: int, end: int, expected_batch_size: Optional[int] = None) -> Any:
+    if isinstance(batch, torch.Tensor):
+        if batch.ndim <= 0:
+            return batch
+        if expected_batch_size is not None and int(batch.shape[0]) == expected_batch_size:
+            return batch[start:end]
+        return batch
+
+    if isinstance(batch, dict):
+        return {key: slice_training_batch(value, start, end, expected_batch_size) for key, value in batch.items()}
+
+    if isinstance(batch, list):
+        if expected_batch_size is not None and len(batch) == expected_batch_size:
+            return batch[start:end]
+        return [slice_training_batch(item, start, end, expected_batch_size) for item in batch]
+
+    if isinstance(batch, tuple):
+        if expected_batch_size is not None and len(batch) == expected_batch_size:
+            return batch[start:end]
+        return tuple(slice_training_batch(item, start, end, expected_batch_size) for item in batch)
+
+    return batch
+
+
+def build_peak_vram_micro_batch_plan(config_or_args: Any, batch: Any) -> PeakVramMicroBatchPlan:
+    actual_batch_size = max(1, infer_training_batch_size(batch) or 1)
+    enabled = _to_bool(getattr(config_or_args, "peak_vram_micro_batch_enabled", None), False)
+    requested_micro_batch_size = max(
+        1,
+        _to_int(getattr(config_or_args, "peak_vram_micro_batch_size", None), actual_batch_size),
+    )
+    micro_batch_size = min(actual_batch_size, requested_micro_batch_size) if enabled else actual_batch_size
+    split_count = max(1, int(math.ceil(float(actual_batch_size) / float(micro_batch_size))))
+    return PeakVramMicroBatchPlan(
+        actual_batch_size=actual_batch_size,
+        micro_batch_size=micro_batch_size,
+        split_count=split_count,
+        enabled=enabled,
+    )
+
+
+def iter_training_micro_batches(batch: Any, plan: PeakVramMicroBatchPlan):
+    if not plan.requires_split:
+        yield batch, plan.actual_batch_size, 1.0
+        return
+
+    for start in range(0, plan.actual_batch_size, plan.micro_batch_size):
+        end = min(plan.actual_batch_size, start + plan.micro_batch_size)
+        sub_batch_size = end - start
+        yield (
+            slice_training_batch(batch, start, end, expected_batch_size=plan.actual_batch_size),
+            sub_batch_size,
+            float(sub_batch_size) / float(plan.actual_batch_size),
+        )
+
+
+class PeakVramDiagnosticsRecorder:
+    def __init__(self, config_or_args: Any, route_label: str, device: Optional[torch.device]):
+        self.route_label = route_label
+        self.device = device
+        self.enabled = bool(
+            _to_bool(getattr(config_or_args, "peak_vram_diagnostics_enabled", None), False)
+            and device is not None
+            and device.type == "cuda"
+            and torch.cuda.is_available()
+        )
+        self.interval = max(1, _to_int(getattr(config_or_args, "peak_vram_diagnostics_interval", None), 25))
+        self.startup_window_steps = max(
+            8,
+            _to_int(getattr(config_or_args, "peak_vram_startup_guard_steps", None), 0),
+        )
+        self._active_step = False
+        self._emit_step = False
+        self._step = 0
+        self._batch_size = 0
+        self._micro_batch_size = 0
+        self._split_count = 1
+        self._stage_reserved_gb: Dict[str, float] = {}
+        self._startup_peak_reserved_gb = 0.0
+
+    def start_step(self, step: int, *, batch_size: int, micro_batch_size: int, split_count: int) -> None:
+        if not self.enabled:
+            self._active_step = False
+            self._emit_step = False
+            return
+
+        self._step = int(step)
+        self._batch_size = max(1, int(batch_size))
+        self._micro_batch_size = max(1, int(micro_batch_size))
+        self._split_count = max(1, int(split_count))
+        self._stage_reserved_gb = {}
+        self._active_step = True
+        self._emit_step = self._step <= 3 or self._step % self.interval == 0
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self.capture("step_start")
+
+    def capture(self, stage: str) -> None:
+        if not self._active_step:
+            return
+        stats = _get_device_memory_stats(self.device)
+        if not stats:
+            return
+        reserved_gb = float(stats["reserved"]) / float(1024**3)
+        current = self._stage_reserved_gb.get(stage)
+        self._stage_reserved_gb[stage] = reserved_gb if current is None else max(current, reserved_gb)
+
+    def finish_step(self) -> tuple[Dict[str, float], Optional[str]]:
+        if not self._active_step:
+            return {}, None
+
+        stats = _get_device_memory_stats(self.device)
+        if not stats:
+            self._active_step = False
+            self._emit_step = False
+            return {}, None
+
+        current_reserved_gb = float(stats["reserved"]) / float(1024**3)
+        step_peak_reserved_gb = float(max(stats["max_reserved"], stats["reserved"])) / float(1024**3)
+        if self._step <= self.startup_window_steps:
+            self._startup_peak_reserved_gb = max(self._startup_peak_reserved_gb, step_peak_reserved_gb)
+
+        logs = {
+            "peak_vram/step_peak_reserved_gb": step_peak_reserved_gb,
+            "peak_vram/current_reserved_gb": current_reserved_gb,
+            "peak_vram/batch_size": float(self._batch_size),
+            "peak_vram/micro_batch_size": float(self._micro_batch_size),
+            "peak_vram/split_count": float(self._split_count),
+            "peak_vram/startup_peak_reserved_gb": self._startup_peak_reserved_gb,
+        }
+        for stage_name, reserved_gb in self._stage_reserved_gb.items():
+            logs[f"peak_vram_stage/{stage_name}_reserved_gb"] = reserved_gb
+
+        message = None
+        if self._emit_step:
+            stage_order = ("step_start", "forward", "backward", "optimizer")
+            stage_summary = ", ".join(
+                f"{name}={self._stage_reserved_gb[name]:.2f}GB" for name in stage_order if name in self._stage_reserved_gb
+            )
+            split_label = (
+                f"{self._micro_batch_size}x{self._split_count}"
+                if self._split_count > 1
+                else f"{self._batch_size}"
+            )
+            message = (
+                f"[peak-vram][{self.route_label}] step={self._step} | batch={self._batch_size} | "
+                f"micro={split_label} | step_peak={step_peak_reserved_gb:.2f}GB | "
+                f"reserved={current_reserved_gb:.2f}GB | startup_peak={self._startup_peak_reserved_gb:.2f}GB"
+            )
+            if stage_summary:
+                message += f" | stages: {stage_summary}"
+
+        self._active_step = False
+        self._emit_step = False
+        return logs, message
 class LulynxExperimentalCore:
     def __init__(self, args: argparse.Namespace, route_kind: str, route_label: str):
         self.args = args
@@ -1130,3 +1671,4 @@ def create_lulynx_core(args: argparse.Namespace, route_kind: str, route_label: s
     if not _to_bool(getattr(args, "lulynx_experimental_core_enabled", False), False):
         return None
     return LulynxExperimentalCore(args, route_kind=route_kind, route_label=route_label)
+

@@ -38,7 +38,13 @@ from library.config_util import BlueprintGenerator, ConfigSanitizer
 from library.custom_train_functions import apply_masked_loss
 from library.utils import setup_logging
 import train_network
-from lulynx.experimental_core import create_lulynx_core, normalize_lulynx_args
+from lulynx.experimental_core import (
+    PeakVramDiagnosticsRecorder,
+    build_peak_vram_micro_batch_plan,
+    create_lulynx_core,
+    iter_training_micro_batches,
+    normalize_lulynx_args,
+)
 
 setup_logging()
 import logging
@@ -1244,9 +1250,22 @@ class AnimaNetworkTrainer:
             desc="steps",
         )
         lulynx_stop_reason = None
+        peak_vram_diagnostics = PeakVramDiagnosticsRecorder(
+            args,
+            getattr(args, "lulynx_route_label", "Anima LoRA"),
+            accelerator.device,
+        )
 
         if self.is_swapping_blocks:
             accelerator.unwrap_model(dit).prepare_block_swap_before_forward()
+
+        peak_vram_startup_guard_release_blocks = getattr(args, "_peak_vram_startup_guard_release_blocks", None)
+        peak_vram_startup_guard_release_step = max(0, int(getattr(args, "peak_vram_startup_guard_steps", 0) or 0))
+        peak_vram_startup_guard_release_done = (
+            peak_vram_startup_guard_release_blocks is None
+            or peak_vram_startup_guard_release_step <= 0
+            or int(peak_vram_startup_guard_release_blocks or 0) == int(getattr(args, "blocks_to_swap", 0) or 0)
+        )
 
         if initial_step > 0:
             for skip_epoch in range(epoch_to_start):
@@ -1278,54 +1297,91 @@ class AnimaNetworkTrainer:
                 try:
                     with accelerator.accumulate(training_model):
                         return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
-                        per_sample_losses = None
-                        batch_result = self.process_batch(
-                            batch,
-                            text_encoders,
-                            dit,
-                            network,
-                            vae,
-                            noise_scheduler,
-                            vae_dtype,
-                            weight_dtype,
-                            accelerator,
-                            args,
-                            text_encoding_strategy,
-                            tokenize_strategy,
-                            train_text_encoder=train_text_encoder,
-                            profiler=anima_step_profiler,
-                            use_non_blocking=use_non_blocking,
-                            run_nan_check=run_nan_check,
-                            return_per_sample_loss=return_per_sample_loss,
-                        )
-                        if return_per_sample_loss:
-                            loss, per_sample_losses = batch_result
-                        else:
-                            loss = batch_result
-
-                        current_loss = loss.detach().item()
-                        if safeguard is not None:
-                            safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
-                            if safeguard_decision.reason:
-                                logger.warning(safeguard_decision.reason)
-                            if safeguard_decision.stop_training:
-                                raise RuntimeError(safeguard_decision.reason)
-                            if safeguard_decision.skip_step:
-                                optimizer.zero_grad(set_to_none=True)
-                                anima_step_profiler.discard_current_step()
-                                continue
-
-                        with anima_step_profiler.step_section("backward"):
-                            if lulynx_core is not None:
-                                lulynx_core.backward(
-                                    loss=loss,
-                                    accelerator=accelerator,
-                                    optimizer=optimizer,
-                                    network=accelerator.unwrap_model(network),
-                                    per_sample_losses=per_sample_losses,
+                        micro_batch_plan = build_peak_vram_micro_batch_plan(args, batch)
+                        if return_per_sample_loss and micro_batch_plan.requires_split:
+                            if not getattr(args, "_peak_vram_pcgrad_micro_batch_warned", False):
+                                logger.warning(
+                                    "Peak VRAM micro-batch splitting is currently not combined with Lulynx PCGrad on Anima. "
+                                    "Falling back to full-batch backward for the current step."
                                 )
+                                args._peak_vram_pcgrad_micro_batch_warned = True
+                            micro_batch_plan.enabled = False
+                            micro_batch_plan.micro_batch_size = micro_batch_plan.actual_batch_size
+                            micro_batch_plan.split_count = 1
+
+                        peak_vram_diagnostics.start_step(
+                            global_step + 1,
+                            batch_size=micro_batch_plan.actual_batch_size,
+                            micro_batch_size=micro_batch_plan.micro_batch_size,
+                            split_count=micro_batch_plan.split_count,
+                        )
+                        weighted_loss = 0.0
+                        skip_training_step = False
+                        stop_training_reason = None
+
+                        for micro_batch, sub_batch_size, loss_scale in iter_training_micro_batches(batch, micro_batch_plan):
+                            per_sample_losses = None
+                            batch_result = self.process_batch(
+                                micro_batch,
+                                text_encoders,
+                                dit,
+                                network,
+                                vae,
+                                noise_scheduler,
+                                vae_dtype,
+                                weight_dtype,
+                                accelerator,
+                                args,
+                                text_encoding_strategy,
+                                tokenize_strategy,
+                                train_text_encoder=train_text_encoder,
+                                profiler=anima_step_profiler,
+                                use_non_blocking=use_non_blocking,
+                                run_nan_check=run_nan_check,
+                                return_per_sample_loss=return_per_sample_loss,
+                            )
+                            if return_per_sample_loss:
+                                micro_loss, per_sample_losses = batch_result
                             else:
-                                accelerator.backward(loss)
+                                micro_loss = batch_result
+                            peak_vram_diagnostics.capture("forward")
+
+                            micro_loss_value = float(micro_loss.detach().item())
+                            weighted_loss += micro_loss_value * loss_scale
+                            if safeguard is not None:
+                                safeguard_decision = safeguard.inspect_loss(micro_loss_value, global_step + 1, optimizer)
+                                if safeguard_decision.reason:
+                                    logger.warning(safeguard_decision.reason)
+                                if safeguard_decision.stop_training:
+                                    optimizer.zero_grad(set_to_none=True)
+                                    stop_training_reason = safeguard_decision.reason
+                                    break
+                                if safeguard_decision.skip_step:
+                                    optimizer.zero_grad(set_to_none=True)
+                                    anima_step_profiler.discard_current_step()
+                                    skip_training_step = True
+                                    break
+
+                            scaled_loss = micro_loss * loss_scale
+                            scaled_per_sample_losses = per_sample_losses * loss_scale if per_sample_losses is not None else None
+                            with anima_step_profiler.step_section("backward"):
+                                if lulynx_core is not None:
+                                    lulynx_core.backward(
+                                        loss=scaled_loss,
+                                        accelerator=accelerator,
+                                        optimizer=optimizer,
+                                        network=accelerator.unwrap_model(network),
+                                        per_sample_losses=scaled_per_sample_losses,
+                                    )
+                                else:
+                                    accelerator.backward(scaled_loss)
+                            peak_vram_diagnostics.capture("backward")
+
+                        current_loss = weighted_loss
+                        if stop_training_reason is not None:
+                            raise RuntimeError(stop_training_reason)
+                        if skip_training_step:
+                            continue
 
                         with anima_step_profiler.step_section("optimizer_step"):
                             if accelerator.sync_gradients:
@@ -1337,6 +1393,7 @@ class AnimaNetworkTrainer:
                             optimizer.step()
                             lr_scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
+                        peak_vram_diagnostics.capture("optimizer")
                 finally:
                     anima_step_profiler.end_micro_step()
 
@@ -1349,6 +1406,7 @@ class AnimaNetworkTrainer:
                         )
                     max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
 
+                peak_vram_logs = {}
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
@@ -1388,6 +1446,23 @@ class AnimaNetworkTrainer:
                                     remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
                                     remove_model(remove_ckpt_name)
                     optimizer_train_fn()
+                    if not peak_vram_startup_guard_release_done and global_step >= peak_vram_startup_guard_release_step:
+                        current_blocks = int(getattr(args, "blocks_to_swap", 0) or 0)
+                        target_blocks = int(peak_vram_startup_guard_release_blocks or 0)
+                        if current_blocks != target_blocks:
+                            try:
+                                accelerator.unwrap_model(dit).reconfigure_block_swap(target_blocks, accelerator.device)
+                                args.blocks_to_swap = target_blocks
+                                self.is_swapping_blocks = target_blocks > 0
+                                accelerator.print(
+                                    f"[anima-train] startup peak guard released block swap: "
+                                    f"{current_blocks} -> {target_blocks} at step {global_step}"
+                                )
+                            except Exception as release_exc:
+                                accelerator.print(
+                                    f"[anima-train] warning: startup peak guard release skipped at step {global_step}: {release_exc}"
+                                )
+                        peak_vram_startup_guard_release_done = True
                     if lulynx_core is not None:
                         lulynx_decision = lulynx_core.on_optimizer_step(
                             global_step=global_step,
@@ -1402,6 +1477,9 @@ class AnimaNetworkTrainer:
                         if lulynx_decision.stop_training and lulynx_stop_reason is None:
                             lulynx_stop_reason = lulynx_decision.reason or "Lulynx experimental core requested stop."
                     anima_step_profiler.finalize_optimizer_step(global_step)
+                    peak_vram_logs, peak_vram_message = peak_vram_diagnostics.finish_step()
+                    if peak_vram_message and accelerator.is_main_process:
+                        print(peak_vram_message)
 
                 if safeguard is not None:
                     safeguard.record_loss(current_loss)
@@ -1417,6 +1495,8 @@ class AnimaNetworkTrainer:
                     if mean_norm is not None:
                         step_logs["norm/avg_key_norm"] = mean_norm
                     train_util.append_lr_to_logs_with_names(step_logs, lr_scheduler, args.optimizer_type, lr_descriptions or [])
+                    if peak_vram_logs:
+                        step_logs.update(peak_vram_logs)
                     if lulynx_step_logs:
                         step_logs.update(lulynx_step_logs)
                     accelerator.log(step_logs, step=global_step)
@@ -1510,6 +1590,9 @@ def setup_parser() -> argparse.ArgumentParser:
         help="[Deprecated] use 'skip_cache_check' instead",
     )
     return parser
+
+
+
 
 
 

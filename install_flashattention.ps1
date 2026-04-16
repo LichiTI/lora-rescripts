@@ -419,6 +419,37 @@ function Get-GitHubMirrorCandidates {
     return @($candidates)
 }
 
+function Join-GitHubMirrorUrl {
+    param(
+        [string]$MirrorBase,
+        [string]$GitHubUrl
+    )
+
+    $normalizedMirrorBase = ([string]$MirrorBase).Trim()
+    $normalizedGitHubUrl = ([string]$GitHubUrl).Trim()
+    if ([string]::IsNullOrWhiteSpace($normalizedMirrorBase) -or [string]::IsNullOrWhiteSpace($normalizedGitHubUrl)) {
+        return $normalizedGitHubUrl
+    }
+
+    if (-not $normalizedMirrorBase.EndsWith('/')) {
+        $normalizedMirrorBase += '/'
+    }
+
+    $githubPrefix = 'https://github.com/'
+    if (
+        $normalizedGitHubUrl.StartsWith($githubPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $normalizedMirrorBase.EndsWith($githubPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        return ($normalizedMirrorBase + $normalizedGitHubUrl.Substring($githubPrefix.Length))
+    }
+
+    if ($normalizedGitHubUrl -match '^https?://') {
+        return ($normalizedMirrorBase + $normalizedGitHubUrl)
+    }
+
+    return ($normalizedMirrorBase + $normalizedGitHubUrl.TrimStart('/'))
+}
+
 function Get-FlashAttentionWheelUrlCandidates {
     param(
         [string]$WheelUrl
@@ -439,14 +470,14 @@ function Get-FlashAttentionWheelUrlCandidates {
         $mirrorBases = Get-GitHubMirrorCandidates
         if (Test-MikazukiChinaMirrorMode) {
             foreach ($mirrorBase in $mirrorBases) {
-                $candidates += ($mirrorBase + $WheelUrl)
+                $candidates += (Join-GitHubMirrorUrl -MirrorBase $mirrorBase -GitHubUrl $WheelUrl)
             }
             $candidates += $WheelUrl
         }
         else {
             $candidates += $WheelUrl
             foreach ($mirrorBase in $mirrorBases) {
-                $candidates += ($mirrorBase + $WheelUrl)
+                $candidates += (Join-GitHubMirrorUrl -MirrorBase $mirrorBase -GitHubUrl $WheelUrl)
             }
         }
     }

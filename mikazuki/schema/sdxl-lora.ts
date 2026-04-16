@@ -44,6 +44,8 @@ Schema.intersect([
         network_train_text_encoder_only: Schema.boolean().default(false).description("仅训练文本编码器"),
     }).description("训练相关参数"),
 
+    SHARED_SCHEMAS.PEAK_VRAM_CONTROL,
+
     Schema.intersect([
         Schema.object({
             sdxl_low_vram_optimization: Schema.boolean().default(false).description("低显存优化（≤6GB）。开启后会按低显存预设自动调整缓存、预览和训练目标"),
@@ -127,7 +129,7 @@ Schema.intersect([
         SHARED_SCHEMAS.NETWORK_OPTION_BASEWEIGHT,
     ]),
 
-    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_SDXL.description("Lulynx 实验核心"),
+    SHARED_SCHEMAS.LULYNX_EXPERIMENTAL_CORE_SDXL,
     SHARED_SCHEMAS.PREVIEW_IMAGE,
     SHARED_SCHEMAS.LOG_SETTINGS,
     SHARED_SCHEMAS.VALIDATION_SETTINGS,

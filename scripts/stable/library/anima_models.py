@@ -1282,6 +1282,42 @@ class Anima(nn.Module):
         self.offloader = custom_offloading_utils.ModelOffloader(self.blocks, self.blocks_to_swap, device)
         logger.info(f"Anima: Block swap enabled. Swapping {num_blocks} blocks, total blocks: {self.num_blocks}, device: {device}.")
 
+    def disable_block_swap(self, device: Optional[torch.device] = None):
+        if self.blocks_to_swap is None or self.blocks_to_swap == 0:
+            return
+
+        target_device = device or getattr(self.offloader, "device", None) or next(self.parameters()).device
+        if not isinstance(target_device, torch.device):
+            target_device = torch.device(target_device)
+
+        if getattr(self, "offloader", None) is not None:
+            for block_idx in list(getattr(self.offloader, "futures", {}).keys()):
+                self.offloader.wait_for_block(block_idx)
+            for handle in list(getattr(self.offloader, "remove_handles", []) or []):
+                handle.remove()
+            self.offloader.remove_handles = []
+            if getattr(self.offloader, "thread_pool", None) is not None:
+                self.offloader.thread_pool.shutdown(wait=True, cancel_futures=False)
+            self.offloader = None
+
+        for block in self.blocks:
+            block.to(target_device)
+            custom_offloading_utils.weighs_to_device(block, target_device)
+
+        self.blocks_to_swap = 0
+        if target_device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info(f"Anima: Block swap disabled. device: {target_device}.")
+
+    def reconfigure_block_swap(self, num_blocks: int, device: torch.device):
+        requested_blocks = max(0, int(num_blocks or 0))
+        current_blocks = int(self.blocks_to_swap or 0)
+        if requested_blocks == current_blocks:
+            return
+        self.disable_block_swap(device)
+        if requested_blocks > 0:
+            self.enable_block_swap(requested_blocks, device)
+
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # Move all modules to device except blocks (which are managed by offloader)
         if self.blocks_to_swap:
@@ -1814,3 +1850,4 @@ class LLMAdapter(nn.Module):
 #     dit_config["rope_enable_fps_modulation"] = False
 
 #     return dit_config
+
