@@ -43,6 +43,8 @@ Schema.intersect([
         max_grad_norm: Schema.number().min(0).step(0.01).default(1.0).description("梯度裁剪"),
     }).description("优化器与学习率"),
 
+    SHARED_SCHEMAS.PEAK_VRAM_CONTROL,
+
     Schema.object({
         adapter_type: Schema.union(["lora", "lokr"]).default("lora").description("适配器类型"),
         network_dim: Schema.number().min(1).default(32).description("LoRA / LoKr rank"),

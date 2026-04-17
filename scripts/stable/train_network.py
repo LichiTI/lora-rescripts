@@ -32,7 +32,14 @@ from library import deepspeed_utils, model_util, sai_model_spec, strategy_base, 
 
 import library.train_util as train_util
 from library.train_util import DreamBoothDataset
-from lulynx.experimental_core import add_lulynx_experimental_arguments, create_lulynx_core, normalize_lulynx_args
+from lulynx.experimental_core import (
+    PeakVramDiagnosticsRecorder,
+    add_lulynx_experimental_arguments,
+    build_peak_vram_micro_batch_plan,
+    create_lulynx_core,
+    iter_training_micro_batches,
+    normalize_lulynx_args,
+)
 import library.config_util as config_util
 from library.config_util import (
     ConfigSanitizer,
@@ -1721,6 +1728,11 @@ class NetworkTrainer:
             desc="steps",
         )
         lulynx_stop_reason = None
+        peak_vram_diagnostics = PeakVramDiagnosticsRecorder(
+            args,
+            getattr(args, "lulynx_route_label", "Network training"),
+            accelerator.device,
+        )
 
         validation_steps = (
             min(args.max_validation_steps, len(val_dataloader)) if args.max_validation_steps is not None else len(val_dataloader)
@@ -1790,72 +1802,113 @@ class NetworkTrainer:
                         on_step_start_for_network(text_encoder, unet)
 
                         # preprocess batch for each model
-                        self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
-
-                        with attention_step_profiler.section("forward"):
-                            return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
-                            per_sample_losses = None
-                            batch_result = self.process_batch(
-                                batch,
-                                text_encoders,
-                                unet,
-                                network,
-                                vae,
-                                noise_scheduler,
-                                vae_dtype,
-                                weight_dtype,
-                                accelerator,
-                                args,
-                                text_encoding_strategy,
-                                tokenize_strategy,
-                                is_train=True,
-                                train_text_encoder=train_text_encoder,
-                                train_unet=train_unet,
-                                return_per_sample_loss=return_per_sample_loss,
-                            )
-                            if return_per_sample_loss:
-                                loss, per_sample_losses = batch_result
-                            else:
-                                loss = batch_result
-
-                        current_loss = loss.detach().item()
-                        if safeguard is not None:
-                            safeguard_decision = safeguard.inspect_loss(current_loss, global_step + 1, optimizer)
-                            if safeguard_decision.reason:
-                                logger.warning(safeguard_decision.reason)
-                            if safeguard_decision.stop_training:
-                                raise RuntimeError(safeguard_decision.reason)
-                            if safeguard_decision.skip_step:
-                                optimizer.zero_grad(set_to_none=True)
-                                attention_step_profiler.discard_current_step()
-                                continue
-
-                        with attention_step_profiler.section("backward"):
-                            if lulynx_core is not None:
-                                lulynx_core.backward(
-                                    loss=loss,
-                                    accelerator=accelerator,
-                                    optimizer=optimizer,
-                                    network=accelerator.unwrap_model(network),
-                                    per_sample_losses=per_sample_losses,
+                        return_per_sample_loss = lulynx_core is not None and lulynx_core.requires_per_sample_losses()
+                        micro_batch_plan = build_peak_vram_micro_batch_plan(args, batch)
+                        if return_per_sample_loss and micro_batch_plan.requires_split:
+                            if not getattr(args, "_peak_vram_pcgrad_micro_batch_warned", False):
+                                logger.warning(
+                                    "Peak VRAM micro-batch splitting is currently not combined with Lulynx PCGrad on this route. "
+                                    "Falling back to full-batch backward for the current step."
                                 )
-                            else:
-                                accelerator.backward(loss)
-                            if accelerator.sync_gradients:
-                                self.all_reduce_network(accelerator, network)  # sync DDP grad manually
-                                if args.max_grad_norm != 0.0:
-                                    params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                                args._peak_vram_pcgrad_micro_batch_warned = True
+                            micro_batch_plan.enabled = False
+                            micro_batch_plan.micro_batch_size = micro_batch_plan.actual_batch_size
+                            micro_batch_plan.split_count = 1
 
-                                if hasattr(network, "update_grad_norms"):
-                                    network.update_grad_norms()
-                                if hasattr(network, "update_norms"):
-                                    network.update_norms()
+                        peak_vram_diagnostics.start_step(
+                            global_step + 1,
+                            batch_size=micro_batch_plan.actual_batch_size,
+                            micro_batch_size=micro_batch_plan.micro_batch_size,
+                            split_count=micro_batch_plan.split_count,
+                        )
+                        weighted_loss = 0.0
+                        skip_training_step = False
+                        stop_training_reason = None
+
+                        for micro_batch, sub_batch_size, loss_scale in iter_training_micro_batches(batch, micro_batch_plan):
+                            setattr(args, "_peak_vram_runtime_global_step", global_step)
+                            self.on_step_start(args, accelerator, network, text_encoders, unet, micro_batch, weight_dtype, is_train=True)
+
+                            with attention_step_profiler.section("forward"):
+                                per_sample_losses = None
+                                batch_result = self.process_batch(
+                                    micro_batch,
+                                    text_encoders,
+                                    unet,
+                                    network,
+                                    vae,
+                                    noise_scheduler,
+                                    vae_dtype,
+                                    weight_dtype,
+                                    accelerator,
+                                    args,
+                                    text_encoding_strategy,
+                                    tokenize_strategy,
+                                    is_train=True,
+                                    train_text_encoder=train_text_encoder,
+                                    train_unet=train_unet,
+                                    return_per_sample_loss=return_per_sample_loss,
+                                )
+                                if return_per_sample_loss:
+                                    micro_loss, per_sample_losses = batch_result
+                                else:
+                                    micro_loss = batch_result
+                            peak_vram_diagnostics.capture("forward")
+
+                            micro_loss_value = float(micro_loss.detach().item())
+                            weighted_loss += micro_loss_value * loss_scale
+
+                            if safeguard is not None:
+                                safeguard_decision = safeguard.inspect_loss(micro_loss_value, global_step + 1, optimizer)
+                                if safeguard_decision.reason:
+                                    logger.warning(safeguard_decision.reason)
+                                if safeguard_decision.stop_training:
+                                    optimizer.zero_grad(set_to_none=True)
+                                    stop_training_reason = safeguard_decision.reason
+                                    break
+                                if safeguard_decision.skip_step:
+                                    optimizer.zero_grad(set_to_none=True)
+                                    attention_step_profiler.discard_current_step()
+                                    skip_training_step = True
+                                    break
+
+                            scaled_loss = micro_loss * loss_scale
+                            scaled_per_sample_losses = per_sample_losses * loss_scale if per_sample_losses is not None else None
+                            with attention_step_profiler.section("backward"):
+                                if lulynx_core is not None:
+                                    lulynx_core.backward(
+                                        loss=scaled_loss,
+                                        accelerator=accelerator,
+                                        optimizer=optimizer,
+                                        network=accelerator.unwrap_model(network),
+                                        per_sample_losses=scaled_per_sample_losses,
+                                    )
+                                else:
+                                    accelerator.backward(scaled_loss)
+                            peak_vram_diagnostics.capture("backward")
+
+                        current_loss = weighted_loss
+                        if stop_training_reason is not None:
+                            raise RuntimeError(stop_training_reason)
+                        if skip_training_step:
+                            continue
+
+                        if accelerator.sync_gradients:
+                            self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                            if args.max_grad_norm != 0.0:
+                                params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                                accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                            if hasattr(network, "update_grad_norms"):
+                                network.update_grad_norms()
+                            if hasattr(network, "update_norms"):
+                                network.update_norms()
 
                         with attention_step_profiler.section("optimizer"):
                             optimizer.step()
                             lr_scheduler.step()
                             optimizer.zero_grad(set_to_none=True)
+                        peak_vram_diagnostics.capture("optimizer")
                 finally:
                     attention_step_profiler.end_micro_step()
 
@@ -1883,6 +1936,7 @@ class NetworkTrainer:
                         mean_combined_norm = None
                         max_mean_logs = {}
 
+                peak_vram_logs = {}
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
@@ -1918,6 +1972,9 @@ class NetworkTrainer:
                                     remove_model(remove_ckpt_name)
                     optimizer_train_fn()
                     attention_step_profiler.finalize_optimizer_step(global_step)
+                    peak_vram_logs, peak_vram_message = peak_vram_diagnostics.finish_step()
+                    if peak_vram_message and accelerator.is_main_process:
+                        print(peak_vram_message)
 
                     if lulynx_core is not None:
                         lulynx_decision = lulynx_core.on_optimizer_step(
@@ -1954,6 +2011,8 @@ class NetworkTrainer:
                         mean_grad_norm,
                         mean_combined_norm,
                     )
+                    if peak_vram_logs:
+                        logs.update(peak_vram_logs)
                     if lulynx_step_logs:
                         logs.update(lulynx_step_logs)
                     self.step_logging(accelerator, logs, global_step, effective_epoch_no)
@@ -2362,3 +2421,5 @@ if __name__ == "__main__":
 
     trainer = NetworkTrainer()
     trainer.train(args)
+
+

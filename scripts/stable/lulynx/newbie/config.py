@@ -59,6 +59,15 @@ def _parse_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _parse_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "none", "null"}:
+        return None
+    return _parse_bool(value, False)
+
+
 def _parse_int(value: Any, default: int, minimum: int | None = None) -> int:
     try:
         parsed = int(round(float(value)))
@@ -146,6 +155,150 @@ def _resolve_component_path(
     return None
 
 
+def _value_is_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
+
+
+def _resolve_peak_vram_startup_guard_mode(
+    *,
+    requested_mode: str,
+    resolution_edge: int,
+    train_batch_size: int,
+    effective_batch_size: int,
+    target_effective_batch: int,
+) -> str:
+    normalized_mode = str(requested_mode or "auto").strip().lower()
+    if normalized_mode not in {"auto", "balanced", "aggressive"}:
+        normalized_mode = "auto"
+    if normalized_mode != "auto":
+        return normalized_mode
+
+    score = 0
+    if resolution_edge >= 1536:
+        score += 2
+    elif resolution_edge >= 1280:
+        score += 1
+    if train_batch_size >= 2:
+        score += 2
+    if target_effective_batch >= max(4, effective_batch_size * 2):
+        score += 1
+    return "aggressive" if score >= 3 else "balanced"
+
+
+def _apply_peak_vram_control_to_newbie_config(
+    config: "NewbieRuntimeConfig",
+    raw: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    explicit_peak_vram_control_enabled = _parse_optional_bool(
+        _lookup_config_value(raw, "peak_vram_control_enabled", default=None)
+    )
+    raw_target_effective_batch = _lookup_config_value(raw, "peak_vram_target_effective_batch", default=None)
+    raw_startup_guard_enabled = _lookup_config_value(raw, "peak_vram_startup_guard_enabled", default=None)
+    raw_startup_guard_mode = _lookup_config_value(raw, "peak_vram_startup_guard_mode", default=None)
+    raw_startup_guard_steps = _lookup_config_value(raw, "peak_vram_startup_guard_steps", default=None)
+    raw_micro_batch_enabled = _lookup_config_value(raw, "peak_vram_micro_batch_enabled", default=None)
+    raw_micro_batch_size = _lookup_config_value(raw, "peak_vram_micro_batch_size", default=None)
+    raw_diagnostics_enabled = _lookup_config_value(raw, "peak_vram_diagnostics_enabled", default=None)
+    raw_diagnostics_interval = _lookup_config_value(raw, "peak_vram_diagnostics_interval", default=None)
+
+    explicit_peak_vram_child_requests = {
+        "target_effective_batch": _value_is_present(raw_target_effective_batch)
+        and _parse_int(raw_target_effective_batch, 0, minimum=0) > 0,
+        "startup_guard": (
+            _parse_bool(raw_startup_guard_enabled, False)
+            or _value_is_present(raw_startup_guard_mode)
+            or _value_is_present(raw_startup_guard_steps)
+        ),
+        "micro_batch": _parse_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size),
+        "diagnostics": _parse_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval),
+    }
+    if explicit_peak_vram_control_enabled is False and any(explicit_peak_vram_child_requests.values()):
+        warnings.append("显存峰值控制已显式关闭，已忽略其子项设置。")
+        raw_target_effective_batch = None
+        raw_startup_guard_enabled = None
+        raw_startup_guard_mode = None
+        raw_startup_guard_steps = None
+        raw_micro_batch_enabled = None
+        raw_micro_batch_size = None
+        raw_diagnostics_enabled = None
+        raw_diagnostics_interval = None
+
+    has_target_request = _value_is_present(raw_target_effective_batch) and _parse_int(raw_target_effective_batch, 0, minimum=0) > 0
+    has_guard_request = (
+        _parse_bool(raw_startup_guard_enabled, False)
+        or _value_is_present(raw_startup_guard_mode)
+        or _value_is_present(raw_startup_guard_steps)
+    )
+    if explicit_peak_vram_control_enabled is True:
+        config.peak_vram_control_enabled = True
+    elif explicit_peak_vram_control_enabled is False:
+        config.peak_vram_control_enabled = False
+    else:
+        config.peak_vram_control_enabled = has_target_request or has_guard_request
+
+    has_micro_batch_request = _parse_bool(raw_micro_batch_enabled, False) or _value_is_present(raw_micro_batch_size)
+    has_diagnostics_request = _parse_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
+    if explicit_peak_vram_control_enabled is None:
+        config.peak_vram_control_enabled = bool(
+            config.peak_vram_control_enabled or has_micro_batch_request or has_diagnostics_request
+        )
+    config.peak_vram_micro_batch_enabled = config.peak_vram_control_enabled and (
+        _parse_bool(raw_micro_batch_enabled, False)
+        or (_value_is_present(raw_micro_batch_size) and _parse_int(raw_micro_batch_size, 0, minimum=0) > 0)
+    )
+    config.peak_vram_micro_batch_size = _parse_int(raw_micro_batch_size, config.train_batch_size, minimum=1)
+    config.peak_vram_diagnostics_enabled = config.peak_vram_control_enabled and (
+        _parse_bool(raw_diagnostics_enabled, False) or _value_is_present(raw_diagnostics_interval)
+    )
+    config.peak_vram_diagnostics_interval = _parse_int(raw_diagnostics_interval, 25, minimum=1)
+
+    config.peak_vram_target_effective_batch = _parse_int(raw_target_effective_batch, 0, minimum=0)
+    if config.peak_vram_target_effective_batch > 0:
+        config.gradient_accumulation_steps = max(
+            1,
+            (config.peak_vram_target_effective_batch + config.train_batch_size - 1) // config.train_batch_size,
+        )
+    config.peak_vram_effective_batch_realized = config.train_batch_size * config.gradient_accumulation_steps
+
+    config.peak_vram_startup_guard_enabled = config.peak_vram_control_enabled and _parse_bool(raw_startup_guard_enabled, False)
+    config.peak_vram_startup_guard_mode = str(raw_startup_guard_mode or "auto").strip().lower() or "auto"
+    if config.peak_vram_startup_guard_mode not in {"auto", "balanced", "aggressive"}:
+        config.peak_vram_startup_guard_mode = "auto"
+    config.peak_vram_startup_guard_steps = _parse_int(
+        raw_startup_guard_steps,
+        24 if config.peak_vram_startup_guard_enabled else 0,
+        minimum=0,
+    )
+    config.peak_vram_startup_guard_resolved_mode = config.peak_vram_startup_guard_mode
+    config.peak_vram_startup_guard_release_blocks = config.blocks_to_swap
+
+    if not config.peak_vram_startup_guard_enabled:
+        return
+
+    config.peak_vram_startup_guard_resolved_mode = _resolve_peak_vram_startup_guard_mode(
+        requested_mode=config.peak_vram_startup_guard_mode,
+        resolution_edge=config.model_resolution,
+        train_batch_size=config.train_batch_size,
+        effective_batch_size=config.effective_batch_size,
+        target_effective_batch=config.peak_vram_target_effective_batch,
+    )
+
+    baseline_blocks = config.blocks_to_swap
+    if config.cpu_offload_checkpointing:
+        warnings.append("Newbie 启动峰值保护未应用：当前 cpu_offload_checkpointing 与 blocks_to_swap 不能并用。")
+        return
+
+    desired_blocks = 4 if config.peak_vram_startup_guard_resolved_mode == "balanced" else 6
+    config.blocks_to_swap = max(baseline_blocks, desired_blocks)
+    config.peak_vram_startup_guard_release_blocks = baseline_blocks
+
+
+
 @dataclass(slots=True)
 class NewbieRuntimeConfig:
     config_path: Path
@@ -214,6 +367,18 @@ class NewbieRuntimeConfig:
     newbie_safe_fallback: bool
     enable_preview: bool
     lulynx_experimental_core_enabled: bool
+    peak_vram_control_enabled: bool = False
+    peak_vram_target_effective_batch: int = 0
+    peak_vram_effective_batch_realized: int = 0
+    peak_vram_startup_guard_enabled: bool = False
+    peak_vram_startup_guard_mode: str = "auto"
+    peak_vram_startup_guard_steps: int = 0
+    peak_vram_startup_guard_resolved_mode: str = "auto"
+    peak_vram_startup_guard_release_blocks: int = 0
+    peak_vram_micro_batch_enabled: bool = False
+    peak_vram_micro_batch_size: int = 1
+    peak_vram_diagnostics_enabled: bool = False
+    peak_vram_diagnostics_interval: int = 25
 
     @property
     def model_resolution(self) -> int:
@@ -224,7 +389,7 @@ class NewbieRuntimeConfig:
         return self.train_batch_size * self.gradient_accumulation_steps
 
     def describe(self) -> list[str]:
-        return [
+        lines = [
             f"model_type={self.model_train_type}",
             f"base_model={self.pretrained_model_name_or_path}",
             f"train_data_dir={self.train_data_dir}",
@@ -235,35 +400,57 @@ class NewbieRuntimeConfig:
                 f"{self.train_batch_size} x grad_accum {self.gradient_accumulation_steps}"
                 f" (effective={self.effective_batch_size})"
             ),
-            (
-                "cache="
-                f"{'on' if self.use_cache else 'off'}, "
-                f"force_cache_only={'on' if self.newbie_force_cache_only else 'off'}, "
-                f"two_phase={'on' if self.newbie_two_phase_execution else 'off'}"
-            ),
-            (
-                "caption_bucketing="
-                f"{'off' if self.newbie_caption_length_bucket_size <= 0 else self.newbie_caption_length_bucket_size}, "
-                f"gemma_max={self.newbie_gemma_max_token_length}, "
-                f"clip_max={self.newbie_clip_max_token_length}"
-            ),
-            f"dataloader_workers={self.dataloader_num_workers}",
-            (
-                "save="
-                f"every_epochs={self.save_every_n_epochs}, "
-                f"every_steps={self.save_every_n_steps}"
-            ),
-            (
-                "optimizer="
-                f"{self.optimizer_type}, scheduler={self.lr_scheduler}, warmup={self.lr_warmup_steps}, "
-                f"max_grad_norm={self.max_grad_norm}"
-            ),
-            (
-                "adapter="
-                f"{self.adapter_type}, rank={self.network_dim}, alpha={self.network_alpha}, "
-                f"dropout={self.network_dropout}"
-            ),
         ]
+        if self.peak_vram_control_enabled:
+            guard_label = "off"
+            if self.peak_vram_startup_guard_enabled:
+                guard_duration = (
+                    "all_train"
+                    if self.peak_vram_startup_guard_steps <= 0
+                    else f"{self.peak_vram_startup_guard_steps}_steps"
+                )
+                guard_label = f"{self.peak_vram_startup_guard_resolved_mode}/{guard_duration}"
+            lines.append(
+                "peak_vram="
+                f"target_effective={self.peak_vram_target_effective_batch or 'off'} "
+                f"(realized={self.peak_vram_effective_batch_realized or self.effective_batch_size}), "
+                f"startup_guard={guard_label}, "
+                f"micro_batch={(self.peak_vram_micro_batch_size if self.peak_vram_micro_batch_enabled else 'off')}, "
+                f"diagnostics={('every_' + str(self.peak_vram_diagnostics_interval) + '_steps') if self.peak_vram_diagnostics_enabled else 'off'}"
+            )
+        lines.extend(
+            [
+                (
+                    "cache="
+                    f"{'on' if self.use_cache else 'off'}, "
+                    f"force_cache_only={'on' if self.newbie_force_cache_only else 'off'}, "
+                    f"two_phase={'on' if self.newbie_two_phase_execution else 'off'}"
+                ),
+                (
+                    "caption_bucketing="
+                    f"{'off' if self.newbie_caption_length_bucket_size <= 0 else self.newbie_caption_length_bucket_size}, "
+                    f"gemma_max={self.newbie_gemma_max_token_length}, "
+                    f"clip_max={self.newbie_clip_max_token_length}"
+                ),
+                f"dataloader_workers={self.dataloader_num_workers}",
+                (
+                    "save="
+                    f"every_epochs={self.save_every_n_epochs}, "
+                    f"every_steps={self.save_every_n_steps}"
+                ),
+                (
+                    "optimizer="
+                    f"{self.optimizer_type}, scheduler={self.lr_scheduler}, warmup={self.lr_warmup_steps}, "
+                    f"max_grad_norm={self.max_grad_norm}"
+                ),
+                (
+                    "adapter="
+                    f"{self.adapter_type}, rank={self.network_dim}, alpha={self.network_alpha}, "
+                    f"dropout={self.network_dropout}"
+                ),
+            ]
+        )
+        return lines
 
 
 def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeConfig, list[str]]:
@@ -518,5 +705,6 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
             False,
         ),
     )
+    _apply_peak_vram_control_to_newbie_config(config, raw, warnings)
 
     return config, warnings

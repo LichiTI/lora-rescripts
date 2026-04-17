@@ -61,6 +61,94 @@ function Invoke-Step {
     }
 }
 
+function Get-GitHubMirrorCandidates {
+    $candidates = @()
+
+    $customMirror = ([string]$Env:MIKAZUKI_GITHUB_MIRROR_BASE).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($customMirror)) {
+        if (-not $customMirror.EndsWith('/')) {
+            $customMirror += '/'
+        }
+        $candidates += $customMirror
+    }
+
+    $defaultMirror = 'https://hub.gitmirror.com/https://github.com/'
+    if (-not ($candidates -contains $defaultMirror)) {
+        $candidates += $defaultMirror
+    }
+
+    return @($candidates)
+}
+
+function Join-GitHubMirrorUrl {
+    param(
+        [string]$MirrorBase,
+        [string]$GitHubUrl
+    )
+
+    $normalizedMirrorBase = ([string]$MirrorBase).Trim()
+    $normalizedGitHubUrl = ([string]$GitHubUrl).Trim()
+    if ([string]::IsNullOrWhiteSpace($normalizedMirrorBase) -or [string]::IsNullOrWhiteSpace($normalizedGitHubUrl)) {
+        return $normalizedGitHubUrl
+    }
+
+    if (-not $normalizedMirrorBase.EndsWith('/')) {
+        $normalizedMirrorBase += '/'
+    }
+
+    $githubPrefix = 'https://github.com/'
+    if (
+        $normalizedGitHubUrl.StartsWith($githubPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $normalizedMirrorBase.EndsWith($githubPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        return ($normalizedMirrorBase + $normalizedGitHubUrl.Substring($githubPrefix.Length))
+    }
+
+    if ($normalizedGitHubUrl -match '^https?://') {
+        return ($normalizedMirrorBase + $normalizedGitHubUrl)
+    }
+
+    return ($normalizedMirrorBase + $normalizedGitHubUrl.TrimStart('/'))
+}
+
+function Get-SageAttentionPackageUrlCandidates {
+    param(
+        [string]$PackageUrl
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PackageUrl)) {
+        return @()
+    }
+
+    if (-not ($PackageUrl -match '^https?://')) {
+        return @($PackageUrl)
+    }
+
+    $candidates = @()
+    $isGitHubReleaseUrl = $PackageUrl.StartsWith('https://github.com/', [System.StringComparison]::OrdinalIgnoreCase)
+
+    if ($isGitHubReleaseUrl) {
+        $mirrorBases = Get-GitHubMirrorCandidates
+        if (Test-MikazukiChinaMirrorMode) {
+            foreach ($mirrorBase in $mirrorBases) {
+                $candidates += (Join-GitHubMirrorUrl -MirrorBase $mirrorBase -GitHubUrl $PackageUrl)
+            }
+            $candidates += $PackageUrl
+        }
+        else {
+            $candidates += $PackageUrl
+            foreach ($mirrorBase in $mirrorBases) {
+                $candidates += (Join-GitHubMirrorUrl -MirrorBase $mirrorBase -GitHubUrl $PackageUrl)
+            }
+        }
+    }
+    else {
+        $candidates += $PackageUrl
+    }
+
+    return @($candidates | Select-Object -Unique)
+}
+
 function Invoke-NativeQuiet {
     param (
         [string]$FilePath,
@@ -571,12 +659,38 @@ function Resolve-SageAttentionPackage {
 
         $fileName = [System.Uri]::UnescapeDataString($fileName)
         $downloadPath = Join-Path $downloadDir $fileName
-        Write-Host -ForegroundColor Yellow "Downloading SageAttention package..."
-        Invoke-WebRequest -Uri $RequestedPackage -OutFile $downloadPath
-        return [pscustomobject]@{
-            Kind = "file"
-            Value = $downloadPath
+        foreach ($candidateUrl in (Get-SageAttentionPackageUrlCandidates -PackageUrl $RequestedPackage)) {
+            Write-Host -ForegroundColor Yellow "Trying SageAttention package download: $candidateUrl"
+            $previousProgressPreference = $global:ProgressPreference
+            try {
+                $global:ProgressPreference = 'SilentlyContinue'
+                Invoke-WebRequest -Uri $candidateUrl -OutFile $downloadPath -TimeoutSec 120 -UseBasicParsing
+                if ((Test-Path $downloadPath) -and ((Get-Item -LiteralPath $downloadPath).Length -gt 0)) {
+                    return [pscustomobject]@{
+                        Kind = "file"
+                        Value = $downloadPath
+                    }
+                }
+            }
+            catch {
+                Write-Host -ForegroundColor Yellow ("SageAttention package download attempt failed: {0}" -f $_.Exception.Message)
+            }
+            finally {
+                $global:ProgressPreference = $previousProgressPreference
+            }
+
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
         }
+
+        throw @"
+Failed to download the SageAttention package from all candidate URLs.
+
+You can also download the wheel manually and place it in one of these locations:
+- $repoRoot
+- $(Join-Path $repoRoot "sageattention-wheels")
+- $(Join-Path $repoRoot "sageattention_wheels")
+- $(Join-Path $repoRoot "wheels")
+"@
     }
 
     return [pscustomobject]@{

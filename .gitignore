@@ -31,13 +31,8 @@ tests/
 huggingface/hub/models*
 huggingface/hub/version_diffusers_cache.txt
 /backup
-<<<<<<< Updated upstream
-/models
-/sucai
-=======
 /sucai
 /models
->>>>>>> Stashed changes
 *.zip
 /BooruDatasetTagManager
 /ui
@@ -49,3 +44,4 @@ A启动新前端UI.bat
 tmp/backend_status.json
 /python
 ui.rar
+/flashattention-wheels

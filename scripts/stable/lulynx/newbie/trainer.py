@@ -54,6 +54,31 @@ class NewbieTrainer:
             warnings.append("当前配置关闭了 cache，这会显著提高正式训练阶段的显存峰值。")
         if self.config.enable_preview:
             warnings.append("当前配置启用了训练中预览；Newbie 新分支第一阶段建议保持关闭。")
+        if self.config.peak_vram_control_enabled:
+            notes.append(
+                "已启用显存峰值控制："
+                f"target_effective={self.config.peak_vram_target_effective_batch or 'off'}，"
+                f"realized={self.config.peak_vram_effective_batch_realized or self.config.effective_batch_size}。"
+            )
+            if self.config.peak_vram_micro_batch_enabled:
+                notes.append(
+                    f"已启用 micro-batch 拆分：train_batch_size={self.config.train_batch_size}，"
+                    f"micro_batch_size={self.config.peak_vram_micro_batch_size}。"
+                )
+            if self.config.peak_vram_diagnostics_enabled:
+                notes.append(
+                    f"已启用显存阶段诊断：每 {self.config.peak_vram_diagnostics_interval} 个优化 step 输出一次。"
+                )
+            if self.config.peak_vram_startup_guard_enabled:
+                guard_duration = (
+                    "整段训练"
+                    if self.config.peak_vram_startup_guard_steps <= 0
+                    else f"前 {self.config.peak_vram_startup_guard_steps} 个优化 step"
+                )
+                notes.append(
+                    f"已启用启动峰值保护：{guard_duration} 使用 {self.config.peak_vram_startup_guard_resolved_mode} 档。"
+                )
+
         if self.config.blocks_to_swap > 0:
             notes.append(f"blocks_to_swap={self.config.blocks_to_swap}，后续正式训练实现会优先按安全模式接入该省显存策略。")
             if self.config.newbie_auto_swap_release:
@@ -183,3 +208,4 @@ class NewbieTrainer:
                 lines.append(f"  - {note}")
 
         return lines
+

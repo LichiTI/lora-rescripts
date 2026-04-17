@@ -55,6 +55,7 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         self.vae_scale_factor = sdxl_model_util.VAE_SCALE_FACTOR
         self.is_sdxl = True
         self._preview_oom_downgrade_count = 0
+        self._peak_vram_startup_guard_released = False
 
     def configure_dataset_runtime_policy(self, args):
         mode = None
@@ -113,6 +114,60 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
             scopes.append("output")
         return "/".join(scopes) if scopes else "none"
 
+    def _maybe_release_peak_vram_startup_guard(self, args, accelerator, unet) -> None:
+        if self._peak_vram_startup_guard_released:
+            return
+        if not parse_boolish(getattr(args, "peak_vram_startup_guard_enabled", False)):
+            return
+
+        release_config = getattr(args, "_peak_vram_startup_guard_release_config", None)
+        release_step = int(getattr(args, "peak_vram_startup_guard_steps", 0) or 0)
+        current_step = int(getattr(args, "_peak_vram_runtime_global_step", 0) or 0)
+        if not isinstance(release_config, dict) or release_step <= 0 or current_step < release_step:
+            return
+
+        target_unet = accelerator.unwrap_model(unet)
+        release_enabled = bool(
+            release_config.get("enabled")
+            and (
+                release_config.get("swap_input_blocks")
+                or release_config.get("swap_middle_block")
+                or release_config.get("swap_output_blocks")
+            )
+        )
+        try:
+            if release_enabled:
+                target_unet.enable_fixed_block_swap(
+                    accelerator.device,
+                    swap_input_blocks=bool(release_config.get("swap_input_blocks")),
+                    swap_middle_block=bool(release_config.get("swap_middle_block")),
+                    swap_output_blocks=bool(release_config.get("swap_output_blocks")),
+                    offload_after_backward=bool(release_config.get("offload_after_backward", True)),
+                    vram_threshold_ratio=float(release_config.get("vram_threshold_ratio", 0.0)),
+                )
+            elif hasattr(target_unet, "disable_fixed_block_swap"):
+                target_unet.disable_fixed_block_swap()
+
+            args.sdxl_fixed_block_swap = release_enabled
+            args.sdxl_fixed_block_swap_input_blocks = bool(release_config.get("swap_input_blocks"))
+            args.sdxl_fixed_block_swap_middle_block = bool(release_config.get("swap_middle_block"))
+            args.sdxl_fixed_block_swap_output_blocks = bool(release_config.get("swap_output_blocks"))
+            args.sdxl_fixed_block_swap_offload_after_backward = bool(release_config.get("offload_after_backward", True))
+            args.sdxl_fixed_block_swap_vram_threshold_ratio = float(release_config.get("vram_threshold_ratio", 0.0))
+            clean_memory_on_device(accelerator.device)
+            accelerator.print(
+                "SDXL startup peak guard released. "
+                f"step={current_step} | scope={self._format_fixed_block_swap_scope(release_config)} "
+                "/ 已按启动峰值保护设置回退到常规 fixed block swap 配置。"
+            )
+        except Exception as exc:
+            accelerator.print(
+                "WARNING: SDXL startup peak guard release was skipped. "
+                f"step={current_step} | reason={exc} "
+                "/ SDXL 启动峰值保护回退失败，本次将继续沿用当前保护配置。"
+            )
+        self._peak_vram_startup_guard_released = True
+
     def configure_model_runtime(self, args, accelerator, network, text_encoders, unet):
         config = self._get_fixed_block_swap_config(args)
         if not self.should_use_fixed_block_swap(args):
@@ -154,8 +209,11 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
         )
 
     def on_step_start(self, args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train: bool = True):
+        if not is_train:
+            return
+        self._maybe_release_peak_vram_startup_guard(args, accelerator, unet)
         config = self._get_fixed_block_swap_config(args)
-        if not is_train or not self.should_use_fixed_block_swap(args):
+        if not self.should_use_fixed_block_swap(args):
             return
         target_unet = accelerator.unwrap_model(unet)
         if hasattr(target_unet, "enable_fixed_block_swap"):
@@ -556,4 +614,5 @@ if __name__ == "__main__":
 
     trainer = SdxlNetworkTrainer()
     trainer.train(args)
+
 
