@@ -12,9 +12,11 @@ class NewbieConfigError(ValueError):
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-DEFAULT_GEMMA_MAX_TOKEN_LENGTH = 256
-DEFAULT_CLIP_MAX_TOKEN_LENGTH = 256
-DEFAULT_CAPTION_BUCKET_SIZE = 32
+DEFAULT_GEMMA_MAX_TOKEN_LENGTH = 512
+DEFAULT_CLIP_MAX_TOKEN_LENGTH = 2048
+DEFAULT_CAPTION_BUCKET_SIZE = 0
+DEFAULT_DATALOADER_WORKERS = 4
+DEFAULT_GEMMA3_PROMPT = "You are an assistant designed to generate high-quality anime images with the highest degree of image-text alignment based on textual prompts. <Prompt Start>"
 SUPPORTED_NEWBIE_OPTIMIZERS = {"AdamW8bit", "AdamW"}
 KNOWN_CONFIG_SECTIONS = (
     "Model",
@@ -164,6 +166,7 @@ class NewbieRuntimeConfig:
     min_bucket_reso: int
     max_bucket_reso: int
     bucket_reso_step: int
+    dataloader_num_workers: int
     train_batch_size: int
     gradient_accumulation_steps: int
     max_train_epochs: int
@@ -175,6 +178,7 @@ class NewbieRuntimeConfig:
     lr_scheduler: str
     lr_warmup_steps: int
     max_grad_norm: float
+    save_every_n_epochs: int
     save_every_n_steps: int
     learning_rate: float
     weight_decay: float
@@ -199,6 +203,7 @@ class NewbieRuntimeConfig:
     newbie_force_cache_only: bool
     newbie_rebuild_cache: bool
     newbie_two_phase_execution: bool
+    gemma3_prompt: str
     newbie_gemma_max_token_length: int
     newbie_clip_max_token_length: int
     newbie_caption_length_bucket_size: int
@@ -238,9 +243,15 @@ class NewbieRuntimeConfig:
             ),
             (
                 "caption_bucketing="
-                f"{self.newbie_caption_length_bucket_size}, "
+                f"{'off' if self.newbie_caption_length_bucket_size <= 0 else self.newbie_caption_length_bucket_size}, "
                 f"gemma_max={self.newbie_gemma_max_token_length}, "
                 f"clip_max={self.newbie_clip_max_token_length}"
+            ),
+            f"dataloader_workers={self.dataloader_num_workers}",
+            (
+                "save="
+                f"every_epochs={self.save_every_n_epochs}, "
+                f"every_steps={self.save_every_n_steps}"
             ),
             (
                 "optimizer="
@@ -349,8 +360,8 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
         str(_lookup_config_value(raw, "adapter_type", "lora_type", default="lora") or "lora").strip().lower() or "lora"
     )
     network_dim = _parse_int(
-        _lookup_config_value(raw, "network_dim", "lora_rank", default=16),
-        16,
+        _lookup_config_value(raw, "network_dim", "lora_rank", default=32),
+        32,
         minimum=1,
     )
     network_alpha = _parse_int(
@@ -359,8 +370,8 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
         minimum=1,
     )
     network_dropout = _parse_float(
-        _lookup_config_value(raw, "network_dropout", "lora_dropout", default=0.0),
-        0.0,
+        _lookup_config_value(raw, "network_dropout", "lora_dropout", default=0.05),
+        0.05,
         minimum=0.0,
     )
     target_modules = _parse_string_list(
@@ -369,12 +380,13 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
     lr_scheduler = (
         str(_lookup_config_value(raw, "lr_scheduler", default="cosine") or "cosine").strip().lower() or "cosine"
     )
-    lr_warmup_steps = _parse_int(_lookup_config_value(raw, "lr_warmup_steps", default=0), 0, minimum=0)
+    lr_warmup_steps = _parse_int(_lookup_config_value(raw, "lr_warmup_steps", default=100), 100, minimum=0)
     max_grad_norm = _parse_float(
         _lookup_config_value(raw, "max_grad_norm", "gradient_clip_norm", default=1.0),
         1.0,
         minimum=0.0,
     )
+    save_every_n_epochs = _parse_int(_lookup_config_value(raw, "save_every_n_epochs", "save_epochs_interval", default=0), 0, minimum=0)
     save_every_n_steps = _parse_int(_lookup_config_value(raw, "save_every_n_steps", default=0), 0, minimum=0)
     lokr_rank = _parse_int(
         _lookup_config_value(raw, "lokr_rank", "lora_rank", default=network_dim),
@@ -426,6 +438,7 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
             64,
             minimum=8,
         ),
+        dataloader_num_workers=_parse_int(_lookup_config_value(raw, "dataloader_num_workers", default=DEFAULT_DATALOADER_WORKERS), DEFAULT_DATALOADER_WORKERS, minimum=0),
         train_batch_size=_parse_int(_lookup_config_value(raw, "train_batch_size", default=1), 1, minimum=1),
         gradient_accumulation_steps=_parse_int(
             _lookup_config_value(raw, "gradient_accumulation_steps", default=1),
@@ -433,8 +446,8 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
             minimum=1,
         ),
         max_train_epochs=_parse_int(
-            _lookup_config_value(raw, "max_train_epochs", "num_epochs", default=10),
-            10,
+            _lookup_config_value(raw, "max_train_epochs", "num_epochs", default=50),
+            50,
             minimum=1,
         ),
         max_train_steps=_parse_int(_lookup_config_value(raw, "max_train_steps", default=0), 0, minimum=0),
@@ -449,10 +462,11 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
         lr_scheduler=lr_scheduler,
         lr_warmup_steps=lr_warmup_steps,
         max_grad_norm=max_grad_norm,
+        save_every_n_epochs=save_every_n_epochs,
         save_every_n_steps=save_every_n_steps,
         learning_rate=_parse_float(_lookup_config_value(raw, "learning_rate", default="1e-4"), 1e-4, minimum=0.0),
-        weight_decay=_parse_float(_lookup_config_value(raw, "weight_decay", default=0.0), 0.0, minimum=0.0),
-        seed=_parse_int(_lookup_config_value(raw, "seed", default=1337), 1337, minimum=0),
+        weight_decay=_parse_float(_lookup_config_value(raw, "weight_decay", default=0.01), 0.01, minimum=0.0),
+        seed=_parse_int(_lookup_config_value(raw, "seed", default=42), 42, minimum=0),
         adapter_type=adapter_type,
         network_dim=network_dim,
         network_alpha=network_alpha,
@@ -474,6 +488,7 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
         newbie_force_cache_only=_parse_bool(_lookup_config_value(raw, "newbie_force_cache_only", default=True), True),
         newbie_rebuild_cache=_parse_bool(_lookup_config_value(raw, "newbie_rebuild_cache", default=False), False),
         newbie_two_phase_execution=_parse_bool(_lookup_config_value(raw, "newbie_two_phase_execution", default=True), True),
+        gemma3_prompt=str(_lookup_config_value(raw, "gemma3_prompt", default=DEFAULT_GEMMA3_PROMPT) or DEFAULT_GEMMA3_PROMPT),
         newbie_gemma_max_token_length=_parse_int(
             _lookup_config_value(raw, "newbie_gemma_max_token_length", default=DEFAULT_GEMMA_MAX_TOKEN_LENGTH),
             DEFAULT_GEMMA_MAX_TOKEN_LENGTH,
@@ -487,7 +502,7 @@ def load_newbie_runtime_config(config_path: str | Path) -> tuple[NewbieRuntimeCo
         newbie_caption_length_bucket_size=_parse_int(
             _lookup_config_value(raw, "newbie_caption_length_bucket_size", default=DEFAULT_CAPTION_BUCKET_SIZE),
             DEFAULT_CAPTION_BUCKET_SIZE,
-            minimum=1,
+            minimum=0,
         ),
         blocks_to_swap=_parse_int(_lookup_config_value(raw, "blocks_to_swap", default=0), 0, minimum=0),
         newbie_auto_swap_release=_parse_bool(_lookup_config_value(raw, "newbie_auto_swap_release", default=False), False),

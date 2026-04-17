@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-DEFAULT_ASPECT_RATIOS = ((1, 1), (3, 4), (4, 3), (2, 3), (3, 2), (9, 16), (16, 9))
+DEFAULT_ASPECT_RATIOS = ((1, 1), (3, 4), (4, 3), (9, 16), (16, 9))
 REPEAT_DIR_PATTERN = re.compile(r"^(?P<count>\d+)_")
 
 
@@ -108,7 +108,7 @@ def assign_resolution_bucket(
 
 
 def caption_bucket_key(token_length: int, bucket_size: int) -> int:
-    if token_length <= 0:
+    if token_length <= 0 or bucket_size <= 0:
         return 0
     return int(math.ceil(token_length / float(bucket_size)) * bucket_size)
 

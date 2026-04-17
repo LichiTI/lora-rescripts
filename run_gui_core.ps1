@@ -1,6 +1,12 @@
 ﻿$Env:HF_HOME = "huggingface"
 $Env:PYTHONUTF8 = "1"
 $Env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+if (Test-Path Env:PYTHONHOME) {
+    Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+}
+if (Test-Path Env:PYTHONPATH) {
+    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+}
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $mirrorHelperPath = Join-Path $repoRoot "tools\runtime\mirror_env.ps1"
@@ -133,7 +139,7 @@ $rocmAmdRecommendedGraphicsDriverVersion = "26.2.2"
 $intelXpuRecommendedGraphicsDriverPackageVersion = "32.0.101.6127_101.6044"
 $intelXpuRecommendedGraphicsDriverDiscreteVersion = "32.0.101.6127"
 $intelXpuRecommendedGraphicsDriverIntegratedVersion = "32.0.101.6044"
-$baseRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers")
+$baseRuntimeModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "tensorboard", "pkg_resources")
 $mainRuntimeModules = @($baseRuntimeModules + @("lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer"))
 $flashAttentionRuntimeModules = @($mainRuntimeModules + @("flash_attn"))
 $intelRuntimeModules = @($baseRuntimeModules + @("lion_pytorch", "cv2"))

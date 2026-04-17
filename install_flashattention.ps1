@@ -23,7 +23,7 @@ $flashAttentionRuntimeDirName = $flashAttentionRuntimeInfo.DirectoryName
 $flashAttentionRuntimeDir = $flashAttentionRuntimeInfo.DirectoryPath
 $flashAttentionPython = Join-Path $flashAttentionRuntimeDir "python.exe"
 $flashAttentionMarker = Join-Path $flashAttentionRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "flash_attn")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard", "pkg_resources", "flash_attn")
 
 function Test-PipReady {
     param (
@@ -400,6 +400,116 @@ function Resolve-FlashAttentionWheel {
     return "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/$ReleaseTag/$encodedFileName"
 }
 
+function Get-GitHubMirrorCandidates {
+    $candidates = @()
+
+    $customMirror = ([string]$Env:MIKAZUKI_GITHUB_MIRROR_BASE).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($customMirror)) {
+        if (-not $customMirror.EndsWith('/')) {
+            $customMirror += '/'
+        }
+        $candidates += $customMirror
+    }
+
+    $defaultMirror = 'https://hub.gitmirror.com/https://github.com/'
+    if (-not ($candidates -contains $defaultMirror)) {
+        $candidates += $defaultMirror
+    }
+
+    return @($candidates)
+}
+
+function Get-FlashAttentionWheelUrlCandidates {
+    param(
+        [string]$WheelUrl
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WheelUrl)) {
+        return @()
+    }
+
+    if (-not ($WheelUrl -match '^https?://')) {
+        return @($WheelUrl)
+    }
+
+    $candidates = @()
+    $isGitHubReleaseUrl = $WheelUrl.StartsWith('https://github.com/', [System.StringComparison]::OrdinalIgnoreCase)
+
+    if ($isGitHubReleaseUrl) {
+        $mirrorBases = Get-GitHubMirrorCandidates
+        if (Test-MikazukiChinaMirrorMode) {
+            foreach ($mirrorBase in $mirrorBases) {
+                $candidates += ($mirrorBase + $WheelUrl)
+            }
+            $candidates += $WheelUrl
+        }
+        else {
+            $candidates += $WheelUrl
+            foreach ($mirrorBase in $mirrorBases) {
+                $candidates += ($mirrorBase + $WheelUrl)
+            }
+        }
+    }
+    else {
+        $candidates += $WheelUrl
+    }
+
+    return @($candidates | Select-Object -Unique)
+}
+
+function Download-FlashAttentionWheel {
+    param(
+        [string]$WheelUrl
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WheelUrl) -or -not ($WheelUrl -match '^https?://')) {
+        throw "Download-FlashAttentionWheel expects an HTTP(S) URL."
+    }
+
+    $downloadDir = Join-Path $repoRoot "flashattention-wheels"
+    if (-not (Test-Path $downloadDir)) {
+        New-Item -ItemType Directory -Path $downloadDir | Out-Null
+    }
+
+    $fileName = [System.IO.Path]::GetFileName(([System.Uri]$WheelUrl).AbsolutePath)
+    if ([string]::IsNullOrWhiteSpace($fileName)) {
+        throw "Could not infer wheel filename from URL: $WheelUrl"
+    }
+
+    $fileName = [System.Uri]::UnescapeDataString($fileName)
+    $downloadPath = Join-Path $downloadDir $fileName
+
+    foreach ($candidateUrl in (Get-FlashAttentionWheelUrlCandidates -WheelUrl $WheelUrl)) {
+        Write-Host -ForegroundColor Yellow "Trying FlashAttention wheel download: $candidateUrl"
+        $previousProgressPreference = $global:ProgressPreference
+        try {
+            $global:ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $candidateUrl -OutFile $downloadPath -TimeoutSec 120 -UseBasicParsing
+            if ((Test-Path $downloadPath) -and ((Get-Item -LiteralPath $downloadPath).Length -gt 0)) {
+                return $downloadPath
+            }
+        }
+        catch {
+            Write-Host -ForegroundColor Yellow ("FlashAttention wheel download attempt failed: {0}" -f $_.Exception.Message)
+        }
+        finally {
+            $global:ProgressPreference = $previousProgressPreference
+        }
+
+        Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+    }
+
+    throw @"
+Failed to download the FlashAttention wheel from all candidate URLs.
+
+You can also download the wheel manually and place it in one of these locations:
+- $repoRoot
+- $(Join-Path $repoRoot "flashattention-wheels")
+- $(Join-Path $repoRoot "flashattention_wheels")
+- $(Join-Path $repoRoot "wheels")
+"@
+}
+
 if (-not (Test-Path $flashAttentionPython)) {
     throw @"
 FlashAttention portable Python was not found.
@@ -454,6 +564,10 @@ Invoke-Step "Installing project dependencies into $flashAttentionRuntimeDirName.
     & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
 }
 
+Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard in $flashAttentionRuntimeDirName..." {
+    & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
+}
+
 if (-not (Test-ModulesReady -PythonExe $flashAttentionPython -Modules @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm"))) {
     throw "Project dependencies did not finish installing correctly in $flashAttentionRuntimeDirName. One or more required runtime modules are still missing."
 }
@@ -464,15 +578,12 @@ Invoke-OptionalStep "Removing any existing flash-attn package..." {
 
 if ($resolvedWheel -match '^https?://') {
     Write-Host -ForegroundColor Yellow "Using FlashAttention wheel URL: $resolvedWheel"
-    Invoke-Step "Installing FlashAttention wheel from URL..." {
-        & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
-    }
+    $resolvedWheel = Download-FlashAttentionWheel -WheelUrl $resolvedWheel
 }
-else {
-    Write-Host -ForegroundColor Yellow "Using FlashAttention wheel: $resolvedWheel"
-    Invoke-Step "Installing FlashAttention wheel from local file..." {
-        & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
-    }
+
+Write-Host -ForegroundColor Yellow "Using FlashAttention wheel: $resolvedWheel"
+Invoke-Step "Installing FlashAttention wheel from local file..." {
+    & $flashAttentionPython -m pip install --upgrade --no-warn-script-location --no-deps $resolvedWheel
 }
 
 if (-not (Test-ModulesReady -PythonExe $flashAttentionPython -Modules $mainRequiredModules)) {

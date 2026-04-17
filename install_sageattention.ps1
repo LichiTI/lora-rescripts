@@ -30,7 +30,7 @@ $sageAttentionRuntimeDirName = $sageAttentionRuntimeInfo.DirectoryName
 $sageAttentionRuntimeDir = $sageAttentionRuntimeInfo.DirectoryPath
 $sageAttentionPython = Join-Path $sageAttentionRuntimeDir "python.exe"
 $sageAttentionMarker = Join-Path $sageAttentionRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard", "pkg_resources")
 
 function Test-PipReady {
     param (
@@ -675,6 +675,10 @@ else {
     Invoke-Step "Installing project dependencies into $sageAttentionRuntimeDirName..." {
         & $sageAttentionPython -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
     }
+}
+
+Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard in $sageAttentionRuntimeDirName..." {
+    & $sageAttentionPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
 }
 
 if (-not (Test-ModulesReady -PythonExe $sageAttentionPython -Modules $mainRequiredModules)) {

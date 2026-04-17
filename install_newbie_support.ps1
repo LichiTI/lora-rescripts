@@ -1,10 +1,10 @@
 ﻿# Keep this file encoded as UTF-8 with BOM for Windows PowerShell 5 compatibility.
-$ErrorActionPreference = "Stop"
-
 param(
     [string]$RuntimeName = "",
     [switch]$Force
 )
+
+$ErrorActionPreference = "Stop"
 
 $Env:HF_HOME = "huggingface"
 $Env:PYTHONUTF8 = "1"
@@ -291,7 +291,7 @@ function Get-InstalledRuntimeTargets {
             }) | Out-Null
     }
 
-    return @($targets)
+    return [object[]]($targets.ToArray())
 }
 
 function Select-NewbieRuntimeTarget {
@@ -360,13 +360,16 @@ function Select-NewbieRuntimeTarget {
     }
 }
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Install Newbie Runtime Support" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host
-Write-Host "This script only installs Newbie support packages into an existing runtime." -ForegroundColor DarkGray
-Write-Host "它不会新建专用 Newbie Python，只会给已完成基础安装的运行时补装 Newbie 支持。" -ForegroundColor DarkGray
-Write-Host
+$suppressHeaderFromLauncher = ([string]$Env:LULYNX_SUPPRESS_NEWBIE_SUPPORT_PS_HEADER).Trim() -eq "1"
+if (-not $suppressHeaderFromLauncher) {
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Install Newbie Runtime Support" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host
+    Write-Host "This script only installs Newbie support packages into an existing runtime." -ForegroundColor DarkGray
+    Write-Host "它不会新建专用 Newbie Python，只会给已完成基础安装的运行时补装 Newbie 支持。" -ForegroundColor DarkGray
+    Write-Host
+}
 
 $targets = Get-InstalledRuntimeTargets
 $selectedTarget = Select-NewbieRuntimeTarget -Targets $targets -RequestedRuntimeName $RuntimeName

@@ -25,7 +25,7 @@ $blackwellRuntimeDirName = $blackwellRuntimeInfo.DirectoryName
 $blackwellRuntimeDir = $blackwellRuntimeInfo.DirectoryPath
 $blackwellPython = Join-Path $blackwellRuntimeDir "python.exe"
 $blackwellMarker = Join-Path $blackwellRuntimeDir ".deps_installed"
-$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer")
+$mainRequiredModules = @("accelerate", "torch", "fastapi", "toml", "transformers", "diffusers", "peft", "torchdiffeq", "timm", "lion_pytorch", "dadaptation", "schedulefree", "prodigyopt", "prodigyplus", "pytorch_optimizer", "tensorboard", "pkg_resources")
 
 function Test-PipReady {
     param (
@@ -508,6 +508,10 @@ if ($optionalTorchaudioArgs) {
 
 Invoke-Step "Installing project dependencies into $blackwellRuntimeDirName..." {
     & $blackwellPython -m pip install --upgrade --no-warn-script-location --prefer-binary -r requirements.txt
+}
+
+Invoke-Step "Re-enabling pkg_resources compatibility for TensorBoard in $blackwellRuntimeDirName..." {
+    & $blackwellPython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
 }
 
 if (-not (Test-ModulesReady -PythonExe $blackwellPython -Modules $mainRequiredModules)) {

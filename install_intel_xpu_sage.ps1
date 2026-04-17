@@ -25,6 +25,8 @@ $mainRequiredModules = @(
     "diffusers",
     "lion_pytorch",
     "cv2",
+    "tensorboard",
+    "pkg_resources",
     "sageattention"
 )
 $incompatiblePackages = @(
@@ -312,6 +314,10 @@ finally {
 
 Invoke-Step -Message "Installing SageAttention 1.0.6 / 安装 SageAttention 1.0.6" -Action {
     & $runtimePython -m pip install --upgrade --no-warn-script-location sageattention==1.0.6
+}
+
+Invoke-Step -Message "Re-enabling pkg_resources compatibility for TensorBoard / 修复 TensorBoard 对 pkg_resources 的兼容性" -Action {
+    & $runtimePython -m pip install --upgrade --no-warn-script-location --prefer-binary "setuptools<81"
 }
 
 if (-not (Test-ModulesReady -PythonExe $runtimePython -Modules $mainRequiredModules)) {

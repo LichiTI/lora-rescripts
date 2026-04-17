@@ -56,6 +56,21 @@ class NewbieCachedTrainer:
     def __init__(self, config: NewbieRuntimeConfig) -> None:
         self.config = config
 
+    def _should_enable_auto_memory_runtime(self, device: torch.device) -> bool:
+        if device.type != 'cuda':
+            return False
+        if not bool(getattr(self.config, 'newbie_safe_fallback', False)):
+            return False
+        total_vram_gb = float(torch.cuda.get_device_properties(device).total_memory) / float(1024 ** 3)
+        return total_vram_gb <= 16.5 and self.config.model_resolution >= 1024
+
+    def _should_use_optimized_runtime(self, device: torch.device) -> bool:
+        explicit_runtime_features = (
+            int(getattr(self.config, 'blocks_to_swap', 0) or 0) > 0
+            or bool(getattr(self.config, 'cpu_offload_checkpointing', False))
+        )
+        return explicit_runtime_features or self._should_enable_auto_memory_runtime(device)
+
     def _build_cached_dataloader(self):
         dataset_report = build_newbie_dataset_report(
             train_data_dir=self.config.train_data_dir,
@@ -80,12 +95,15 @@ class NewbieCachedTrainer:
             shuffle=True,
             seed=self.config.seed,
         )
+        dataloader_workers = max(0, int(getattr(self.config, "dataloader_num_workers", 0) or 0))
         dataloader = DataLoader(
             dataset,
             batch_sampler=sampler,
             collate_fn=newbie_cached_collate,
-            num_workers=0,
+            num_workers=dataloader_workers,
             pin_memory=torch.cuda.is_available(),
+            persistent_workers=True if dataloader_workers > 0 else False,
+            prefetch_factor=2 if dataloader_workers > 0 else None,
         )
         return dataset_report, ready_records, dataset, sampler, dataloader
 
@@ -118,13 +136,19 @@ class NewbieCachedTrainer:
             trust_remote_code=self.config.trust_remote_code,
             load_weights_to_cpu=True,
         )
-        model = apply_newbie_memory_runtime_patch(model)
         model = attach_newbie_adapter(model, self.config)
 
-        fallback_notes = maybe_apply_newbie_safe_fallback(self.config, model, accelerator.device)
-        for note in fallback_notes:
+        use_optimized_runtime = self._should_use_optimized_runtime(accelerator.device)
+        if use_optimized_runtime:
+            model = apply_newbie_memory_runtime_patch(model)
+            fallback_notes = maybe_apply_newbie_safe_fallback(self.config, model, accelerator.device)
+            for note in fallback_notes:
+                if accelerator.is_main_process:
+                    print(note)
             if accelerator.is_main_process:
-                print(note)
+                print('[newbie-train] using optimized runtime path (memory patch enabled).')
+        elif accelerator.is_main_process:
+            print('[newbie-train] using official-compatible runtime path (custom memory patch disabled).')
 
         if getattr(self.config, 'blocks_to_swap', 0) and getattr(self.config, 'cpu_offload_checkpointing', False):
             raise NewbieTrainRuntimeError('blocks_to_swap 不能与 cpu_offload_checkpointing 同时启用。')
@@ -145,7 +169,7 @@ class NewbieCachedTrainer:
         optimizer = create_newbie_optimizer(model, self.config)
         scheduler_bundle = create_newbie_scheduler(optimizer, self.config, optimizer_steps_per_epoch)
 
-        is_swapping_blocks = int(getattr(self.config, 'blocks_to_swap', 0) or 0) > 0
+        is_swapping_blocks = use_optimized_runtime and int(getattr(self.config, 'blocks_to_swap', 0) or 0) > 0
         if is_swapping_blocks:
             model = accelerator.prepare(model, device_placement=[False])
             optimizer, dataloader, scheduler = accelerator.prepare(
@@ -190,7 +214,9 @@ class NewbieCachedTrainer:
         completed_epochs = 0
         max_train_steps = scheduler_bundle.total_training_steps
         max_train_epochs = self.config.max_train_epochs if self.config.max_train_epochs > 0 else 1
-        save_every = max(0, int(getattr(self.config, 'save_every_n_steps', 0) or 0))
+        save_every_steps = max(0, int(getattr(self.config, 'save_every_n_steps', 0) or 0))
+        save_every_epochs = max(0, int(getattr(self.config, 'save_every_n_epochs', 0) or 0))
+        last_periodic_save_step = -1
         start_epoch = min(max_train_epochs - 1, start_step // optimizer_steps_per_epoch) if start_step > 0 else 0
         resume_micro_step = 0
         if start_step > 0:
@@ -200,6 +226,32 @@ class NewbieCachedTrainer:
                     f"[newbie-train] resume detected | start_step={start_step} | "
                     f"start_epoch={start_epoch + 1} | skip_micro_batches={resume_micro_step}"
                 )
+
+        def _save_periodic_artifacts(step: int, reason: str, epoch_index: int) -> None:
+            nonlocal last_periodic_save_step
+            if not accelerator.is_main_process:
+                return
+            if step <= 0 or step == last_periodic_save_step:
+                return
+            checkpoint_path = save_newbie_checkpoint(
+                self.config.output_dir,
+                accelerator.unwrap_model(model),
+                optimizer,
+                scheduler,
+                step,
+            )
+            adapter_path = save_newbie_adapter(
+                self.config.output_dir,
+                self.config.output_name,
+                accelerator.unwrap_model(model),
+                step,
+            )
+            last_periodic_save_step = step
+            print(
+                f"[newbie-train] periodic save ({reason}) | "
+                f"epoch={epoch_index + 1}/{max_train_epochs} | global_step={step} | "
+                f"checkpoint={checkpoint_path} | adapter={adapter_path}"
+            )
 
         progress_bar = None
         if accelerator.is_main_process:
@@ -228,7 +280,7 @@ class NewbieCachedTrainer:
                 batch_retry = 0
                 while True:
                     try:
-                        if getattr(unwrapped_model, 'blocks_to_swap', 0):
+                        if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
                             unwrapped_model.prepare_block_swap_before_forward()
 
                         with accelerator.accumulate(model):
@@ -247,7 +299,7 @@ class NewbieCachedTrainer:
                             )
                             loss = loss_dict['loss'].mean()
                             accelerator.backward(loss)
-                            if getattr(unwrapped_model, 'blocks_to_swap', 0):
+                            if is_swapping_blocks and getattr(unwrapped_model, 'blocks_to_swap', 0):
                                 move_newbie_trainable_params_to_device(unwrapped_model, accelerator.device)
                             if accelerator.sync_gradients and getattr(self.config, 'max_grad_norm', 1.0) not in (0, 0.0, None):
                                 accelerator.clip_grad_norm_(model.parameters(), float(getattr(self.config, 'max_grad_norm', 1.0)))
@@ -256,7 +308,13 @@ class NewbieCachedTrainer:
                             optimizer.zero_grad(set_to_none=True)
                         break
                     except RuntimeError as exc:
-                        if not self._is_cuda_oom_error(exc) or not bool(getattr(self.config, 'newbie_safe_fallback', False)) or accelerator.device.type != 'cuda' or batch_retry >= 2:
+                        if (
+                            not use_optimized_runtime
+                            or not self._is_cuda_oom_error(exc)
+                            or not bool(getattr(self.config, 'newbie_safe_fallback', False))
+                            or accelerator.device.type != 'cuda'
+                            or batch_retry >= 2
+                        ):
                             raise
 
                         optimizer.zero_grad(set_to_none=True)
@@ -321,9 +379,8 @@ class NewbieCachedTrainer:
                         self.config.blocks_to_swap = adaptive_controller.current_blocks
                         if adaptive_note and accelerator.is_main_process:
                             print(adaptive_note)
-                    if save_every > 0 and global_step % save_every == 0 and accelerator.is_main_process:
-                        save_newbie_checkpoint(self.config.output_dir, accelerator.unwrap_model(model), optimizer, scheduler, global_step)
-                        save_newbie_adapter(self.config.output_dir, self.config.output_name, accelerator.unwrap_model(model), global_step)
+                    if save_every_steps > 0 and global_step % save_every_steps == 0:
+                        _save_periodic_artifacts(global_step, f"every_{save_every_steps}_steps", epoch)
 
             resume_micro_step = 0
             completed_epochs = epoch + 1
@@ -335,6 +392,10 @@ class NewbieCachedTrainer:
                     f"epoch_time={epoch_seconds:.2f}s | cache_ready={len(ready_records)}/{dataset_report.total_images} | "
                     f"blocks_to_swap={getattr(unwrapped_model, 'blocks_to_swap', 0)} | cpu_offload={'on' if getattr(self.config, 'cpu_offload_checkpointing', False) else 'off'}"
                 )
+            if save_every_epochs == 0:
+                _save_periodic_artifacts(global_step, "every_epoch", epoch)
+            elif completed_epochs % save_every_epochs == 0:
+                _save_periodic_artifacts(global_step, f"every_{save_every_epochs}_epochs", epoch)
             if global_step >= max_train_steps:
                 break
 
